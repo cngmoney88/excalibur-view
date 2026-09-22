@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/hyperview", "crates/plugin-api", "crates/release", "crates/server", "crates/takeoff", "crates/ui"]
+# Plugins are built on their own, for WebAssembly, and are never part of the
+# program: an office's own tools stay that office's.
+# The chest generator is not part of the program either: the trade chests are
+# sold, so neither the data nor the code that builds them is published.
+exclude = ["plugins", "private"]
+
+[workspace.package]
+version = "0.6.3"
+edition = "2021"
+rust-version = "1.82"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+# Unwinding rather than aborting. A little larger and a shade slower, and worth
+# both: the program tries more than one renderer at start-up and treats one that
+# blows up as a renderer to stop using. With `abort`, that attempt is not
+# something the program can survive — the process is simply gone, and somebody
+# is left with a crash box for a program that would have run perfectly on its
+# second choice.
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+# No debug info. The tests here are about behaviour — does slip-sheeting put the
+# right sheet in the right place — and they are read through their names and
+# their assertions rather than through a debugger. Carrying symbols for every
+# dependency costs several gigabytes of build output and buys nothing that is
+# used.
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 3
+
+# The plugin interpreter is the one place a test's speed depends on how well
+# the interpreter itself is compiled.
+[profile.dev.package.wasmi]
+opt-level = 3
+[profile.dev.package.wasmi_core]
+opt-level = 3
+[profile.dev.package.wasmi_ir]
+opt-level = 3

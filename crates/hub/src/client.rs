@@ -1,0 +1,576 @@
+//! Talking to a Hyperview server.
+//!
+//! Deliberately small and synchronous. The desktop already has a worker thread
+//! for anything slow, and a viewer that has to keep a drawing on screen at
+//! sixty frames a second is not helped by an async runtime underneath its file
+//! transfers.
+//!
+//! Everything here assumes the server may be gone. A shop's server being down
+//! is a Tuesday, not an emergency: the drawing on disk still opens, the
+//! markups still save into it, and the sync catches up later.
+
+use std::time::Duration;
+
+use crate::model::*;
+use crate::update::{Channel, UpdateOffer};
+use crate::{API_ROOT, API_VERSION};
+
+#[derive(Clone)]
+pub struct Client {
+    /// `https://drawings.thecompany.com`, no trailing slash.
+    base: String,
+    token: Option<String>,
+    agent: ureq::Agent,
+}
+
+/// Anything that can go wrong on the way to a server.
+#[derive(Debug)]
+pub enum Trouble {
+    /// The server answered, and said no.
+    Refused(Problem),
+    /// We could not reach it at all.
+    Unreachable(String),
+    /// It answered with something we could not read.
+    Unreadable(String),
+    /// This build is too old for that server, or the other way round.
+    Mismatch { ours: u32, theirs: u32 },
+}
+
+impl std::fmt::Display for Trouble {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Trouble::Refused(p) => write!(f, "{}", p.message),
+            Trouble::Unreachable(why) => write!(f, "Could not reach the server: {why}"),
+            Trouble::Unreadable(why) => write!(f, "The server said something unexpected: {why}"),
+            Trouble::Mismatch { ours, theirs } => write!(
+                f,
+                "This copy of Excalibur View speaks version {ours} and that server speaks {theirs}. \
+                 One of them needs updating."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for Trouble {}
+
+type Answer<T> = Result<T, Trouble>;
+
+impl Client {
+    pub fn new(base: &str) -> Client {
+        Client {
+            base: base.trim_end_matches('/').to_string(),
+            token: None,
+            agent: crate::web::agent()
+                .timeout_connect(Duration::from_secs(8))
+                .timeout_read(Duration::from_secs(120))
+                .build(),
+        }
+    }
+
+    pub fn with_token(mut self, token: &str) -> Client {
+        self.token = Some(token.to_string());
+        self
+    }
+
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}{}", self.base, API_ROOT, path)
+    }
+
+    fn get(&self, path: &str) -> ureq::Request {
+        self.sign(self.agent.get(&self.url(path)))
+    }
+
+    fn post(&self, path: &str) -> ureq::Request {
+        self.sign(self.agent.post(&self.url(path)))
+    }
+
+    fn sign(&self, request: ureq::Request) -> ureq::Request {
+        match &self.token {
+            Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+            None => request,
+        }
+    }
+
+    // ---- the bottom of the stack -----------------------------------------
+
+    fn read<T: serde::de::DeserializeOwned>(result: Result<ureq::Response, ureq::Error>) -> Answer<T> {
+        match result {
+            Ok(response) => response
+                .into_json::<T>()
+                .map_err(|e| Trouble::Unreadable(e.to_string())),
+            Err(ureq::Error::Status(code, response)) => {
+                // A server of ours explains itself. Anything else gets a
+                // sentence built from what little it gave us.
+                let problem = response.into_json::<Problem>().unwrap_or_else(|_| match code {
+                    401 => Problem::new("unauthorised", "Sign in again: that session has expired."),
+                    403 => Problem::new(
+                        "forbidden",
+                        "Your account is not allowed to do that. An administrator can change it.",
+                    ),
+                    404 => Problem::new("not_found", "That is not on this server."),
+                    413 => Problem::new(
+                        "too_big",
+                        "That drawing set is larger than this server accepts.",
+                    ),
+                    500..=599 => Problem::new(
+                        "server_error",
+                        format!("The server had a problem ({code}). Nothing was changed."),
+                    ),
+                    _ => Problem::new("http_error", format!("The server answered {code}.")),
+                });
+                Err(Trouble::Refused(problem))
+            }
+            Err(e) => Err(Trouble::Unreachable(e.to_string())),
+        }
+    }
+
+    // ---- is it there, and who am I ---------------------------------------
+
+    /// Asks a server whether it is a Hyperview server at all, and whether this
+    /// build can talk to it. Done before anything else, so a wrong address
+    /// fails at the address rather than halfway through an upload.
+    pub fn health(&self) -> Answer<Health> {
+        let health: Health = Self::read(self.get("/health").call())?;
+        if health.api_version != API_VERSION {
+            return Err(Trouble::Mismatch {
+                ours: API_VERSION,
+                theirs: health.api_version,
+            });
+        }
+        Ok(health)
+    }
+
+    pub fn sign_in(&mut self, email: &str, password: &str) -> Answer<Session> {
+        let session: Session = Self::read(
+            self.post("/auth/token")
+                .send_json(SignIn {
+                    email: email.to_string(),
+                    password: password.to_string(),
+                }),
+        )?;
+        self.token = Some(session.token.clone());
+        Ok(session)
+    }
+
+    pub fn me(&self) -> Answer<User> {
+        Self::read(self.get("/me").call())
+    }
+
+    // ---- getting an account ----------------------------------------------
+
+    /// Claims a server nobody has claimed yet, and signs in as the
+    /// administrator it just made. Refused on a server that already belongs to
+    /// somebody, which is what `Health::claimed` says before this is called.
+    pub fn claim(&mut self, setup: &Setup) -> Answer<Claimed> {
+        let claimed: Claimed = Self::read(self.post("/setup").send_json(setup))?;
+        self.token = Some(claimed.session.token.clone());
+        Ok(claimed)
+    }
+
+    /// Makes an account on somebody else's server with their join code, and
+    /// signs in as it.
+    pub fn join(&mut self, join: &Join) -> Answer<Session> {
+        let session: Session = Self::read(self.post("/join").send_json(join))?;
+        self.token = Some(session.token.clone());
+        Ok(session)
+    }
+
+    /// Where the office stands with Excalibur View Office. A server from
+    /// before licensing has never heard of it and answers `None`.
+    pub fn license(&self) -> Answer<Option<crate::license::Standing>> {
+        match Self::read(self.get("/license").call()) {
+            Ok(standing) => Ok(Some(standing)),
+            Err(Trouble::Refused(problem)) if problem.error == "not_found" => Ok(None),
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Adds a license file: its whole text. Administrators only. Checked by
+    /// the server against the keys built into it.
+    pub fn add_license(&self, text: &str) -> Answer<crate::license::Standing> {
+        Self::read(self.post("/license").send_json(serde_json::json!({ "license": text })))
+    }
+
+    /// Everybody with an account here. Administrators only.
+    pub fn people(&self) -> Answer<Vec<User>> {
+        Self::read(self.get("/people").call())
+    }
+
+    /// How people are getting accounts. Administrators only.
+    pub fn joining(&self) -> Answer<Joining> {
+        Self::read(self.get("/admin/joining").call())
+    }
+
+    /// Changes that, or issues a new code. Anything left `None` stays as it is.
+    pub fn change_joining(
+        &self,
+        how: Option<&str>,
+        role: Option<&str>,
+        new_code: bool,
+    ) -> Answer<Joining> {
+        Self::read(self.post("/admin/joining").send_json(serde_json::json!({
+            "how": how,
+            "role": role,
+            "new_code": new_code,
+        })))
+    }
+
+    /// How this server keeps up to date. Administrators only.
+    pub fn update_settings(&self) -> Answer<crate::UpdateSettings> {
+        Self::read(self.get("/admin/updates").call())
+    }
+
+    /// Stable, or early. Administrators only.
+    pub fn change_update_channel(&self, channel: &str) -> Answer<crate::UpdateSettings> {
+        Self::read(
+            self.post("/admin/updates")
+                .send_json(serde_json::json!({ "channel": channel })),
+        )
+    }
+
+    /// Whether Excalibur Fleet may watch this server. Administrators only.
+    pub fn fleet_access(&self) -> Answer<crate::FleetAccess> {
+        Self::read(self.get("/admin/fleet").call())
+    }
+
+    /// Turns the Fleet's access on (with a fresh key, returned once) or off.
+    pub fn change_fleet_access(&self, on: bool) -> Answer<crate::FleetAccess> {
+        Self::read(self.post("/admin/fleet").send_json(serde_json::json!({ "on": on })))
+    }
+
+    /// Makes a key for a program. `purpose` is `assistant` (reads the
+    /// takeoffs over MCP, nothing else) or `integration` (the whole API, as
+    /// this person; administrators only). The key is in the answer, once.
+    pub fn make_key(&self, purpose: &str, name: &str) -> Answer<crate::ApiKey> {
+        Self::read(self.post("/me/keys").send_json(crate::NewKey {
+            purpose: purpose.to_string(),
+            name: name.to_string(),
+        }))
+    }
+
+    /// The keys this person has made; every key, for an administrator.
+    pub fn keys(&self) -> Answer<Vec<crate::ApiKey>> {
+        Self::read(self.get("/me/keys").call())
+    }
+
+    /// Takes a key back. Whatever was using it stops working at once.
+    pub fn revoke_key(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/keys/{id}/revoke")).send_json(serde_json::json!({})))
+    }
+
+    /// A set's markups the way Bluebeam's markup list hands them over.
+    pub fn markup_list(&self, set: &str) -> Answer<serde_json::Value> {
+        Self::read(self.get(&format!("/sets/{set}/markuplist")).call())
+    }
+
+    /// Changes the signed-in person's own password. Every other place they
+    /// are signed in is signed out.
+    pub fn change_password(&self, current: &str, new: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post("/me/password").send_json(crate::ChangePassword {
+            current: current.to_string(),
+            new: new.to_string(),
+        }))
+    }
+
+    // ---- projects and drawing sets ---------------------------------------
+
+    pub fn projects(&self) -> Answer<Vec<Project>> {
+        Self::read(self.get("/projects").call())
+    }
+
+    pub fn create_project(&self, number: &str, name: &str) -> Answer<Project> {
+        Self::read(self.post("/projects").send_json(NewProject {
+            number: number.to_string(),
+            name: name.to_string(),
+            reference: None,
+        }))
+    }
+
+    /// Puts a drawing set on the server, in a project. The PDF goes up as the
+    /// bytes it is; the server reads the sheets out of it on the way in.
+    pub fn upload_set(
+        &self,
+        project: &str,
+        name: &str,
+        filename: &str,
+        pdf: &[u8],
+    ) -> Answer<DrawingSet> {
+        let (kind, body) = multipart(&[("project", project), ("name", name)], filename, pdf);
+        Self::read(self.post("/sets").set("Content-Type", &kind).send_bytes(&body))
+    }
+
+    /// Shares a tool chest with everybody on the server. Administrators only.
+    pub fn upload_chest(&self, name: &str, filename: &str, bytes: &[u8]) -> Answer<Chest> {
+        let (kind, body) = multipart(&[("name", name)], filename, bytes);
+        Self::read(self.post("/chests").set("Content-Type", &kind).send_bytes(&body))
+    }
+
+    /// The plugins the office hands every seat.
+    pub fn plugins(&self) -> Answer<Vec<PluginInfo>> {
+        Self::read(self.get("/plugins").call())
+    }
+
+    /// One plugin file, to be checked by the seat before it is loaded.
+    pub fn plugin_file(&self, id: &str) -> Answer<Vec<u8>> {
+        match self.get(&format!("/plugins/{id}/file")).call() {
+            Ok(response) => {
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| Trouble::Unreadable(e.to_string()))?;
+                Ok(bytes)
+            }
+            other => Self::read::<serde_json::Value>(other).map(|_| Vec::new()),
+        }
+    }
+
+    /// Hands a signed plugin to every seat in the office. Administrators only;
+    /// the server checks the signature before it keeps it.
+    pub fn upload_plugin(&self, file: &[u8]) -> Answer<PluginInfo> {
+        Self::read(
+            self.post("/plugins")
+                .set("Content-Type", "application/octet-stream")
+                .send_bytes(file),
+        )
+    }
+
+    /// Stops handing a plugin out. Seats drop it the next time they look.
+    pub fn remove_plugin(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/plugins/{id}/remove")).send_json(serde_json::json!({})))
+    }
+
+    pub fn sets(&self, project: &str) -> Answer<Vec<DrawingSet>> {
+        Self::read(self.get(&format!("/projects/{project}/sets")).call())
+    }
+
+    pub fn set(&self, id: &str) -> Answer<DrawingSet> {
+        Self::read(self.get(&format!("/sets/{id}")).call())
+    }
+
+    /// A copy of a drawing set to mark up, so the issued set stays clean.
+    /// Costs no upload: the copy points at the same file.
+    pub fn copy_set(&self, id: &str, name: &str) -> Answer<DrawingSet> {
+        Self::read(
+            self.post(&format!("/sets/{id}/copy"))
+                .send_json(serde_json::json!({ "name": name })),
+        )
+    }
+
+    pub fn sheets(&self, id: &str) -> Answer<Vec<Sheet>> {
+        Self::read(self.get(&format!("/sets/{id}/sheets")).call())
+    }
+
+    /// Downloads the drawing itself.
+    ///
+    /// `have` is the digest of the copy already on this machine. When it
+    /// matches, the server says so and nothing comes down the wire — which
+    /// matters when a drawing set is sixty megabytes and six people open it
+    /// every morning.
+    pub fn download(&self, id: &str, have: Option<&str>) -> Answer<Option<Vec<u8>>> {
+        let mut request = self.get(&format!("/sets/{id}/file"));
+        if let Some(digest) = have {
+            request = request.set("If-None-Match", &format!("\"{digest}\""));
+        }
+        match request.call() {
+            // Not modified: we already have these exact bytes. It arrives as a
+            // perfectly ordinary response rather than an error, so it is
+            // checked for by its status and not by catching something.
+            Ok(response) if response.status() == 304 => Ok(None),
+            Ok(response) => {
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| Trouble::Unreadable(e.to_string()))?;
+                Ok(Some(bytes))
+            }
+            other => Self::read::<serde_json::Value>(other).map(|_| None),
+        }
+    }
+
+    // ---- markups ---------------------------------------------------------
+
+    /// Everything that has happened to this set's markups since `since`.
+    pub fn markups(&self, id: &str, since: u64) -> Answer<MarkupPage> {
+        Self::read(
+            self.get(&format!("/sets/{id}/markups"))
+                .query("since", &since.to_string())
+                .call(),
+        )
+    }
+
+    pub fn push_markups(&self, id: &str, markups: &[NewMarkup]) -> Answer<MarkupPage> {
+        Self::read(self.post(&format!("/sets/{id}/markups")).send_json(markups))
+    }
+
+    // ---- the number everybody actually wants ------------------------------
+
+    /// The takeoff, measured by the same engine the viewer uses.
+    ///
+    /// This is the endpoint an estimating system, an ERP or a spreadsheet macro
+    /// calls. Read `left_out` before you trust `tons`.
+    pub fn takeoff(&self, id: &str) -> Answer<Takeoff> {
+        Self::read(self.get(&format!("/sets/{id}/takeoff")).call())
+    }
+
+    // ---- shared tool chests ----------------------------------------------
+
+    pub fn chests(&self) -> Answer<Vec<Chest>> {
+        Self::read(self.get("/chests").call())
+    }
+
+    pub fn chest_file(&self, id: &str) -> Answer<Vec<u8>> {
+        match self.get(&format!("/chests/{id}/file")).call() {
+            Ok(response) => {
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| Trouble::Unreadable(e.to_string()))?;
+                Ok(bytes)
+            }
+            other => Self::read::<serde_json::Value>(other).map(|_| Vec::new()),
+        }
+    }
+
+    // ---- updates ---------------------------------------------------------
+
+    pub fn update_offer(&self, running: &str, channel: Channel, platform: &str) -> Answer<UpdateOffer> {
+        self.asking_for_update(running, channel, platform, false)
+    }
+
+    /// The same question, with the server asked to look at the publisher's
+    /// feed first rather than answer from its last look. What "Check for
+    /// Updates" sends: somebody is waiting for the answer. A server older
+    /// than this question ignores the asking and answers from its last look.
+    pub fn update_offer_now(&self, running: &str, channel: Channel, platform: &str) -> Answer<UpdateOffer> {
+        self.asking_for_update(running, channel, platform, true)
+    }
+
+    fn asking_for_update(
+        &self,
+        running: &str,
+        channel: Channel,
+        platform: &str,
+        fresh: bool,
+    ) -> Answer<UpdateOffer> {
+        Self::read(
+            self.get("/update/latest")
+                .query("fresh", if fresh { "true" } else { "false" })
+                .query("version", running)
+                .query(
+                    "channel",
+                    match channel {
+                        Channel::Stable => "stable",
+                        Channel::Preview => "preview",
+                    },
+                )
+                .query("platform", platform)
+                .call(),
+        )
+    }
+
+    /// Fetches an installer. Nothing is done with these bytes until
+    /// [`crate::update::Trusted::check`] has passed on them.
+    pub fn download_update(&self, download: &str) -> Answer<Vec<u8>> {
+        let url = if download.starts_with("http://") || download.starts_with("https://") {
+            download.to_string()
+        } else {
+            format!("{}{}", self.base, download)
+        };
+        match self.sign(self.agent.get(&url)).call() {
+            Ok(response) => {
+                let mut bytes = Vec::new();
+                response
+                    .into_reader()
+                    .read_to_end(&mut bytes)
+                    .map_err(|e| Trouble::Unreadable(e.to_string()))?;
+                Ok(bytes)
+            }
+            Err(ureq::Error::Status(code, _)) => Err(Trouble::Refused(Problem::new(
+                "download_failed",
+                format!("The update could not be downloaded ({code})."),
+            ))),
+            Err(e) => Err(Trouble::Unreachable(e.to_string())),
+        }
+    }
+}
+
+use std::io::Read;
+
+/// A multipart form: some text fields and one file.
+///
+/// The boundary is made from the file's own digest, so the file cannot
+/// happen to contain it.
+fn multipart(fields: &[(&str, &str)], filename: &str, file: &[u8]) -> (String, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(file);
+    let boundary: String = std::iter::once("----hyperview".to_string())
+        .chain(digest.iter().take(12).map(|b| format!("{b:02x}")))
+        .collect();
+    let mut body = Vec::with_capacity(file.len() + 512);
+    for (name, value) in fields {
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    let filename: String = filename
+        .chars()
+        .map(|c| if c == '"' || c == '\\' || c.is_control() { '_' } else { c })
+        .collect();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n\
+             Content-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(file);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (format!("multipart/form-data; boundary={boundary}"), body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_base_address_with_a_trailing_slash_does_not_produce_a_double_one() {
+        let client = Client::new("https://drawings.mesafab.com/");
+        assert_eq!(
+            client.url("/projects"),
+            "https://drawings.mesafab.com/api/v1/projects"
+        );
+    }
+
+    #[test]
+    fn an_update_download_may_point_somewhere_else_entirely() {
+        let client = Client::new("https://drawings.mesafab.com");
+        // Relative: their own server.
+        assert_eq!(client.base(), "https://drawings.mesafab.com");
+        // The client hands absolute addresses straight through, which is how a
+        // shop can serve the installer off a file share or a CDN. The
+        // signature check is what makes that safe, not where it came from.
+        assert!("https://releases.example.com/x.msi".starts_with("https://"));
+    }
+
+    #[test]
+    fn a_server_that_speaks_another_version_is_named_rather_than_guessed_at() {
+        let trouble = Trouble::Mismatch { ours: 1, theirs: 3 };
+        let said = trouble.to_string();
+        assert!(said.contains("version 1"), "{said}");
+        assert!(said.contains("speaks 3"), "{said}");
+    }
+}

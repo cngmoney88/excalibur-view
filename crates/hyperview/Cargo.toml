@@ -1,0 +1,112 @@
+[package]
+name = "hyperview"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "hyperview"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hyperview"
+path = "src/main.rs"
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+
+[dependencies]
+annot = { path = "../annot" }
+chest = { path = "../chest" }
+pdf = { path = "../pdf" }
+takeoff = { path = "../takeoff" }
+ui = { path = "../ui" }
+hub = { path = "../hub" }
+plugin-api = { path = "../plugin-api" }
+# Plugins run in an interpreter, sandboxed: no files, no network, no screen,
+# and a fixed budget of work and memory. See `plugins.rs`.
+wasmi = { version = "0.42", default-features = false, features = ["std"] }
+# The server is not a separate program. One download, one exe: started
+# normally it is the viewer, started with --serve it is the company's server,
+# and the "host the drawings here" button runs one inside the other.
+hyperview-server = { path = "../server" }
+tokio = { version = "1", features = ["rt-multi-thread", "signal", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Both renderers are built in and the right one is picked at run time.
+#
+# Windows prefers wgpu, which means Direct3D. The OpenGL path looks fine on a
+# developer's machine and then, on a shop's server-class box with stock display
+# drivers — or over any remote desktop session — Windows quietly falls back to
+# its *software* OpenGL implementation and the whole program crawls with nothing
+# on the screen. Linux keeps glow, which is what works there.
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wgpu", "wayland", "x11"] }
+egui = "0.32"
+egui_extras = { version = "0.32", features = ["image"] }
+# Reading a seal picture off somebody's disk. PNG and JPEG only: that is what a
+# scanned seal is, and every other format is an invitation to support a format.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+pdfium-render = { version = "0.9", default-features = false, features = ["pdfium_latest", "thread_safe"] }
+crossbeam-channel = "0.5"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+rfd = "0.16"
+log = "0.4"
+env_logger = "0.11"
+directories = "6"
+memmap2 = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+rust_xlsxwriter = { version = "0.90", default-features = false }
+
+# wgpu is not a renderer until a *backend* is turned on, and eframe deliberately
+# turns none on — it leaves that to whoever is building the program, because the
+# right answer differs per platform. Without this, `Renderer::Wgpu` compiles
+# perfectly and then panics on the first line of a real machine with "no wgpu
+# backend feature that is implemented for the target platform was enabled".
+#
+# Both are listed on Windows rather than just Direct3D: a box with a Vulkan
+# driver and a broken D3D12 one is rare, the reverse is rare, and having both
+# means wgpu picks whichever actually works instead of there being one thing
+# left to go wrong.
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["dx12", "vulkan"] }
+
+# Metal is the only backend that matters on a Mac: every Mac that runs a
+# current macOS has it, and it is what the system itself draws with.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["metal"] }
+
+# Windows has a text recogniser built into it. Using that rather than shipping
+# one means a scanned drawing set can be made searchable on a shop machine with
+# nothing installed and nothing downloaded — which is the difference between a
+# feature people use and a feature people are told to go and set up.
+windows = { version = "0.58", features = [
+    "Foundation",
+    "Foundation_Collections",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
+    "Win32_System_WinRT",
+    # Installing and running without PowerShell, which a locked-down server
+    # or a Remote Desktop host may not let an ordinary user start: shortcuts
+    # through the shell's own COM objects, the Settings entry through the
+    # registry, and handing the front window to the copy already open.
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }
+
+[dev-dependencies]
+# Hand-written plugins for the sandbox's tests, in WebAssembly's text form.
+wat = "1"
+ed25519-dalek = "2"

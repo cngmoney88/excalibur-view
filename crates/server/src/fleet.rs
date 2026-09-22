@@ -1,0 +1,708 @@
+//! The channel the Excalibur Fleet talks to a shop's server on.
+//!
+//! Deliberately not part of `/api/v1`. That is the product's API — documented,
+//! versioned, and the thing a customer's ERP integrates against. This is
+//! something else: the small maintenance surface one shop's server offers to
+//! whoever looks after it, shaped so the Fleet can watch and feed a Hyperview
+//! installation exactly as it watches and feeds an Arc Valley one, with no
+//! per-product code in the Fleet at all.
+//!
+//! Four things, on the paths the Fleet already asks for:
+//!
+//! - `GET  /api/version` — public. What this server is running.
+//! - `GET  /api/admin/ops` — key-gated. The 6am questions: when were the
+//!   drawings last copied off this box, how much disk is left, is the update
+//!   channel still refusing unsigned builds.
+//! - `GET  /api/admin/logtail` — key-gated. The server's own log, clamped.
+//! - `GET  /api/admin/presence` — key-gated. Who is connected: the seats this
+//!   process has served lately, bounded and read-only (`crate::presence`), in
+//!   the same wire shape Arc Valley answers with, so the Fleet's Devices view
+//!   works here without a line of per-product code.
+//! - `POST /api/admin/update` — key-gated. A signed release, delivered
+//!   verbatim.
+//! - `POST /api/admin/update/rollback` — key-gated. Put the office back.
+//!
+//! **The Fleet cannot mint a build.** What arrives at `/api/admin/update` is
+//! the exact signed manifest the release tool produced, and this server checks
+//! that signature against the same pinned public keys a seat checks it
+//! against — the Fleet's key opens the door, it does not vouch for what comes
+//! through it. So a Fleet with a compromised shelf can offer only builds that
+//! were already signed by the key Creede holds, and every seat in the shop
+//! checks the same signature again for itself before running anything. Two
+//! independent checks of one signature, neither of them the hub's.
+//!
+//! The maintenance key is set by whoever runs the server, and until they set
+//! one **every route here answers 404**: a shop that has not asked to be looked
+//! after does not quietly grow a remote maintenance channel.
+
+use std::sync::Arc;
+
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use hub::update::Release;
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+
+use crate::api::{Server, Shared};
+use crate::VERSION;
+
+/// The header the Fleet signs its requests with. Named for Arc Valley because
+/// that is what the Fleet sends, and inventing a second name for the same
+/// header would mean per-product code in the Fleet.
+pub const KEY_HEADER: &str = "x-av-update-key";
+
+/// Where the digest of a Fleet key an administrator turned on is kept.
+pub const FLEET_KEY: &str = "fleet_key_digest";
+
+pub fn key_digest(key: &str) -> String {
+    use sha2::{Digest, Sha256};
+    crate::store::hex(&Sha256::digest(key.trim().as_bytes()))
+}
+
+/// Lets the Fleet in with a new key, or shuts the door. Returns the key, once:
+/// it is not kept anywhere it can be read back.
+pub fn set_fleet_access(server: &Server, on: bool) -> anyhow::Result<Option<String>> {
+    if !on {
+        server.store.set_setting(FLEET_KEY, "")?;
+        return Ok(None);
+    }
+    let mut bytes = [0u8; 24];
+    rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
+    let key = crate::store::hex(&bytes);
+    server.store.set_setting(FLEET_KEY, &key_digest(&key))?;
+    Ok(Some(key))
+}
+
+pub fn fleet_is_on(server: &Server) -> bool {
+    server.config.maintenance_key.is_some()
+        || server
+            .store
+            .setting(FLEET_KEY)
+            .ok()
+            .flatten()
+            .is_some_and(|d| !d.is_empty())
+}
+
+// ---- what it says about itself --------------------------------------------
+
+#[derive(Serialize)]
+struct Version {
+    /// What is *running*, always. Not what is staged, not what is on offer to
+    /// the seats — the Fleet asserts a rollout worked by reading this back, so
+    /// a hopeful answer here would turn a failed update into a green board.
+    version: String,
+    /// Which release channel this server follows.
+    wave: String,
+    /// The build. Same string the About box shows.
+    hash: String,
+    product: String,
+}
+
+#[derive(Serialize, Default)]
+struct Ops {
+    /// How many days since the drawings were last copied somewhere that is not
+    /// this machine. **Null when it has never happened** — and null is not
+    /// zero. A shop holding its own drawings with no copy anywhere else is one
+    /// dead disk away from losing every takeoff it has ever done, and the Fleet
+    /// turns this amber on purpose.
+    #[serde(rename = "backupDays")]
+    backup_days: Option<f64>,
+    disk: Disk,
+    #[serde(rename = "updateChannel")]
+    update_channel: UpdateChannel,
+    #[serde(rename = "serviceLogBytes")]
+    service_log_bytes: u64,
+    /// Nothing failed to load. Present and empty rather than absent, so the
+    /// difference between "asked and nothing is wrong" and "did not ask" is
+    /// visible.
+    #[serde(rename = "routeFailures")]
+    route_failures: Vec<String>,
+    /// What this installation is actually holding, which is the thing somebody
+    /// is deciding about when they look at the board.
+    drawings: Drawings,
+}
+
+#[derive(Serialize, Default)]
+struct Disk {
+    #[serde(rename = "freeGb")]
+    free_gb: Option<f64>,
+}
+
+#[derive(Serialize, Default)]
+struct UpdateChannel {
+    /// Always true, and not a setting. There is no way to run this server in a
+    /// state where it would accept an unsigned release, which is why the answer
+    /// is a constant rather than a flag somebody could have turned off.
+    #[serde(rename = "signingRequired")]
+    signing_required: bool,
+    /// How many public keys this build will accept a release from. Zero means
+    /// it will accept none — which is the state a build ships in until a key is
+    /// compiled into it, and is worth being able to see from the board.
+    #[serde(rename = "trustedKeys")]
+    trusted_keys: usize,
+}
+
+#[derive(Serialize, Default)]
+struct Drawings {
+    people: i64,
+    projects: i64,
+    sets: i64,
+    markups: i64,
+    #[serde(rename = "bytesOnDisk")]
+    bytes_on_disk: u64,
+}
+
+// ---- saying no ------------------------------------------------------------
+
+struct No(StatusCode, &'static str);
+
+impl IntoResponse for No {
+    fn into_response(self) -> Response {
+        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+/// Is this the person who looks after this box?
+///
+/// A server with no maintenance key set is not "unlocked" — it has no such
+/// channel at all, and says 404 rather than 401, because 401 is an invitation
+/// to keep trying.
+fn maintainer(server: &Server, headers: &HeaderMap) -> Result<(), No> {
+    let given = headers
+        .get(KEY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // A key an administrator turned on from the program is kept only as its
+    // digest, so reading the database does not hand anybody the key.
+    let stored = server.store.setting(FLEET_KEY).ok().flatten();
+    let (expected, given) = match (server.config.maintenance_key.as_deref(), stored) {
+        (Some(key), _) => (key.to_string(), given.to_string()),
+        (None, Some(digest)) if !digest.is_empty() => (digest, key_digest(given)),
+        _ => return Err(No(StatusCode::NOT_FOUND, "no such route")),
+    };
+    let (expected, given) = (expected.as_str(), given.as_str());
+    // Compared to the end whichever way it goes, so how long this takes says
+    // nothing about how much of the key was right.
+    if given.len() != expected.len() || expected.is_empty() {
+        return Err(No(StatusCode::UNAUTHORIZED, "wrong maintenance key"));
+    }
+    let mut same = 0u8;
+    for (a, b) in given.bytes().zip(expected.bytes()) {
+        same |= a ^ b;
+    }
+    if same != 0 {
+        return Err(No(StatusCode::UNAUTHORIZED, "wrong maintenance key"));
+    }
+    Ok(())
+}
+
+// ---- the routes -----------------------------------------------------------
+
+pub fn router(server: Shared) -> Router {
+    Router::new()
+        .route("/api/version", get(version))
+        .route("/api/admin/ops", get(ops))
+        .route("/api/admin/logtail", get(logtail))
+        .route("/api/admin/presence", get(presence))
+        .route("/api/admin/update", post(update))
+        .route("/api/admin/update/rollback", post(rollback))
+        .with_state(server)
+}
+
+async fn version(State(server): State<Shared>) -> Json<Version> {
+    Json(Version {
+        version: VERSION.to_string(),
+        wave: match crate::updates::office_channel(&server) {
+            hub::update::Channel::Preview => "early".into(),
+            hub::update::Channel::Stable => "stable".into(),
+        },
+        hash: option_env!("HYPERVIEW_BUILD").unwrap_or(VERSION).to_string(),
+        product: "hyperview".to_string(),
+    })
+}
+
+async fn ops(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Ops>, No> {
+    maintainer(&server, &headers)?;
+
+    let counts = server
+        .store
+        .with(|db| {
+            let one = |db: &rusqlite::Connection, sql: &str| -> rusqlite::Result<i64> {
+                db.query_row(sql, [], |r| r.get(0))
+            };
+            Ok(Drawings {
+                people: one(db, "SELECT count(*) FROM people")?,
+                projects: one(db, "SELECT count(*) FROM projects")?,
+                sets: one(db, "SELECT count(*) FROM sets")?,
+                markups: one(db, "SELECT count(*) FROM markups WHERE removed = 0")?,
+                bytes_on_disk: 0,
+            })
+        })
+        .unwrap_or_default();
+
+    let mut drawings = counts;
+    drawings.bytes_on_disk = folder_size(&server.config.data);
+
+    Ok(Json(Ops {
+        backup_days: days_since_backup(&server),
+        disk: Disk {
+            free_gb: free_gigabytes(&server.config.data),
+        },
+        update_channel: UpdateChannel {
+            signing_required: true,
+            trusted_keys: crate::trusted().keys.len(),
+        },
+        service_log_bytes: log_file(&server.config.data)
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .unwrap_or(0),
+        route_failures: Vec::new(),
+        drawings,
+    }))
+}
+
+#[derive(Deserialize)]
+pub struct HowMany {
+    #[serde(default)]
+    pub n: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct Tail {
+    ok: bool,
+    bytes: u64,
+    lines: Vec<String>,
+}
+
+async fn logtail(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Query(how_many): Query<HowMany>,
+) -> Result<Json<Tail>, No> {
+    maintainer(&server, &headers)?;
+    let n = how_many.n.unwrap_or(200).clamp(1, 500);
+    let Some(path) = log_file(&server.config.data) else {
+        return Ok(Json(Tail {
+            ok: true,
+            bytes: 0,
+            lines: vec!["This server is not writing to a log file.".into()],
+        }));
+    };
+    let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    // Only the tail is read. A crash loop can make this file enormous, and
+    // reading all of it to show the last two hundred lines is how asking a
+    // sick machine a question makes it sicker.
+    let lines = last_lines(&path, n);
+    Ok(Json(Tail { ok: true, bytes, lines }))
+}
+
+/// Who is connected. The ledger is the same class of answer as the log tail:
+/// a look at this box for whoever maintains it, gated by the same key, and
+/// incapable of changing anything.
+async fn presence(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<crate::presence::Roster>, No> {
+    maintainer(&server, &headers)?;
+    Ok(Json(crate::presence::roster(&server.config.name)))
+}
+
+// ---- taking a release -----------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct Push {
+    /// The signed manifest, exactly as the release tool produced it.
+    pub release: Release,
+    /// The installer itself, base64. Carried in the bundle rather than fetched,
+    /// so what was signed and what arrives are the same journey.
+    pub installer: String,
+    /// True also makes it the version the office is offered. False stages it
+    /// for one machine to try first, which is what a careful shop does.
+    #[serde(default)]
+    pub ready: bool,
+}
+
+#[derive(Serialize)]
+struct Landed {
+    /// What the Fleet counts. One entry per thing written.
+    written: Vec<String>,
+    /// Anything refused, with why. The Fleet treats a non-empty list as a
+    /// partial failure and does not call it a rollout.
+    skipped: Vec<String>,
+    restarting: bool,
+    message: String,
+}
+
+async fn update(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(push): Json<Push>,
+) -> Result<Json<Landed>, No> {
+    maintainer(&server, &headers)?;
+
+    use base64::Engine;
+    let Ok(installer) = base64::engine::general_purpose::STANDARD.decode(push.installer.as_bytes())
+    else {
+        return Ok(Json(refused("the installer was not readable")));
+    };
+
+    // The signature, checked here against the keys this build pins — not
+    // against anything the caller supplied, and not taken on trust because the
+    // maintenance key was right. The key said who may knock. This says what may
+    // come in.
+    if let Err(refusal) = crate::trusted().check(&push.release, &installer) {
+        tracing::warn!("refused a pushed release: {refusal}");
+        return Ok(Json(refused_owned(format!(
+            "the signature was not accepted: {refusal}"
+        ))));
+    }
+
+    let digest = push.release.digest.to_lowercase();
+    if let Err(e) = server.store.put_blob(&installer) {
+        return Ok(Json(refused_owned(format!("could not store it: {e}"))));
+    }
+    let stored = server.store.with(|db| {
+        db.execute(
+            "INSERT INTO releases (version, channel, platform, published, notes, bytes,
+                                   digest, signature, signing_key, minimum_api, ready)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(version, platform) DO UPDATE SET
+                 channel = excluded.channel, published = excluded.published,
+                 notes = excluded.notes, bytes = excluded.bytes,
+                 digest = excluded.digest, signature = excluded.signature,
+                 signing_key = excluded.signing_key, minimum_api = excluded.minimum_api,
+                 ready = excluded.ready",
+            params![
+                push.release.version,
+                crate::api::channel_name(push.release.channel),
+                push.release.platform,
+                push.release.published,
+                push.release.notes,
+                push.release.bytes as i64,
+                digest,
+                push.release.signature,
+                push.release.key,
+                push.release.minimum_api_version as i64,
+                if push.ready { 1 } else { 0 }
+            ],
+        )?;
+        Ok(())
+    });
+    if let Err(e) = stored {
+        return Ok(Json(refused_owned(format!("could not record it: {e}"))));
+    }
+
+    let version = push.release.version.clone();
+    tracing::info!("took release {version} for {}", push.release.platform);
+    Ok(Json(Landed {
+        written: vec![format!("{version} ({})", push.release.platform)],
+        skipped: Vec::new(),
+        // This server does not restart itself. It is holding a release for the
+        // seats, and a seat installs it the next time somebody starts
+        // Hyperview — never in the middle of a takeoff. Saying `true` here
+        // would make the Fleet wait ninety seconds for a restart that is not
+        // coming and then call a good rollout a failure.
+        restarting: false,
+        message: if push.ready {
+            format!("{version} is on the server and offered to every seat.")
+        } else {
+            format!("{version} is on the server, held back until somebody marks it ready.")
+        },
+    }))
+}
+
+async fn rollback(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Landed>, No> {
+    maintainer(&server, &headers)?;
+    // Withdrawing the newest, not deleting it: the office goes back to what it
+    // was on, and the release is still there to look at.
+    let undone = server.store.with(|db| {
+        let newest: Option<String> = db
+            .query_row(
+                "SELECT version FROM releases WHERE ready = 1 ORDER BY published DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .ok();
+        if let Some(version) = newest.as_deref() {
+            db.execute(
+                "UPDATE releases SET ready = 0 WHERE version = ?1",
+                params![version],
+            )?;
+        }
+        Ok(newest)
+    });
+
+    match undone {
+        Ok(Some(version)) => Ok(Json(Landed {
+            written: vec![format!("withdrew {version}")],
+            skipped: Vec::new(),
+            restarting: false,
+            message: format!(
+                "{version} is no longer offered. Seats already on it stay on it — nothing \
+                 uninstalls itself — and every other seat is offered what it was offered before."
+            ),
+        })),
+        Ok(None) => Ok(Json(Landed {
+            written: Vec::new(),
+            skipped: Vec::new(),
+            restarting: false,
+            message: "Nothing was on offer, so there was nothing to withdraw.".into(),
+        })),
+        Err(e) => Ok(Json(refused_owned(format!("could not withdraw it: {e}")))),
+    }
+}
+
+fn refused(why: &'static str) -> Landed {
+    refused_owned(why.to_string())
+}
+
+fn refused_owned(why: String) -> Landed {
+    Landed {
+        written: Vec::new(),
+        skipped: vec![why.clone()],
+        restarting: false,
+        message: why,
+    }
+}
+
+// ---- the 6am questions ----------------------------------------------------
+
+/// When the drawings were last copied off this machine, in days.
+///
+/// `None` means never, and never is not the same as today. Whoever set the
+/// server up records a backup by touching a file; a shop with a real backup
+/// system points that at wherever it already runs.
+fn days_since_backup(server: &Server) -> Option<f64> {
+    let marker = server.config.data.join("last-backup");
+    let when = std::fs::metadata(&marker).ok()?.modified().ok()?;
+    let ago = std::time::SystemTime::now().duration_since(when).ok()?;
+    Some(ago.as_secs_f64() / 86_400.0)
+}
+
+fn log_file(data: &std::path::Path) -> Option<std::path::PathBuf> {
+    let path = data.join("hyperview-server.log");
+    path.exists().then_some(path)
+}
+
+fn folder_size(path: &std::path::Path) -> u64 {
+    fn walk(path: &std::path::Path, depth: usize) -> u64 {
+        if depth > 6 {
+            return 0;
+        }
+        let Ok(entries) = std::fs::read_dir(path) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => walk(&e.path(), depth + 1),
+                Ok(_) => e.metadata().map(|m| m.len()).unwrap_or(0),
+                Err(_) => 0,
+            })
+            .sum()
+    }
+    walk(path, 0)
+}
+
+/// Free space on the drive the drawings are on. Asked of the operating system
+/// rather than worked out, and `None` rather than a guess when it cannot be.
+fn free_gigabytes(data: &std::path::Path) -> Option<f64> {
+    #[cfg(unix)]
+    {
+        // `df` rather than a binding to statvfs, because the struct's layout
+        // differs between platforms and getting it wrong reads garbage rather
+        // than failing. This is a number on a dashboard, once a minute; asking
+        // the tool that already knows is the cheaper kind of correct.
+        let out = std::process::Command::new("df")
+            .arg("-Pk")
+            .arg(data)
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        let line = text.lines().nth(1)?;
+        let available_kb: f64 = line.split_whitespace().nth(3)?.parse().ok()?;
+        Some((available_kb / 1_048_576.0 * 10.0).round() / 10.0)
+    }
+    #[cfg(windows)]
+    {
+        // GetDiskFreeSpaceExW, called without a crate for it: one function,
+        // and a dependency for one function is a dependency to keep updated.
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetDiskFreeSpaceExW(
+                directory: *const u16,
+                free_to_caller: *mut u64,
+                total: *mut u64,
+                free: *mut u64,
+            ) -> i32;
+        }
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = data
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let (mut free_to_caller, mut total, mut free) = (0u64, 0u64, 0u64);
+        let ok = unsafe {
+            GetDiskFreeSpaceExW(wide.as_ptr(), &mut free_to_caller, &mut total, &mut free)
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some((free_to_caller as f64 / 1_073_741_824.0 * 10.0).round() / 10.0)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = data;
+        None
+    }
+}
+
+/// The last `n` lines, read from the end.
+fn last_lines(path: &std::path::Path, n: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    // Generous for a log line, and bounded whatever the file does.
+    let want = (n as u64).saturating_mul(400).min(2 * 1024 * 1024);
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let from = size.saturating_sub(want);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return Vec::new();
+    }
+    let mut text = String::new();
+    if file.read_to_string(&mut text).is_err() {
+        // A log with something that is not text in it should still answer.
+        return vec!["(the log could not be read as text)".into()];
+    }
+    let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    // The first line is probably half a line, unless we started at the top.
+    if from > 0 && !lines.is_empty() {
+        lines.remove(0);
+    }
+    if lines.len() > n {
+        lines.drain(0..lines.len() - n);
+    }
+    lines
+}
+
+pub type Shelf = Arc<Server>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_with_no_maintenance_key_has_no_maintenance_channel() {
+        // Not "unlocked" and not "401" — 404, because a shop that never asked
+        // to be looked after should not have a door to rattle.
+        let config = crate::Config {
+            maintenance_key: None,
+            ..crate::Config::default()
+        };
+        let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test"))
+            .expect("a store");
+        let server = Server::new(store, config);
+        let refused = maintainer(&server, &HeaderMap::new()).err().expect("no way in");
+        assert_eq!(refused.0, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn the_right_key_gets_in_and_a_wrong_one_does_not() {
+        let config = crate::Config {
+            maintenance_key: Some("brace-gusset-purlin-shim-42".into()),
+            ..crate::Config::default()
+        };
+        let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test2"))
+            .expect("a store");
+        let server = Server::new(store, config);
+
+        let mut right = HeaderMap::new();
+        right.insert(KEY_HEADER, "brace-gusset-purlin-shim-42".parse().unwrap());
+        assert!(maintainer(&server, &right).is_ok());
+
+        let mut wrong = HeaderMap::new();
+        wrong.insert(KEY_HEADER, "brace-gusset-purlin-shim-43".parse().unwrap());
+        assert_eq!(
+            maintainer(&server, &wrong).err().map(|n| n.0),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+
+        // And a key of the wrong length is refused rather than compared.
+        let mut short = HeaderMap::new();
+        short.insert(KEY_HEADER, "brace".parse().unwrap());
+        assert!(maintainer(&server, &short).is_err());
+    }
+
+    #[test]
+    fn a_key_turned_on_from_the_program_opens_the_door_and_turning_it_off_shuts_it() {
+        let config = crate::Config::default();
+        let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test4"))
+            .expect("a store");
+        let server = Server::new(store, config);
+        assert!(!fleet_is_on(&server));
+
+        let key = set_fleet_access(&server, true).unwrap().expect("a key");
+        assert!(fleet_is_on(&server));
+        let mut right = HeaderMap::new();
+        right.insert(KEY_HEADER, key.parse().unwrap());
+        assert!(maintainer(&server, &right).is_ok());
+        // Only the digest is kept.
+        let kept = server.store.setting(FLEET_KEY).unwrap().unwrap();
+        assert_ne!(kept, key);
+
+        let mut wrong = HeaderMap::new();
+        wrong.insert(KEY_HEADER, "0".repeat(key.len()).parse().unwrap());
+        assert_eq!(
+            maintainer(&server, &wrong).err().map(|n| n.0),
+            Some(StatusCode::UNAUTHORIZED)
+        );
+
+        set_fleet_access(&server, false).unwrap();
+        assert!(!fleet_is_on(&server));
+        assert_eq!(
+            maintainer(&server, &right).err().map(|n| n.0),
+            Some(StatusCode::NOT_FOUND)
+        );
+    }
+
+    #[test]
+    fn never_backed_up_is_not_the_same_as_backed_up_today() {
+        let config = crate::Config {
+            data: std::path::PathBuf::from("/tmp/hyperview-no-such-folder-at-all"),
+            ..crate::Config::default()
+        };
+        let store = crate::Store::temporary(std::path::Path::new("/tmp/hyperview-fleet-test3"))
+            .expect("a store");
+        let server = Server::new(store, config);
+        // None, which the Fleet turns amber. Not 0.0, which would read as
+        // "backed up this morning".
+        assert!(days_since_backup(&server).is_none());
+    }
+
+    #[test]
+    fn the_tail_of_a_log_is_the_end_of_it() {
+        let path = std::env::temp_dir().join("hyperview-tail-test.log");
+        let mut text = String::new();
+        for i in 0..1000 {
+            text.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(&path, text).expect("a log");
+        let lines = last_lines(&path, 10);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[9], "line 999");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_log_shorter_than_the_tail_asked_for_comes_back_whole() {
+        let path = std::env::temp_dir().join("hyperview-short-log.log");
+        std::fs::write(&path, "one\ntwo\nthree\n").expect("a log");
+        assert_eq!(last_lines(&path, 200), vec!["one", "two", "three"]);
+        let _ = std::fs::remove_file(&path);
+    }
+}

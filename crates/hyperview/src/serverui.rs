@@ -1,0 +1,2393 @@
+//! The window's side of the server: signing in, browsing what is on it, and
+//! being told when there is a new version.
+
+use egui::{Color32, RichText};
+
+use crate::app::App;
+use crate::server::{Ask, Standing, Told};
+
+/// Where somebody is up to in getting connected.
+///
+/// There are four ways into a Hyperview server and a person should only ever
+/// see the one that applies to them. Which one that is depends on facts the
+/// server can be asked for, so it is asked rather than the person being made to
+/// choose from a menu of things they have no way to judge.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum Step {
+    /// Picking a server: what answered on the network, or an address typed in.
+    #[default]
+    Choosing,
+    /// It belongs to somebody and they have an account on it.
+    SigningIn,
+    /// Nobody has set it up. They are about to become its administrator.
+    SettingUp,
+    /// It belongs to somebody and is taking new accounts.
+    Joining,
+    /// They have just set one up. Here is what to tell everybody else.
+    JustSetUp,
+}
+
+/// What is being typed into the connect window.
+#[derive(Clone, Debug, Default)]
+pub struct SigningIn {
+    pub step: Step,
+    pub base: String,
+    pub email: String,
+    pub password: String,
+    /// Their own name. It goes in the Author column of every markup they make,
+    /// which is why it is asked for here rather than guessed from an email
+    /// address.
+    pub person: String,
+    /// What to call the installation, when they are the one setting it up.
+    pub company: String,
+    /// The join code, when they are joining somebody else's.
+    pub code: String,
+    /// What the server calls itself, once the address has been checked.
+    pub found: Option<String>,
+    /// What that check said about it.
+    pub claimed: bool,
+    pub joining: String,
+    /// What answered on the network.
+    pub servers: Vec<hub::discover::Found>,
+    pub looking: bool,
+    /// Nothing answered, so say so rather than leaving an empty box.
+    pub looked: bool,
+    pub error: Option<String>,
+    pub waiting: bool,
+    /// Set once a server has been claimed: the code to hand round, and what
+    /// hosting it on this computer actually got them.
+    pub join_code: String,
+    pub standing: Option<String>,
+    /// Whatever whoever built the installer left on the window. Somewhere to
+    /// put "ask Dave in the office for a login" rather than leaving somebody
+    /// stuck with nobody to ask.
+    pub joined_note: String,
+}
+
+/// The server panel's forms.
+#[derive(Default)]
+pub struct OfficePanel {
+    /// A project being started: (job number, name).
+    pub new_project: Option<(String, String)>,
+    pub joining: Option<hub::Joining>,
+    pub updates: Option<hub::UpdateSettings>,
+    pub fleet: Option<hub::FleetAccess>,
+    /// What came of letting Fleet in, and the key when it has to be handed
+    /// on by hand.
+    pub fleet_note: Option<String>,
+    pub fleet_key: Option<String>,
+    pub fleet_address: String,
+    /// Asked for once, the first time the Office section is opened.
+    pub asked: bool,
+    pub current_password: String,
+    pub new_password: String,
+    pub password_note: Option<String>,
+    /// Keys for other programs, and a new one's name as it is typed.
+    pub keys: Vec<hub::ApiKey>,
+    pub key_name: String,
+    /// A key just made: shown until somebody copies it and closes it.
+    pub new_key: Option<hub::ApiKey>,
+    /// The server's address, for whoever is setting another program up.
+    pub base: String,
+    /// A license being pasted rather than picked off the disk. `None` until
+    /// somebody asks for the box; the text they paste while it is open.
+    pub pasting_license: Option<String>,
+    /// Licenses found lying about — in Downloads, on the desktop, on the USB
+    /// stick somebody carried one over on. Looked for once, not every frame.
+    pub licenses_about: Option<Vec<FoundLicense>>,
+}
+
+/// A license file the program noticed, and who it is for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoundLicense {
+    pub path: std::path::PathBuf,
+    pub company: String,
+    /// Where it turned up, in words: "Downloads", "the desktop", "E:".
+    pub where_from: String,
+}
+
+/// What somebody did in the server panel this frame, done once the panel has
+/// been drawn.
+#[derive(Default)]
+struct PanelActions {
+    new_project: Option<(String, String)>,
+    upload_to: Option<String>,
+    share_chest: bool,
+    office: bool,
+    new_code: bool,
+    channel: Option<String>,
+    password: Option<(String, String)>,
+    watch_fleet: bool,
+    stop_fleet: bool,
+    make_key: Option<String>,
+    revoke_key: Option<String>,
+    add_license: bool,
+    paste_license: bool,
+    send_license: Option<String>,
+    use_found_license: Option<std::path::PathBuf>,
+}
+
+impl App {
+    /// Everything the server thread has said since the last frame.
+    pub fn drain_server(&mut self) {
+        // Everything is taken off the channel first, so handling one message
+        // is free to touch the whole app without still holding the link.
+        let waiting: Vec<Told> = match self.link.as_ref() {
+            Some(link) => link.from.try_iter().collect(),
+            None => return,
+        };
+        for told in waiting {
+            match told {
+                Told::Found {
+                    base,
+                    name,
+                    version,
+                    claimed,
+                    joining,
+                } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false;
+                        signing.error = None;
+                        signing.found = Some(format!("{name} · version {version}"));
+                        signing.base = base;
+                        signing.claimed = claimed;
+                        signing.joining = joining;
+                        // Where to go next is the server's answer, not a
+                        // question for somebody who has no way to know it. A
+                        // server nobody has claimed wants setting up; one that
+                        // is somebody's wants signing in to.
+                        if signing.step == Step::Choosing {
+                            signing.step = if claimed {
+                                Step::SigningIn
+                            } else {
+                                if signing.company.trim().is_empty() {
+                                    signing.company = name.clone();
+                                }
+                                Step::SettingUp
+                            };
+                        }
+                    }
+                }
+                Told::Servers(list) => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.looking = false;
+                        signing.looked = true;
+                        signing.servers = list;
+                    }
+                }
+                Told::Claimed {
+                    base,
+                    company,
+                    join_code,
+                } => {
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.base = base;
+                        // What it is called from now on, not what it was called
+                        // before anybody named it. The panel and the title bar
+                        // both read this, and "New server" sitting there after
+                        // somebody typed "Mesa Fab" is the kind of small lie
+                        // that makes a program feel untrustworthy.
+                        signing.found = Some(company.clone());
+                        signing.company = company;
+                        signing.join_code = join_code;
+                        signing.step = Step::JustSetUp;
+                    }
+                }
+                Told::SignedIn(session) => {
+                    let base = self
+                        .signing_in
+                        .as_ref()
+                        .map(|s| s.base.clone())
+                        .unwrap_or_else(|| self.standing.base.clone());
+                    self.standing = Standing {
+                        base: base.clone(),
+                        name: self
+                            .signing_in
+                            .as_ref()
+                            .and_then(|s| s.found.clone())
+                            .unwrap_or_else(|| self.standing.name.clone()),
+                        who: Some(std::sync::Arc::new(session.user.clone())),
+                        ..Default::default()
+                    };
+                    // Normally the window's work is done. Not when somebody
+                    // has just set a server up: the code for everybody else is
+                    // on that window, and closing it the instant they are
+                    // signed in would throw it away before they read it.
+                    if self.signing_in.as_ref().map(|s| s.step.clone()) != Some(Step::JustSetUp) {
+                        self.signing_in = None;
+                    } else if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false;
+                        signing.password.clear();
+                    }
+                    self.status = format!("Signed in to {base} as {}.", session.user.name);
+                    // A markup's Author column is whoever the server says this
+                    // is, so six seats do not all save as "Administrator".
+                    if !session.user.name.trim().is_empty() {
+                        self.author = session.user.name.clone();
+                    }
+                    self.remember_server(&base, &session.token, &session.user.name);
+                    // A license double-clicked before signing in has been
+                    // waiting for this moment.
+                    self.apply_waiting_license();
+                    self.ask(Ask::Projects);
+                    self.ask(Ask::Chests);
+                    self.ask(Ask::Plugins);
+                    self.ask(Ask::License);
+                    self.ask(Ask::CheckForUpdate {
+                        running: env!("CARGO_PKG_VERSION").to_string(),
+                        channel: self.prefs.channel,
+                        asked: false,
+                    });
+                    self.last_update_check = std::time::Instant::now();
+                }
+                Told::SignedOut => {
+                    // What is known about updates outlives the session: a
+                    // version already in place still takes over at the next
+                    // start, signed in or not.
+                    let kept = Standing {
+                        update: self.standing.update.take(),
+                        update_ready: self.standing.update_ready.take(),
+                        update_refused: self.standing.update_refused.take(),
+                        ..Standing::default()
+                    };
+                    self.standing = kept;
+                    self.forget_server();
+                }
+                Told::Projects(list) => {
+                    self.standing.busy = None;
+                    self.standing.projects = list;
+                }
+                Told::Sets(list) => {
+                    self.standing.busy = None;
+                    self.standing.sets = list;
+                }
+                Told::Synced {
+                    set,
+                    revision,
+                    markups,
+                    sent,
+                } => self.take_sync(set, revision, markups, sent),
+                Told::Chests(list) => {
+                    // What the office shares, every seat has: a shared chest
+                    // this seat has not got is fetched now, once. Nobody has
+                    // to find a "Use" button to have the office's tools.
+                    let have = crate::profiles::local_digests();
+                    for chest in list.iter().filter(|c| c.shared) {
+                        if have.contains(&chest.digest.to_lowercase()) {
+                            continue;
+                        }
+                        if self.chests_fetched.insert(chest.id.clone()) {
+                            log::info!("fetching the office's tool chest {}", chest.name);
+                            self.ask(Ask::FetchChest {
+                                id: chest.id.clone(),
+                                name: chest.name.clone(),
+                            });
+                        }
+                    }
+                    self.standing.chests = list;
+                }
+                Told::Plugins(list) => self.take_plugin_list(list),
+                Told::PluginFetched { name } => {
+                    self.reload_plugins();
+                    match self.plugins.plugins.iter().find(|p| p.manifest.name == name) {
+                        Some(_) => self.status = format!("The office's plugin '{name}' is in the Plugins menu now."),
+                        None => {
+                            if let Some((file, why)) = self.plugins.refused.last() {
+                                log::warn!("office plugin {file} refused: {why}");
+                            }
+                        }
+                    }
+                }
+                Told::PluginShared(said) => self.status = said,
+                Told::ChestFetched { name, path } => {
+                    self.status = format!("Tool chest '{name}' is on this computer now.");
+                    log::info!("chest at {}", path.display());
+                    // Load it now rather than making somebody restart, put
+                    // together with whatever else this seat has.
+                    match crate::profiles::load() {
+                        Some(profile) => self.profile = Some(profile),
+                        None => {
+                            if let Some(profile) = std::fs::read(&path)
+                                .ok()
+                                .and_then(|bytes| chest::Profile::read(&bytes))
+                            {
+                                self.profile = Some(profile);
+                            }
+                        }
+                    }
+                }
+                Told::Progress { what } => self.standing.busy = Some(what),
+                Told::Downloaded { set, path, cached } => {
+                    self.standing.busy = None;
+                    self.status = if cached {
+                        "Opening the copy already on this machine.".into()
+                    } else {
+                        "Downloaded. Opening…".into()
+                    };
+                    // Remembered so the tab knows where it came from once it
+                    // has opened, and can sync its markups from then on.
+                    self.opened_from_server = Some((path.clone(), set));
+                    self.open(path);
+                }
+                Told::Takeoff(takeoff) => {
+                    self.status = match takeoff.tons {
+                        Some(tons) if takeoff.is_short() => format!(
+                            "{tons:.3} tons — and {} measurement(s) left out for want of a scale.",
+                            takeoff.left_out
+                        ),
+                        Some(tons) => format!("{tons:.3} tons on the server's copy."),
+                        None => "Nothing on the server's copy carries a weight.".into(),
+                    };
+                }
+                Told::Update(offer) => {
+                    self.standing.pinned_to = offer.pinned_to.clone();
+                    self.standing.update_looking = offer.looking;
+                    // A newer offer than the one refused is a fresh chance.
+                    if offer.release.as_ref().map(|r| &r.version)
+                        != self.standing.update.as_ref().map(|r| &r.version)
+                    {
+                        self.standing.update_refused = None;
+                    }
+                    if offer.release.is_some() {
+                        self.checking_for_update = false;
+                        self.update_note = None;
+                    }
+                    self.standing.update = offer.release.clone();
+                }
+                Told::SyncFailed(_) => self.sync_asked = None,
+                Told::IntegrationKey(key) => {
+                    self.office.key_name.clear();
+                    self.office.new_key = Some(*key);
+                }
+                Told::AssistantConnected(words) => {
+                    self.update_note = Some(words);
+                }
+                Told::UpdateNote(words) => {
+                    self.checking_for_update = false;
+                    self.update_note = Some(words);
+                }
+                Told::Office(office) => {
+                    let office = *office;
+                    self.office.joining = Some(office.joining);
+                    self.office.updates = Some(office.updates);
+                    self.office.fleet = Some(office.fleet);
+                    self.office.keys = office.keys;
+                }
+                Told::License { standing, added } => {
+                    if added {
+                        if let Some(l) = standing.as_deref() {
+                            self.status = format!("License added. {}", l.about_line());
+                        }
+                        // A trial that had ended is sharing again: send what
+                        // was waiting.
+                        self.sync_asked = None;
+                    }
+                    // What the office bought decides whether this seat can
+                    // reach the outside world at all.
+                    hub::sealed::license_says(
+                        standing.as_deref().and_then(|l| l.edition.as_deref()),
+                    );
+                    self.standing.license = standing.map(|b| *b);
+                }
+                Told::Copied { name, copy } => {
+                    self.standing.busy = None;
+                    self.status = format!(
+                        "{} is yours to mark up. The issued set, {name}, is untouched.",
+                        copy.name
+                    );
+                    // It belongs in the list beside the one it came from, and
+                    // it opens, because the only reason to make one is to
+                    // start working on it.
+                    let (id, label) = (copy.id.clone(), copy.name.clone());
+                    self.standing.sets.push(*copy);
+                    self.ask(Ask::Open { set: id, name: label });
+                }
+                Told::FleetWatching { note, key } => {
+                    self.office.fleet_note = Some(note);
+                    self.office.fleet_key = key;
+                    self.office.fleet_address = self.standing.base.clone();
+                }
+                Told::PasswordChanged => {
+                    self.office.current_password.clear();
+                    self.office.new_password.clear();
+                    self.office.password_note = Some(
+                        "Changed. Anywhere else you were signed in has been signed out.".into(),
+                    );
+                }
+                Told::UpdateReady(version) => {
+                    self.checking_for_update = false;
+                    self.standing.update_refused = None;
+                    self.status = format!(
+                        "Excalibur View {version} is installed. Restart to use it, or it takes \
+                         over the next time Excalibur View opens."
+                    );
+                    self.standing.update_ready = Some(version);
+                }
+                Told::UpdateRefused(why) => {
+                    self.checking_for_update = false;
+                    self.standing.update_refused = Some(why);
+                }
+                Told::Trouble(message) => {
+                    self.standing.busy = None;
+                    // The server says sharing is paused: find out where the
+                    // office stands, so the panel says it once and plainly.
+                    if message.contains("sharing new work") {
+                        self.ask(Ask::License);
+                    }
+                    if let Some(signing) = self.signing_in.as_mut() {
+                        signing.waiting = false;
+                        signing.error = Some(message);
+                    } else {
+                        self.error = Some(message);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Takes what the server had and puts it into the file.
+    fn take_sync(
+        &mut self,
+        set: String,
+        revision: u64,
+        markups: Vec<(String, usize, String, bool)>,
+        sent: Vec<String>,
+    ) {
+        use base64::Engine;
+        self.sync_asked = None;
+        // To the tab it belongs to, which may not be the one in front.
+        let Some(at) = self
+            .docs
+            .iter()
+            .position(|d| d.attached.as_ref().map(|a| a.set.as_str()) == Some(set.as_str()))
+        else {
+            return;
+        };
+
+        let theirs: Vec<(String, u32, annot::Markup, bool)> = markups
+            .into_iter()
+            .filter_map(|(name, page, dictionary, removed)| {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(dictionary.as_bytes())
+                    .ok()?;
+                let object = pdf::Reader::new(&bytes).object().ok()?;
+                let dict = object.as_dict()?.clone();
+                let markup = annot::Markup { dict, picture: None };
+                // The server's own id is not the markup's name; the name in the
+                // dictionary is, because that is what travels in the file.
+                let name = match markup.name() {
+                    it if !it.is_empty() => it,
+                    _ => name,
+                };
+                Some((name, page as u32, markup, removed))
+            })
+            .collect();
+
+        let ours = self.docs[at].names();
+        let (add, remove, _) = crate::sync::plan(&theirs, &ours);
+        let merged = self.docs[at].merge(add, remove);
+
+        if let Some(attached) = self.docs[at].attached.as_mut() {
+            attached.revision = revision;
+            attached.sent.extend(sent);
+            // Everything now in the file has been round, so nothing is sent
+            // twice after a merge either.
+            for (name, _, _, _) in &theirs {
+                attached.sent.insert(name.clone());
+            }
+        }
+
+        if let Some(said) = merged.says() {
+            self.status = said;
+        }
+    }
+
+    pub fn ask(&self, ask: Ask) {
+        if let Some(link) = self.link.as_ref() {
+            let _ = link.to.send(ask);
+        }
+    }
+
+    fn remember_server(&mut self, base: &str, token: &str, user: &str) {
+        self.prefs.server = crate::server::Remembered {
+            base: base.to_string(),
+            token: token.to_string(),
+            name: self.standing.name.clone(),
+            user: user.to_string(),
+        };
+        if let Err(e) = self.prefs.save() {
+            log::warn!("could not keep the server details: {e}");
+        }
+    }
+
+    fn forget_server(&mut self) {
+        self.prefs.server = Default::default();
+        let _ = self.prefs.save();
+    }
+
+    // ---- the connect window ----------------------------------------------
+    //
+    // The whole of a new company's first ten minutes happens in this one
+    // window: find the server, set it up if nobody has, make an account if you
+    // have not got one, sign in. Nobody types an address unless they want to,
+    // and nobody runs anything.
+
+    pub fn sign_in_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut signing) = self.signing_in.take() else {
+            return;
+        };
+        let theme = self.chrome.theme;
+        let mut keep = true;
+        let mut check = false;
+        let mut go = false;
+        let mut look = false;
+        let mut host_here = false;
+        let mut pick: Option<String> = None;
+
+        egui::Window::new("Connect to a server")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .max_width(700.0)
+            .show(ctx, |ui| {
+                ui.set_min_width(460.0);
+
+                let painter = ui.painter();
+                let mark = egui::Rect::from_min_size(
+                    ui.next_widget_position() + egui::vec2(0.0, 2.0),
+                    egui::vec2(44.0, 44.0),
+                );
+                ui::mark::draw(painter, mark, theme);
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(56.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(heading(&signing.step)).strong());
+                        ui.label(
+                            RichText::new(explanation(&signing.step))
+                                .color(theme.faint)
+                                .size(11.0),
+                        );
+                    });
+                });
+                ui.add_space(14.0);
+
+                match signing.step {
+                    Step::Choosing => {
+                        choosing(ui, theme, &mut signing, &mut look, &mut pick, &mut check,
+                                 &mut host_here);
+                    }
+                    Step::SigningIn => {
+                        where_it_is(ui, theme, &signing);
+                        ui.add_space(10.0);
+                        field(ui, theme, "Email", &mut signing.email, "you@yourcompany.com");
+                        ui.add_space(8.0);
+                        if secret(ui, theme, "Password", &mut signing.password) {
+                            go = true;
+                        }
+                        if signing.joining == "code" || signing.joining == "open" {
+                            ui.add_space(8.0);
+                            if ui
+                                .add(egui::Button::new(
+                                    RichText::new("I haven't got an account yet").size(11.0),
+                                )
+                                .frame(false))
+                                .clicked()
+                            {
+                                signing.step = Step::Joining;
+                                signing.error = None;
+                            }
+                        }
+                    }
+                    Step::SettingUp => {
+                        where_it_is(ui, theme, &signing);
+                        ui.add_space(10.0);
+                        field(
+                            ui,
+                            theme,
+                            "What to call this server",
+                            &mut signing.company,
+                            "Your company's name",
+                        );
+                        note(
+                            ui,
+                            theme,
+                            "It shows in everybody's title bar, so nobody marks up a drawing \
+                             on the wrong one.",
+                        );
+                        ui.add_space(8.0);
+                        field(ui, theme, "Your name", &mut signing.person, "First and last name");
+                        note(ui, theme, "This goes in the Author column of every markup you make.");
+                        ui.add_space(8.0);
+                        field(ui, theme, "Email", &mut signing.email, "you@yourcompany.com");
+                        ui.add_space(8.0);
+                        if secret(ui, theme, "Password", &mut signing.password) {
+                            go = true;
+                        }
+                        note(
+                            ui,
+                            theme,
+                            "Twelve characters at least. Four unrelated words beats a short \
+                             one with symbols in it.",
+                        );
+                    }
+                    Step::Joining => {
+                        where_it_is(ui, theme, &signing);
+                        ui.add_space(10.0);
+                        if signing.joining != "open" {
+                            field(
+                                ui,
+                                theme,
+                                "Join code",
+                                &mut signing.code,
+                                "beam-plate-weld-stud-truss-1a2b",
+                            );
+                            note(
+                                ui,
+                                theme,
+                                "Whoever set the server up has this. Capitals and spaces do \
+                                 not matter.",
+                            );
+                            ui.add_space(8.0);
+                        }
+                        field(ui, theme, "Your name", &mut signing.person, "Dave");
+                        ui.add_space(8.0);
+                        field(ui, theme, "Email", &mut signing.email, "you@yourcompany.com");
+                        ui.add_space(8.0);
+                        if secret(ui, theme, "Choose a password", &mut signing.password) {
+                            go = true;
+                        }
+                        ui.add_space(8.0);
+                        if ui
+                            .add(
+                                egui::Button::new(RichText::new("I already have an account").size(11.0))
+                                    .frame(false),
+                            )
+                            .clicked()
+                        {
+                            signing.step = Step::SigningIn;
+                            signing.error = None;
+                        }
+                    }
+                    Step::JustSetUp => {
+                        just_set_up(ui, theme, &signing);
+                    }
+                }
+
+                if let Some(error) = &signing.error {
+                    ui.add_space(8.0);
+                    ui.colored_label(Color32::from_rgb(235, 120, 120), error);
+                }
+
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    match signing.step {
+                        Step::Choosing => {
+                            let ready = !signing.base.trim().is_empty() && !signing.waiting;
+                            if ui.add_enabled(ready, egui::Button::new("Continue")).clicked() {
+                                check = true;
+                            }
+                        }
+                        Step::JustSetUp => {
+                            if ui.button("Done").clicked() {
+                                keep = false;
+                            }
+                        }
+                        _ => {
+                            if ui
+                                .add_enabled(ready_to_go(&signing), egui::Button::new(button(&signing.step)))
+                                .clicked()
+                            {
+                                go = true;
+                            }
+                            if ui
+                                .add(egui::Button::new(RichText::new("Back").size(11.0)).frame(false))
+                                .clicked()
+                            {
+                                signing.step = Step::Choosing;
+                                signing.error = None;
+                                signing.password.clear();
+                            }
+                        }
+                    }
+                    if signing.step != Step::JustSetUp && ui.button("Cancel").clicked() {
+                        keep = false;
+                    }
+                    if signing.waiting {
+                        ui.add_space(8.0);
+                        ui.spinner();
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            RichText::new("Excalibur View keeps a session, never your password.")
+                                .color(theme.faint)
+                                .size(10.0),
+                        );
+                    });
+                });
+            });
+
+        if let Some(base) = pick {
+            signing.base = base;
+            signing.found = None;
+            check = true;
+        }
+        if look {
+            signing.looking = true;
+            signing.servers.clear();
+            signing.error = None;
+            self.ask(Ask::Look);
+        }
+        if host_here {
+            self.host_on_this_computer(&mut signing);
+        }
+        if check {
+            signing.waiting = true;
+            signing.error = None;
+            self.ask(Ask::Check(signing.base.trim().to_string()));
+        }
+        if go {
+            signing.waiting = true;
+            signing.error = None;
+            let base = signing.base.trim().to_string();
+            match signing.step {
+                Step::SettingUp => self.ask(Ask::Claim {
+                    base,
+                    setup: Box::new(hub::Setup {
+                        company: signing.company.trim().to_string(),
+                        name: signing.person.trim().to_string(),
+                        email: signing.email.trim().to_string(),
+                        password: signing.password.clone(),
+                    }),
+                }),
+                Step::Joining => self.ask(Ask::Join {
+                    base,
+                    join: Box::new(hub::Join {
+                        code: signing.code.trim().to_string(),
+                        name: signing.person.trim().to_string(),
+                        email: signing.email.trim().to_string(),
+                        password: signing.password.clone(),
+                    }),
+                }),
+                _ => self.ask(Ask::SignIn {
+                    base,
+                    email: signing.email.trim().to_string(),
+                    password: signing.password.clone(),
+                }),
+            }
+            // Out of memory as soon as it has gone. It is never written down.
+            signing.password.clear();
+        }
+        if keep {
+            self.signing_in = Some(signing);
+        }
+    }
+
+    /// Serves the drawings from this machine, starting now.
+    ///
+    /// Two separate things, and they are told apart on purpose. Serving happens
+    /// immediately and needs nothing of anybody. Surviving a reboot needs
+    /// administrator rights, and if Windows says no the first thing still
+    /// worked — so the person is told what they have rather than that it
+    /// failed.
+    fn host_on_this_computer(&mut self, signing: &mut SigningIn) {
+        let name = if signing.company.trim().is_empty() {
+            "Excalibur View".to_string()
+        } else {
+            signing.company.trim().to_string()
+        };
+        let folder = crate::host::default_data_folder();
+        let port = hyperview_server::config::DEFAULT_PORT;
+
+        match crate::host::start_here(&name, folder.clone(), port) {
+            Ok(hosting) => {
+                signing.base = hosting.url.clone();
+                signing.error = None;
+                signing.found = None;
+                let standing = crate::host::keep_serving(&folder, port, &name);
+                signing.standing = Some(standing.says());
+                self.status = hosting.tell_the_office();
+                // Held for as long as the program runs: dropping it stops the
+                // server, and a server that stopped because a struct went out
+                // of scope is the kind of thing somebody spends a day on.
+                self.hosting = Some(hosting);
+                // Straight on to setting it up, since the person who just
+                // pressed this is the one who is going to.
+                signing.step = Step::SettingUp;
+                signing.waiting = false;
+            }
+            Err(why) => {
+                signing.error = Some(why);
+                signing.waiting = false;
+            }
+        }
+    }
+
+    // ---- the panel -------------------------------------------------------
+
+    pub fn server_panel(&mut self, ui: &mut egui::Ui) {
+        let theme = self.chrome.theme;
+
+        if !self.standing.signed_in() {
+            ui.add_space(10.0);
+            ui.vertical_centered(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(52.0, 52.0), egui::Sense::hover());
+                ui::mark::draw(ui.painter(), rect, theme);
+                ui.add_space(10.0);
+                ui.label(RichText::new("Not connected").strong());
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(
+                        "Studio is where an office shares drawings and takeoff. Connect to your \
+                         company's server for shared drawings, tool chests and takeoffs.",
+                    )
+                    .color(theme.faint)
+                    .size(11.0),
+                );
+                ui.add_space(12.0);
+                if ui.button("Connect…").clicked() {
+                    self.begin_sign_in();
+                }
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(
+                        "No server yet? Excalibur View Office puts one on any computer in the \
+                         office. Try it free for 30 days.",
+                    )
+                    .color(theme.faint)
+                    .size(10.0),
+                );
+                ui.hyperlink_to(RichText::new("Get the server").size(11.0), hub::site::OFFICE_SERVER);
+            });
+            return;
+        }
+
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&self.standing.name).strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Sign out").clicked() {
+                    self.ask(Ask::SignOut);
+                }
+            });
+        });
+        if let Some(who) = self.standing.who.clone() {
+            ui.label(
+                RichText::new(format!("{} · {}", who.name, role_name(who.role)))
+                    .color(theme.faint)
+                    .size(11.0),
+            );
+        }
+        if let Some(pinned) = self.standing.pinned_to.clone() {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!("This office is held on version {pinned}."))
+                    .color(theme.faint)
+                    .size(10.0),
+            );
+        }
+        // Licensing is said to administrators, and to everybody else only
+        // when it stops them sharing. Never a pop-up, never a countdown for
+        // somebody who can do nothing about it.
+        if let Some(license) = self.standing.license.clone() {
+            let admin = self.standing.who.as_ref().map(|w| w.role) == Some(hub::Role::Admin);
+            let urgent = !license.sharing || license.trial_days_left.is_some_and(|d| d <= 7);
+            let show = !license.message.is_empty() && (admin && license.state != "founding" || !license.sharing);
+            if show {
+                ui.add_space(4.0);
+                egui::Frame::new()
+                    .inner_margin(egui::Margin::symmetric(8, 6))
+                    .corner_radius(4.0)
+                    .fill(if urgent { theme.warn.gamma_multiply(0.15) } else { theme.hover })
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(&license.message)
+                                .color(if urgent { theme.warn } else { theme.text })
+                                .size(11.0),
+                        );
+                        // Every message an administrator is shown here has
+                        // the same two ways forward: a license file, or the
+                        // page that sells one.
+                        if admin && license.state != "founding" {
+                            let licensed = license.state == "licensed";
+                            ui.horizontal(|ui| {
+                                if ui.small_button("Add license file…").clicked() {
+                                    self.pick_license();
+                                }
+                                ui.hyperlink_to(
+                                    RichText::new(if licensed { "Renew or add users" } else { "Buy Office" }).size(11.0),
+                                    hub::site::BUY,
+                                );
+                            });
+                        }
+                    });
+            }
+        }
+        if let Some(busy) = self.standing.busy.clone() {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(busy).color(theme.faint).size(11.0));
+            });
+        }
+        ui.separator();
+
+        let mut open_project: Option<String> = None;
+        let mut open_set: Option<(String, String)> = None;
+        let mut copy_set: Option<(String, String)> = None;
+        let mut fetch_chest: Option<(String, String)> = None;
+        let mut back = false;
+        let mut actions = PanelActions::default();
+        let role = self.standing.who.as_ref().map(|w| w.role);
+        let is_admin = role == Some(hub::Role::Admin);
+        let may_write = matches!(role, Some(hub::Role::Admin) | Some(hub::Role::Estimator));
+
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                match self.standing.looking_at.clone() {
+                    None => {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Projects").color(theme.faint).size(11.0));
+                            if may_write && self.office.new_project.is_none() {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.small_button("New project").clicked() {
+                                            self.office.new_project =
+                                                Some((String::new(), String::new()));
+                                        }
+                                    },
+                                );
+                            }
+                        });
+                        let mut close_form = false;
+                        if let Some((number, name)) = self.office.new_project.as_mut() {
+                            ui.add_space(4.0);
+                            ui.add(
+                                egui::TextEdit::singleline(number)
+                                    .hint_text("Job number")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.add(
+                                egui::TextEdit::singleline(name)
+                                    .hint_text("Job name")
+                                    .desired_width(f32::INFINITY),
+                            );
+                            ui.horizontal(|ui| {
+                                let ready = !number.trim().is_empty() && !name.trim().is_empty();
+                                if ui.add_enabled(ready, egui::Button::new("Start it")).clicked() {
+                                    actions.new_project =
+                                        Some((number.trim().to_string(), name.trim().to_string()));
+                                    close_form = true;
+                                }
+                                if ui.button("Cancel").clicked() {
+                                    close_form = true;
+                                }
+                            });
+                            ui.add_space(6.0);
+                        }
+                        if close_form {
+                            self.office.new_project = None;
+                        }
+                        if self.standing.projects.is_empty() {
+                            ui.add_space(6.0);
+                            ui.label(
+                                RichText::new("Nothing on this server yet.")
+                                    .color(theme.faint)
+                                    .size(11.0),
+                            );
+                        }
+                        for project in &self.standing.projects {
+                            let response = ui.add(
+                                egui::Button::new(RichText::new(format!(
+                                    "{}  {}",
+                                    project.number, project.name
+                                )))
+                                .frame(false)
+                                .min_size(egui::vec2(ui.available_width(), 22.0)),
+                            );
+                            if response.clicked() {
+                                open_project = Some(project.id.clone());
+                            }
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} drawing set{}",
+                                    project.sets,
+                                    if project.sets == 1 { "" } else { "s" }
+                                ))
+                                .color(theme.faint)
+                                .size(10.0),
+                            );
+                        }
+
+                        if !self.standing.chests.is_empty() || is_admin {
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new("Shared tool chests")
+                                        .color(theme.faint)
+                                        .size(11.0),
+                                );
+                                if is_admin {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .small_button("Share one")
+                                                .on_hover_text(
+                                                    "Put a tool chest (.bpx) on the server, so \
+                                                     everybody in the office can use it.",
+                                                )
+                                                .clicked()
+                                            {
+                                                actions.share_chest = true;
+                                            }
+                                        },
+                                    );
+                                }
+                            });
+                            for chest in &self.standing.chests {
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label(RichText::new(&chest.name).size(12.0));
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} tools in {} sets",
+                                                chest.tools, chest.sets
+                                            ))
+                                            .color(theme.faint)
+                                            .size(10.0),
+                                        );
+                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("Use").clicked() {
+                                                fetch_chest =
+                                                    Some((chest.id.clone(), chest.name.clone()));
+                                            }
+                                        },
+                                    );
+                                });
+                                ui.separator();
+                            }
+                        }
+                        ui.add_space(12.0);
+                        ui.separator();
+                        if is_admin {
+                            self.office.base = self.standing.base.clone();
+                            office_section(ui, theme, &mut self.office, self.standing.license.as_ref(), &mut actions);
+                        }
+                        password_section(ui, theme, &mut self.office, &mut actions);
+                    }
+                    Some(project) => {
+                        let response = ui.horizontal(|ui| {
+                            let (mark, _) = ui
+                                .allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                            arrow_back(ui.painter(), mark, theme.faint);
+                            ui.label(RichText::new("Projects").color(theme.faint).size(11.0));
+                        });
+                        if response.response.interact(egui::Sense::click()).clicked() {
+                            back = true;
+                        }
+                        if may_write {
+                            ui.add_space(4.0);
+                            if ui
+                                .button("Add drawing sets…")
+                                .on_hover_text(
+                                    "Put PDFs from this computer on the server, in this \
+                                     project. Everybody in the office sees them, and markups \
+                                     made on them are shared.",
+                                )
+                                .clicked()
+                            {
+                                actions.upload_to = Some(project.clone());
+                            }
+                        }
+                        ui.add_space(6.0);
+                        if self.standing.sets.is_empty() {
+                            ui.label(
+                                RichText::new("No drawing sets in this project yet.")
+                                    .color(theme.faint)
+                                    .size(11.0),
+                            );
+                        }
+                        for set in &self.standing.sets {
+                            let response = ui.add(
+                                egui::Button::new(RichText::new(&set.name))
+                                    .frame(false)
+                                    .min_size(egui::vec2(ui.available_width(), 22.0)),
+                            );
+                            if response.clicked() {
+                                open_set = Some((set.id.clone(), set.name.clone()));
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "{} sheets · {:.1} MB · {}",
+                                        set.sheets,
+                                        set.bytes as f64 / 1_048_576.0,
+                                        set.uploaded_by
+                                    ))
+                                    .color(theme.faint)
+                                    .size(10.0),
+                                );
+                                // Nobody takes off on the set everybody else
+                                // is reading. One button, and no upload: the
+                                // copy points at the same file.
+                                if ui
+                                    .small_button("Take off on a copy")
+                                    .on_hover_text(
+                                        "A copy of this set to mark up, with the sheet numbers and \
+                                         the scales already on it. The issued set stays clean, and \
+                                         nothing is uploaded.",
+                                    )
+                                    .clicked()
+                                {
+                                    copy_set = Some((set.id.clone(), set.name.clone()));
+                                }
+                            });
+                            ui.separator();
+                        }
+                    }
+                }
+            });
+
+        if back {
+            self.standing.looking_at = None;
+            self.standing.sets.clear();
+        }
+        if let Some(project) = open_project {
+            self.standing.looking_at = Some(project.clone());
+            self.standing.busy = Some("Looking…".into());
+            self.ask(Ask::Sets(project));
+        }
+        if let Some((set, name)) = copy_set {
+            self.standing.busy = Some("Making a copy to take off on…".into());
+            self.ask(Ask::CopySet { set, name });
+        }
+        if let Some((set, name)) = open_set {
+            self.ask(Ask::Open { set, name });
+        }
+        if let Some((id, name)) = fetch_chest {
+            self.ask(Ask::FetchChest { id, name });
+        }
+        if let Some((number, name)) = actions.new_project {
+            self.standing.busy = Some("Starting the project…".into());
+            self.ask(Ask::NewProject { number, name });
+        }
+        if let Some(project) = actions.upload_to {
+            if let Some(files) = rfd::FileDialog::new()
+                .set_title("Put drawing sets on the server")
+                .add_filter("PDF drawings", &["pdf", "PDF"])
+                .pick_files()
+            {
+                if !files.is_empty() {
+                    self.ask(Ask::UploadSets { project, files });
+                }
+            }
+        }
+        if actions.share_chest {
+            if let Some(file) = rfd::FileDialog::new()
+                .set_title("Share a tool chest with the office")
+                .add_filter("Tool chest", &[chest::native::EXTENSION, "bpx", "BPX", "btx", "BTX"])
+                .pick_file()
+            {
+                self.ask(Ask::ShareChest(file));
+            }
+        }
+        if actions.office {
+            self.ask(Ask::Office);
+            self.ask(Ask::License);
+        }
+        if actions.add_license {
+            self.pick_license();
+        }
+        if actions.paste_license {
+            // The button says Cancel while the box is open, so one action does
+            // both: open it empty, or throw away what is in it.
+            self.office.pasting_license = match self.office.pasting_license {
+                Some(_) => None,
+                None => Some(String::new()),
+            };
+        }
+        if let Some(text) = actions.send_license {
+            self.office.pasting_license = None;
+            self.ask(Ask::AddLicenseText(text));
+        }
+        if let Some(path) = actions.use_found_license {
+            self.ask(Ask::AddLicense(path));
+        }
+        if actions.new_code {
+            self.ask(Ask::NewJoinCode);
+        }
+        if let Some(channel) = actions.channel {
+            self.ask(Ask::UpdateChannel(channel));
+        }
+        if actions.watch_fleet {
+            self.office.fleet_note = Some("Letting Excalibur Fleet in…".into());
+            self.office.fleet_key = None;
+            self.ask(Ask::WatchWithFleet {
+                name: self.standing.name.clone(),
+                base: self.standing.base.clone(),
+            });
+        }
+        if actions.stop_fleet {
+            self.office.fleet_note = None;
+            self.office.fleet_key = None;
+            self.ask(Ask::StopFleet);
+        }
+        if let Some(name) = actions.make_key {
+            self.ask(Ask::MakeIntegrationKey(name));
+        }
+        if let Some(id) = actions.revoke_key {
+            self.ask(Ask::RevokeKey(id));
+        }
+        if let Some((current, new)) = actions.password {
+            self.office.password_note = None;
+            self.ask(Ask::ChangePassword { current, new });
+        }
+    }
+
+    pub fn begin_sign_in(&mut self) {
+        let remembered = self.prefs.server.clone();
+        // Whatever this seat used last, or failing that whatever the installer
+        // set it up for. A seat that already knows its server skips straight to
+        // the password box; a fresh one starts by looking round the network,
+        // which is the case this whole window exists for.
+        let base = self.joined.address(&remembered.base);
+        let known = !base.trim().is_empty();
+        // The machine's login name is a fine default for the Author column on a
+        // markup, and a poor one for the name on an account: "creed" and
+        // "Unknown" are both worse than the box being empty with "Creede" in
+        // grey behind it. So it is offered only when it looks like a name
+        // somebody chose.
+        let person = match self.author.trim() {
+            "" | "Unknown" => String::new(),
+            name if name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()) => {
+                String::new()
+            }
+            name => name.to_string(),
+        };
+        self.signing_in = Some(SigningIn {
+            base,
+            person,
+            joined_note: self.joined.note.clone(),
+            ..Default::default()
+        });
+        if known {
+            if let Some(signing) = self.signing_in.as_mut() {
+                signing.waiting = true;
+            }
+            let base = self.joined.address(&remembered.base);
+            self.ask(Ask::Check(base));
+        } else {
+            if let Some(signing) = self.signing_in.as_mut() {
+                signing.looking = true;
+            }
+            self.ask(Ask::Look);
+        }
+    }
+
+    /// A newer version, said as soon as it is known about.
+    ///
+    /// In place: a button restarts into it, and "Later" leaves it to take
+    /// over at the next start. Being fetched: said, so nobody wonders. Out,
+    /// but this copy cannot put it in place itself — a copy run from a
+    /// download folder, or one whose update was refused — a button opens the
+    /// page to get it from, with why. Nothing ever restarts on its own: a
+    /// takeoff half done is never interrupted.
+    pub fn update_banner(&mut self, ctx: &egui::Context) {
+        let running = env!("CARGO_PKG_VERSION");
+        let offered = self
+            .standing
+            .update
+            .clone()
+            .filter(|r| hub::update::newer(&r.version, running));
+        let ready = self
+            .standing
+            .update_ready
+            .clone()
+            .filter(|v| hub::update::newer(v, running));
+        let version = match (&ready, &offered) {
+            (Some(v), _) => v.clone(),
+            (None, Some(r)) => r.version.clone(),
+            (None, None) => return self.update_answer(ctx),
+        };
+        if self.dismissed_update.as_deref() == Some(version.as_str()) {
+            return;
+        }
+        enum Say {
+            Ready,
+            Getting,
+            Get(Option<String>),
+        }
+        let say = if ready.is_some() {
+            Say::Ready
+        } else if let Some(why) = self.standing.update_refused.clone() {
+            Say::Get(Some(why))
+        } else if !self.updates_itself {
+            Say::Get(None)
+        } else {
+            Say::Getting
+        };
+        let notes = offered
+            .as_ref()
+            .filter(|r| r.version == version)
+            .map(|r| r.notes.clone())
+            .unwrap_or_default();
+        let theme = self.chrome.theme;
+        let mut dismiss = false;
+        let mut restart = false;
+        let mut get = false;
+        egui::TopBottomPanel::top("update")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.accent.gamma_multiply(0.55))
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let headline = match &say {
+                        Say::Ready => format!("Excalibur View {version} is ready."),
+                        Say::Getting => format!("Excalibur View {version} is out — getting it now…"),
+                        Say::Get(_) => format!("Excalibur View {version} is out."),
+                    };
+                    ui.label(RichText::new(headline).strong());
+                    if !notes.trim().is_empty() {
+                        ui.label(RichText::new(&notes).color(theme.faint).size(11.0));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        match &say {
+                            Say::Ready => {
+                                if ui.small_button("Later").clicked() {
+                                    dismiss = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Restart now").strong().color(egui::Color32::WHITE),
+                                        )
+                                        .fill(theme.accent),
+                                    )
+                                    .on_hover_text(
+                                        "Saves what is open, restarts, and opens it all again.",
+                                    )
+                                    .clicked()
+                                {
+                                    restart = true;
+                                }
+                                ui.label(
+                                    RichText::new("Or it takes over the next time Excalibur View opens.")
+                                        .color(theme.faint)
+                                        .size(11.0),
+                                );
+                            }
+                            Say::Getting => {
+                                if ui.small_button("Hide").clicked() {
+                                    dismiss = true;
+                                }
+                                ui.spinner();
+                            }
+                            Say::Get(why) => {
+                                if ui.small_button("Later").clicked() {
+                                    dismiss = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new("Download").strong().color(egui::Color32::WHITE),
+                                        )
+                                        .fill(theme.accent),
+                                    )
+                                    .clicked()
+                                {
+                                    get = true;
+                                }
+                                let why = match why {
+                                    Some(why) => format!("It could not be installed here: {why}"),
+                                    None => "This copy is not the installed one, so it does \
+                                             not update itself."
+                                        .into(),
+                                };
+                                ui.label(RichText::new(why).color(theme.faint).size(11.0));
+                            }
+                        }
+                    });
+                });
+            });
+        if dismiss {
+            self.dismissed_update = Some(version);
+        }
+        if get {
+            if let Some(page) = hub::web::download_page(crate::trust::HOME_FEED) {
+                ctx.open_url(egui::OpenUrl::new_tab(page));
+            }
+        }
+        if restart {
+            self.restart_into_update(ctx);
+        }
+    }
+
+    /// "Check for Updates" being answered, or its answer when there is
+    /// nothing to install.
+    fn update_answer(&mut self, ctx: &egui::Context) {
+        if !self.checking_for_update && self.update_note.is_none() {
+            return;
+        }
+        let theme = self.chrome.theme;
+        let mut done = false;
+        egui::TopBottomPanel::top("update")
+            .frame(
+                egui::Frame::new()
+                    .fill(theme.chrome)
+                    .inner_margin(egui::Margin::symmetric(10, 6)),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| match self.update_note.as_deref() {
+                    None => {
+                        ui.spinner();
+                        ui.label("Checking for updates…");
+                    }
+                    Some(note) => {
+                        // Wrapped, so a long note is read to the end rather
+                        // than running off the side of the window.
+                        let room = (ui.available_width() - 56.0).max(200.0);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(room, 0.0),
+                            egui::Layout::top_down(egui::Align::Min),
+                            |ui| {
+                                ui.set_max_width(room);
+                                ui.add(egui::Label::new(note).wrap());
+                            },
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                            if ui.small_button("OK").clicked() {
+                                done = true;
+                            }
+                        });
+                    }
+                });
+            });
+        if done {
+            self.update_note = None;
+        }
+    }
+
+    /// Everything open is saved, a new copy is started with the same
+    /// drawings, and this window closes. The new copy waits for this one to
+    /// let go of the window before it opens its own.
+    pub fn restart_into_update(&mut self, ctx: &egui::Context) {
+        self.save_all();
+        let open: Vec<std::path::PathBuf> = self.docs.iter().map(|d| d.path.clone()).collect();
+        match crate::install::restart(&open) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(why) => {
+                self.error = Some(format!(
+                    "Excalibur View could not restart itself ({why}). Close it and open it again \
+                     to use the new version."
+                ))
+            }
+        }
+    }
+
+    /// Help → Connect Claude.
+    ///
+    /// Signed in to an office server, Claude gets a read-only key to the
+    /// office's jobs as well as the window. Without one — one person on the
+    /// free app — it gets the window alone: what is open, reading and looking
+    /// at sheets, the drawing's takeoff, and proposals with a Fix button.
+    pub fn connect_claude(&mut self) {
+        // Claude runs on somebody else's computers. On a sealed seat that is
+        // the whole of the objection, and there is no version of it that is
+        // allowed.
+        if hub::sealed::is_sealed() {
+            self.error = Some(hub::sealed::refusal("The assistant"));
+            return;
+        }
+        if !self.standing.signed_in() {
+            self.update_note = Some(match crate::assistant::add_to_claude() {
+                Ok(places) => format!(
+                    "Claude Desktop can work alongside you in this window now: it sees what is open, reads \
+                     and looks at sheets, totals the drawing's takeoff, and proposes markups and scales with a \
+                     Fix button — only you draw. Quit Claude Desktop from the tray (right-click its icon, Quit — \
+                     closing the window is not enough) and open it again, then ask it something like \"what's \
+                     on this sheet?\" ({} settings file{} updated. Help → Test Claude Connection checks it any \
+                     time.) An office on Excalibur View Office signs in to its server and connects again to add \
+                     its jobs.",
+                    places.len(),
+                    if places.len() == 1 { "" } else { "s" }
+                ),
+                Err(why) => {
+                    self.error = Some(format!("Claude could not be connected: {why}"));
+                    return;
+                }
+            });
+            return;
+        }
+        let computer = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "this computer".into());
+        self.status = "Connecting Claude…".into();
+        self.ask(Ask::ConnectAssistant { computer });
+    }
+
+    /// Help → Check for Updates.
+    pub fn check_for_updates_now(&mut self) {
+        self.checking_for_update = true;
+        self.update_note = None;
+        self.dismissed_update = None;
+        self.status = if self.standing.base.is_empty() {
+            "Checking for updates…".into()
+        } else {
+            "Asking your server for updates…".into()
+        };
+        self.last_update_check = std::time::Instant::now();
+        self.ask(Ask::CheckForUpdate {
+            running: env!("CARGO_PKG_VERSION").to_string(),
+            channel: self.prefs.channel,
+            asked: true,
+        });
+    }
+}
+
+/// What an administrator looks after: the code people join with, and how the
+/// office keeps up to date.
+fn office_section(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    office: &mut OfficePanel,
+    license: Option<&hub::license::Standing>,
+    actions: &mut PanelActions,
+) {
+    let shown = egui::CollapsingHeader::new(RichText::new("Office").color(theme.faint).size(11.0))
+        .id_salt("office")
+        .show(ui, |ui| {
+            // License
+            if let Some(license) = license {
+                if office.licenses_about.is_none() && license.license_id.is_none() {
+                    office.licenses_about = Some(licenses_lying_about());
+                }
+                license_section(
+                    ui,
+                    theme,
+                    license,
+                    &mut office.pasting_license,
+                    office.licenses_about.as_deref().unwrap_or(&[]),
+                    actions,
+                );
+                ui.add_space(10.0);
+            }
+
+            // Join code
+            ui.label(RichText::new("Join code").strong().size(12.0));
+            match office.joining.as_ref() {
+                Some(joining) if joining.how == "code" && !joining.code.is_empty() => {
+                    ui.label(RichText::new(&joining.code).monospace().size(18.0));
+                    ui.label(
+                        RichText::new(
+                            "Anybody in the office opens Excalibur View, picks this server, presses \
+                             \"I haven't got an account yet\" and types this.",
+                        )
+                        .color(theme.faint)
+                        .size(10.0),
+                    );
+                }
+                Some(joining) if joining.how == "open" => {
+                    ui.label(
+                        RichText::new("Anybody who can reach this server can make an account.")
+                            .size(11.0),
+                    );
+                }
+                Some(_) => {
+                    ui.label(RichText::new("Nobody can make an account by themselves.").size(11.0));
+                }
+                None => {
+                    ui.spinner();
+                }
+            }
+            if ui
+                .small_button("Make a new code")
+                .on_hover_text("The old code stops working. What to do when somebody leaves.")
+                .clicked()
+            {
+                actions.new_code = true;
+            }
+
+            // Updates
+            ui.add_space(10.0);
+            ui.label(RichText::new("Updates").strong().size(12.0));
+            if let Some(updates) = office.updates.as_ref() {
+                let mut early = updates.channel == "early";
+                let was = early;
+                ui.radio_value(&mut early, false, "Take new versions when they are released");
+                ui.radio_value(&mut early, true, "Get them early, to try them here first");
+                if early != was {
+                    actions.channel = Some(if early { "early" } else { "stable" }.into());
+                }
+                let mut lines = vec![format!("This server is version {}.", updates.running)];
+                if let Some(offering) = &updates.offering {
+                    lines.push(format!("Offering version {offering} to every computer."));
+                }
+                match (&updates.checked, &updates.note) {
+                    (Some(when), Some(note)) => {
+                        let day = when.split('T').next().unwrap_or(when);
+                        lines.push(format!("Last checked {day}: {note}."));
+                    }
+                    _ => lines.push("It has not checked for a new version yet.".into()),
+                }
+                ui.label(RichText::new(lines.join(" ")).color(theme.faint).size(10.0));
+            } else {
+                ui.spinner();
+            }
+
+            // Excalibur Fleet
+            ui.add_space(10.0);
+            ui.label(RichText::new("Excalibur Fleet").strong().size(12.0));
+            match office.fleet.as_ref() {
+                Some(fleet) if fleet.on => {
+                    ui.label(
+                        RichText::new(
+                            "Fleet can see this server's health, disk and log, and who is \
+                             signed in to it and from which computer — and nothing else: not a \
+                             drawing, not a markup.",
+                        )
+                        .color(theme.faint)
+                        .size(10.0),
+                    );
+                    if ui.small_button("Stop letting Fleet watch").clicked() {
+                        actions.stop_fleet = true;
+                    }
+                }
+                Some(_) => {
+                    if ui
+                        .small_button("Let Excalibur Fleet watch this server")
+                        .on_hover_text(
+                            "For whoever looks after this company's computers: backups, disk \
+                             space and the server's log on one board. Not the drawings.",
+                        )
+                        .clicked()
+                    {
+                        actions.watch_fleet = true;
+                    }
+                }
+                None => {}
+            }
+            if let Some(note) = &office.fleet_note {
+                ui.label(RichText::new(note).color(theme.faint).size(10.0));
+            }
+            if let Some(key) = office.fleet_key.clone() {
+                ui.label(RichText::new(&office.fleet_address).monospace().size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&key).monospace().size(11.0));
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(key.clone());
+                    }
+                });
+            }
+
+            // Other programs: FabWire and anything else that uses the API.
+            ui.add_space(10.0);
+            ui.label(RichText::new("Other programs").strong().size(12.0));
+            ui.label(
+                RichText::new(
+                    "A key lets another system — FabWire — create projects, put drawing sets \
+                     up and read back the markups, as you. It does not expire; take it back \
+                     here when it is no longer wanted.",
+                )
+                .color(theme.faint)
+                .size(10.0),
+            );
+            for key in office.keys.iter().filter(|k| k.purpose == "integration" || k.purpose == "assistant") {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&key.name).size(11.0));
+                    ui.label(
+                        RichText::new(format!(
+                            "{} · {}{}",
+                            if key.purpose == "assistant" { "Claude" } else { "program" },
+                            key.person,
+                            key.last_used
+                                .as_deref()
+                                .map(|u| format!(" · used {}", u.get(..10).unwrap_or(u)))
+                                .unwrap_or_default()
+                        ))
+                        .color(theme.faint)
+                        .size(10.0),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Take back").clicked() {
+                            actions.revoke_key = Some(key.id.clone());
+                        }
+                    });
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut office.key_name)
+                        .hint_text("FabWire")
+                        .desired_width(140.0),
+                );
+                let name = if office.key_name.trim().is_empty() {
+                    "FabWire".to_string()
+                } else {
+                    office.key_name.trim().to_string()
+                };
+                if ui.small_button("Make a key").clicked() {
+                    actions.make_key = Some(name);
+                }
+            });
+            if let Some(made) = office.new_key.clone() {
+                let key = made.key.clone().unwrap_or_default();
+                ui.label(
+                    RichText::new(format!(
+                        "The key for {}. It is shown this once — copy it into {}'s settings now.",
+                        made.name, made.name
+                    ))
+                    .color(theme.warn)
+                    .size(10.0),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&key).monospace().size(11.0));
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(key.clone());
+                    }
+                    if ui.small_button("Done").clicked() {
+                        office.new_key = None;
+                    }
+                });
+                ui.label(
+                    RichText::new(format!("Server address: {}", office.base))
+                        .color(theme.faint)
+                        .size(10.0),
+                );
+            }
+        });
+    if shown.body_returned.is_some() && !office.asked {
+        office.asked = true;
+        actions.office = true;
+    }
+    if shown.header_response.clicked() && shown.body_returned.is_none() {
+        // Closed again. Next time it opens it asks again, so the code and the
+        // update status are never a day stale.
+        office.asked = false;
+    }
+}
+
+/// The places an emailed or carried license actually lands. Nobody files a
+/// license somewhere sensible; it is in Downloads, or on the desktop, or on
+/// the stick it was walked over on.
+fn places_a_license_lands() -> Vec<(std::path::PathBuf, String)> {
+    let mut places = Vec::new();
+    if let Some(dirs) = directories::UserDirs::new() {
+        if let Some(d) = dirs.download_dir() {
+            places.push((d.to_path_buf(), "Downloads".to_string()));
+        }
+        if let Some(d) = dirs.desktop_dir() {
+            places.push((d.to_path_buf(), "the desktop".to_string()));
+        }
+        if let Some(d) = dirs.document_dir() {
+            places.push((d.to_path_buf(), "Documents".to_string()));
+        }
+    }
+    // A stick carried from the computer that signs licenses to the one that
+    // runs the server. C: is skipped: walking a whole system drive to find a
+    // file nobody put there is not worth anybody's disk.
+    #[cfg(windows)]
+    for letter in 'D'..='Z' {
+        let root = std::path::PathBuf::from(format!("{letter}:\\"));
+        if root.is_dir() {
+            places.push((root, format!("{letter}:")));
+        }
+    }
+    places
+}
+
+/// Licenses sitting in those places, newest first. Only the name and the
+/// company are read here — whether one is genuine is the server's to say.
+fn licenses_lying_about() -> Vec<FoundLicense> {
+    licenses_in(&places_a_license_lands())
+}
+
+fn licenses_in(places: &[(std::path::PathBuf, String)]) -> Vec<FoundLicense> {
+    let mut found: Vec<(std::time::SystemTime, FoundLicense)> = Vec::new();
+    for (place, where_from) in places {
+        let Ok(entries) = std::fs::read_dir(place) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(hub::license::EXTENSION) {
+                continue;
+            }
+            // Big enough to be a license is small: anything larger is not one,
+            // and is not worth reading off a stick to find out.
+            let when = match entry.metadata() {
+                Ok(m) if m.len() <= 8 * 1024 => m.modified().unwrap_or(std::time::UNIX_EPOCH),
+                _ => continue,
+            };
+            let company = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                .and_then(|v| v.get("company")?.as_str().map(str::to_string))
+                .unwrap_or_default();
+            if company.is_empty() {
+                continue;
+            }
+            found.push((when, FoundLicense { path, company, where_from: where_from.clone() }));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.dedup_by(|a, b| a.1.company == b.1.company);
+    found.into_iter().take(3).map(|(_, f)| f).collect()
+}
+
+/// Studio → Office → License: what the office has, and the three things an
+/// administrator can do about it.
+fn license_section(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    license: &hub::license::Standing,
+    pasting: &mut Option<String>,
+    lying_about: &[FoundLicense],
+    actions: &mut PanelActions,
+) {
+    ui.label(RichText::new("License").strong().size(12.0));
+    ui.label(RichText::new(license.about_line()).size(11.0));
+    let mut lines: Vec<String> = Vec::new();
+    match license.state.as_str() {
+        "licensed" | "founding" => {
+            lines.push(format!("{} people have accounts on this server.", license.users));
+            if license.state == "licensed" {
+                lines.push(
+                    "If updates are not renewed, everything keeps working on the version you \
+                     have; new versions stop."
+                        .into(),
+                );
+            }
+        }
+        "trial" => lines.push(
+            "Everything works during the trial. After it, nothing is deleted: drawings and \
+             markups stay readable and exportable, and sharing new work pauses until a license \
+             is added."
+                .into(),
+        ),
+        _ => {}
+    }
+    for line in lines {
+        ui.label(RichText::new(line).color(theme.faint).size(10.0));
+    }
+    // Before asking anybody to go and find a file: the one they were sent is
+    // almost certainly already on this computer.
+    for found in lying_about {
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .small_button(format!("Add the license for {}", found.company))
+                .on_hover_text(found.path.display().to_string())
+                .clicked()
+            {
+                actions.use_found_license = Some(found.path.clone());
+            }
+            ui.label(
+                RichText::new(format!("found in {}", found.where_from))
+                    .color(theme.faint)
+                    .size(10.0),
+            );
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .small_button("Add license file…")
+            .on_hover_text("The .evlicense file that came by email. Checked on this server; nothing is sent anywhere.")
+            .clicked()
+        {
+            actions.add_license = true;
+        }
+        // The same license, for whoever would rather not go hunting through
+        // Downloads for an attachment. The server takes it as text either way.
+        if ui
+            .small_button(if pasting.is_some() { "Cancel paste" } else { "Paste license…" })
+            .on_hover_text("Paste the license out of the email instead of saving the file first.")
+            .clicked()
+        {
+            actions.paste_license = true;
+        }
+        if license.state != "founding" {
+            ui.hyperlink_to(
+                RichText::new(if license.state == "licensed" { "Renew or add users" } else { "Buy Office" }).size(11.0),
+                // The program's own link rather than the server's: a server
+                // from before the website moved names an old address.
+                hub::site::BUY,
+            );
+        }
+        if let Some(id) = &license.license_id {
+            if ui.small_button("Copy license id").on_hover_text(id).clicked() {
+                ui.ctx().copy_text(id.clone());
+            }
+        }
+    });
+    if let Some(text) = pasting.as_mut() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new("Paste everything between the curly brackets, brackets and all.")
+                .color(theme.faint)
+                .size(10.0),
+        );
+        ui.add(
+            egui::TextEdit::multiline(text)
+                .desired_rows(5)
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Monospace)
+                .hint_text("{ \"id\": \"evl_…\", \"company\": … }"),
+        );
+        let ready = !text.trim().is_empty();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Add this license").small()).clicked() {
+                actions.send_license = Some(text.clone());
+            }
+            if !ready {
+                ui.label(RichText::new("Nothing pasted yet.").color(theme.faint).size(10.0));
+            }
+        });
+    }
+}
+
+impl App {
+    /// Asks for a license file and hands it to the server.
+    pub fn pick_license(&mut self) {
+        if let Some(file) = rfd::FileDialog::new()
+            .set_title("Add an Excalibur View Office license")
+            .add_filter("License", &[hub::license::EXTENSION])
+            .pick_file()
+        {
+            self.ask(Ask::AddLicense(file));
+        }
+    }
+}
+
+/// Changing your own password.
+fn password_section(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    office: &mut OfficePanel,
+    actions: &mut PanelActions,
+) {
+    egui::CollapsingHeader::new(RichText::new("My password").color(theme.faint).size(11.0))
+        .id_salt("my-password")
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut office.current_password)
+                    .password(true)
+                    .hint_text("Current password")
+                    .desired_width(f32::INFINITY),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut office.new_password)
+                    .password(true)
+                    .hint_text("New password, twelve characters or more")
+                    .desired_width(f32::INFINITY),
+            );
+            let ready = !office.current_password.is_empty()
+                && office.new_password.chars().count() >= 12;
+            if ui.add_enabled(ready, egui::Button::new("Change it")).clicked() {
+                actions.password = Some((
+                    std::mem::take(&mut office.current_password),
+                    std::mem::take(&mut office.new_password),
+                ));
+            }
+            if let Some(note) = &office.password_note {
+                ui.label(RichText::new(note).color(theme.faint).size(10.0));
+            }
+        });
+}
+
+/// A tick, drawn. Two strokes, so it reads at any size and in any font.
+fn tick(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.34;
+    let stroke = egui::Stroke::new((rect.width() * 0.13).max(1.2), colour);
+    painter.line_segment(
+        [
+            egui::pos2(c.x - s, c.y + s * 0.1),
+            egui::pos2(c.x - s * 0.25, c.y + s * 0.8),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x - s * 0.25, c.y + s * 0.8),
+            egui::pos2(c.x + s, c.y - s * 0.8),
+        ],
+        stroke,
+    );
+}
+
+/// An arrow pointing back the way you came.
+fn arrow_back(painter: &egui::Painter, rect: egui::Rect, colour: Color32) {
+    let c = rect.center();
+    let s = rect.width() * 0.34;
+    let stroke = egui::Stroke::new((rect.width() * 0.12).max(1.2), colour);
+    painter.line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], stroke);
+    painter.line_segment(
+        [
+            egui::pos2(c.x - s, c.y),
+            egui::pos2(c.x - s * 0.15, c.y - s * 0.7),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            egui::pos2(c.x - s, c.y),
+            egui::pos2(c.x - s * 0.15, c.y + s * 0.7),
+        ],
+        stroke,
+    );
+}
+
+fn role_name(role: hub::Role) -> &'static str {
+    match role {
+        hub::Role::Admin => "administrator",
+        hub::Role::Estimator => "estimator",
+        hub::Role::Viewer => "viewer",
+    }
+}
+
+// ---- the pieces the connect window is made of ------------------------------
+
+fn heading(step: &Step) -> &'static str {
+    match step {
+        Step::Choosing => "Your company's Excalibur View server",
+        Step::SigningIn => "Sign in",
+        Step::SettingUp => "Set this server up",
+        Step::Joining => "Make yourself an account",
+        Step::JustSetUp => "That's it — you're set up",
+    }
+}
+
+fn explanation(step: &Step) -> &'static str {
+    match step {
+        Step::Choosing => "Drawings, shared tool chests and takeoffs, in one place.",
+        Step::SigningIn => "With the email address and password you already have.",
+        Step::SettingUp => "Nobody has set this one up yet, so you will be its administrator.",
+        Step::Joining => "You will need the join code from whoever set the server up.",
+        Step::JustSetUp => "Here is what to tell everybody else in the office.",
+    }
+}
+
+fn button(step: &Step) -> &'static str {
+    match step {
+        Step::SettingUp => "Set it up",
+        Step::Joining => "Create my account",
+        _ => "Sign in",
+    }
+}
+
+fn ready_to_go(signing: &SigningIn) -> bool {
+    if signing.waiting || signing.base.trim().is_empty() {
+        return false;
+    }
+    let typed = !signing.email.trim().is_empty() && !signing.password.is_empty();
+    match signing.step {
+        Step::SigningIn => typed,
+        Step::SettingUp => {
+            typed && !signing.person.trim().is_empty() && !signing.company.trim().is_empty()
+        }
+        Step::Joining => {
+            typed
+                && !signing.person.trim().is_empty()
+                && (signing.joining == "open" || !signing.code.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+/// The address, always visible. Somebody about to type a password should be
+/// able to see where it is going — including when they picked the server off a
+/// list rather than typing it.
+fn where_it_is(ui: &mut egui::Ui, theme: ui::chrome::Theme, signing: &SigningIn) {
+    ui.horizontal(|ui| {
+        let (mark, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+        tick(ui.painter(), mark, theme.accent_text);
+        let said = match &signing.found {
+            Some(name) => format!("{name}  ·  {}", signing.base),
+            None => signing.base.clone(),
+        };
+        ui.label(RichText::new(said).color(theme.accent_text).size(11.0));
+    });
+    if let Some(standing) = &signing.standing {
+        ui.add_space(4.0);
+        ui.label(RichText::new(standing).color(theme.faint).size(10.0));
+    }
+}
+
+fn field(ui: &mut egui::Ui, theme: ui::chrome::Theme, label: &str, into: &mut String, hint: &str) {
+    ui.label(RichText::new(label).color(theme.faint).size(11.0));
+    ui.add(
+        egui::TextEdit::singleline(into)
+            .hint_text(hint)
+            .desired_width(f32::INFINITY),
+    );
+}
+
+/// Returns true when Enter was pressed in it, because a password box is the
+/// last one on every one of these forms and Enter is what people press.
+fn secret(ui: &mut egui::Ui, theme: ui::chrome::Theme, label: &str, into: &mut String) -> bool {
+    ui.label(RichText::new(label).color(theme.faint).size(11.0));
+    let box_ = ui.add(
+        egui::TextEdit::singleline(into)
+            .password(true)
+            .desired_width(f32::INFINITY),
+    );
+    box_.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+fn note(ui: &mut egui::Ui, theme: ui::chrome::Theme, text: &str) {
+    ui.add_space(2.0);
+    ui.label(RichText::new(text).color(theme.faint).size(10.0));
+}
+
+/// Picking a server: what answered on the network, an address typed by hand, or
+/// this computer volunteering to be one.
+fn choosing(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    signing: &mut SigningIn,
+    look: &mut bool,
+    pick: &mut Option<String>,
+    check: &mut bool,
+    host_here: &mut bool,
+) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("On this network").color(theme.faint).size(11.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add_enabled(!signing.looking, egui::Button::new(RichText::new("Look again").size(10.0)).frame(false))
+                .clicked()
+            {
+                *look = true;
+            }
+        });
+    });
+    ui.add_space(4.0);
+
+    if signing.looking {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(RichText::new("Looking…").color(theme.faint).size(11.0));
+        });
+    } else if signing.servers.is_empty() {
+        ui.label(
+            RichText::new(if signing.looked {
+                "No Excalibur View server on this network yet. This is not your file server — \
+                 it is a Excalibur View one, and somebody has to set a machine up as it. \
+                 Double-click Hyperview-Server.exe on whichever machine should hold \
+                 the drawings, or type its address below if it is on another network."
+            } else {
+                "Press Look again to see what is on this network."
+            })
+            .color(theme.faint)
+            .size(11.0),
+        );
+    } else {
+        for found in &signing.servers {
+            let line = found.as_line();
+            let response = ui.add(
+                egui::Button::new(RichText::new(line).size(12.0))
+                    .frame(true)
+                    .min_size(egui::vec2(ui.available_width(), 26.0)),
+            );
+            if response.clicked() {
+                *pick = Some(found.answer.url.clone());
+            }
+        }
+    }
+
+    ui.add_space(12.0);
+    ui.label(RichText::new("Or its address").color(theme.faint).size(11.0));
+    let address = ui.add(
+        egui::TextEdit::singleline(&mut signing.base)
+            .hint_text("https://drawings.yourcompany.com")
+            .desired_width(f32::INFINITY),
+    );
+    if address.changed() {
+        signing.found = None;
+    }
+    if address.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+        && !signing.base.trim().is_empty()
+    {
+        *check = true;
+    }
+
+    if !signing.joined_note.trim().is_empty() {
+        ui.add_space(6.0);
+        ui.label(RichText::new(&signing.joined_note).color(theme.faint).size(11.0));
+    }
+
+    ui.add_space(14.0);
+    ui.separator();
+    ui.add_space(8.0);
+    ui.label(
+        RichText::new("Haven't got a server yet?")
+            .color(theme.faint)
+            .size(11.0),
+    );
+    ui.add_space(2.0);
+    ui.label(
+        RichText::new(
+            "The drawings should live on whatever machine the company already keeps \
+             things on. Double-click Hyperview-Server.exe there once, and every desk \
+             finds it by itself.",
+        )
+        .color(theme.faint)
+        .size(10.0),
+    );
+    ui.add_space(6.0);
+    if ui
+        .add(egui::Button::new(RichText::new("Or host them on this computer").size(11.0)))
+        .on_hover_text(
+            "For a shop with no server, or for trying it out. This machine serves the \
+             drawings, and has to be on for anybody else to open them — which is why a \
+             real server is the better answer when there is one.",
+        )
+        .clicked()
+    {
+        *host_here = true;
+    }
+}
+
+/// What to tell the office, once a server has been set up.
+fn just_set_up(ui: &mut egui::Ui, theme: ui::chrome::Theme, signing: &SigningIn) {
+    ui.label(RichText::new(&signing.company).strong().size(15.0));
+    if let Some(standing) = &signing.standing {
+        ui.add_space(4.0);
+        ui.label(RichText::new(standing).color(theme.faint).size(11.0));
+    }
+    ui.add_space(12.0);
+
+    ui.label(RichText::new("Everybody else").color(theme.faint).size(11.0));
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "They open Excalibur View, the server is already in the list, and they press \
+             \"I haven't got an account yet\". Then they type this:",
+        )
+        .size(11.0),
+    );
+    ui.add_space(8.0);
+
+    // Selectable, because it is going to be copied into an email or read out
+    // across an office, and a code somebody has to retype from a screenshot is
+    // a code somebody gets wrong.
+    let mut code = signing.join_code.clone();
+    ui.add(
+        egui::TextEdit::singleline(&mut code)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY),
+    );
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new(
+            "You can change this any time, which is what to do when somebody leaves. \
+             It decides who may ask for an account, not what protects one.",
+        )
+        .color(theme.faint)
+        .size(10.0),
+    );
+    ui.add_space(10.0);
+    ui.label(RichText::new("The address, if they ever need it").color(theme.faint).size(11.0));
+    let mut address = signing.base.clone();
+    ui.add(
+        egui::TextEdit::singleline(&mut address)
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY),
+    );
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::File::create(&path).unwrap().write_all(body.as_bytes()).unwrap();
+        path
+    }
+
+    fn a_license(company: &str) -> String {
+        format!(
+            r#"{{"id":"evl_1","company":"{company}","edition":"office","users":6,
+                "updates_through":"2027-09-22","issued":"2026-09-22","key":"mesafab-2026",
+                "signature":"00"}}"#
+        )
+    }
+
+    fn a_folder(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hv-found-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_license_left_in_downloads_is_offered() {
+        let dir = a_folder("downloads");
+        write(&dir, "Arc Valley Construction.evlicense", &a_license("Arc Valley Construction"));
+        let found = licenses_in(&[(dir.clone(), "Downloads".into())]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].company, "Arc Valley Construction");
+        assert_eq!(found[0].where_from, "Downloads");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_license_carried_over_on_a_stick_is_offered_too() {
+        let stick = a_folder("stick");
+        write(&stick, "Mesa Fab, Inc.evlicense", &a_license("Mesa Fab, Inc."));
+        let found = licenses_in(&[(stick.clone(), "E:".into())]);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].where_from, "E:");
+        let _ = std::fs::remove_dir_all(&stick);
+    }
+
+    #[test]
+    fn nothing_else_in_the_folder_is_mistaken_for_one() {
+        let dir = a_folder("mixed");
+        write(&dir, "Structural.pdf", "%PDF-1.7");
+        write(&dir, "notes.txt", "call the shop");
+        write(&dir, "broken.evlicense", "this is not json");
+        write(&dir, "nameless.evlicense", r#"{"id":"evl_2","users":3}"#);
+        assert!(licenses_in(&[(dir.clone(), "Downloads".into())]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_same_company_twice_is_offered_once() {
+        let dir = a_folder("twice");
+        write(&dir, "Arc Valley Construction.evlicense", &a_license("Arc Valley Construction"));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let newer = write(&dir, "Arc Valley Construction (1).evlicense", &a_license("Arc Valley Construction"));
+        let found = licenses_in(&[(dir.clone(), "Downloads".into())]);
+        assert_eq!(found.len(), 1, "one company, one offer");
+        assert_eq!(found[0].path, newer, "the one they were sent most recently");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_that_is_not_there_is_not_a_problem() {
+        let missing = std::env::temp_dir().join("hv-no-such-folder-at-all");
+        assert!(licenses_in(&[(missing, "Downloads".into())]).is_empty());
+    }
+
+    #[test]
+    fn something_far_too_big_is_left_alone() {
+        // A stick with a disk image on it that happens to end .evlicense
+        // should not be read into memory to find out.
+        let dir = a_folder("big");
+        write(&dir, "huge.evlicense", &"x".repeat(9 * 1024));
+        assert!(licenses_in(&[(dir.clone(), "E:".into())]).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

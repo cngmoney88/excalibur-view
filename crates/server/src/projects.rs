@@ -1,0 +1,469 @@
+//! Jobs, as another program sees them.
+//!
+//! An estimating system that sends a bid's drawings here and reads the
+//! takeoff back needs four things the viewer never asked for, and each of them
+//! is here because the program this replaces got it wrong:
+//!
+//! - **The same bid is always the same project.** A project can carry a
+//!   reference in the other program's terms (`fabwire:bid:2630`), and asking
+//!   for a project with a reference that already has one answers with that
+//!   one. A push retried after a dropped connection does not make a second job.
+//! - **The same drawing is never stored twice.** An upload of bytes the project
+//!   already holds answers with the set that holds them. Bluebeam's answer to a
+//!   re-push was to delete the file and upload it again, which threw away every
+//!   markup on it.
+//! - **A drawing issued again replaces the one before, and the takeoff comes
+//!   with it.** The new issue supersedes the old; the old is kept, markups and
+//!   all. Asked to, the markups are brought forward onto the new issue — sheet
+//!   for sheet, only where the sheet is the same size — each one marked
+//!   *Carried forward — check* so nobody mistakes a quantity measured on the
+//!   last revision for one measured on this.
+//! - **A finished bid is put away, not destroyed.** Archiving takes a project
+//!   off the list and changes nothing else. It can be brought back.
+//!
+//! And one thing for keeping up: a stamp that changes whenever anything that
+//! would change the takeoff does, so a program can tell "nothing new" from
+//! "pull again" without pulling.
+
+use axum::extract::{Path, Query, State};
+use axum::http::HeaderMap;
+use axum::Json;
+use hub::{DrawingSet, NewProject, Project, Sheet};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+
+use crate::api::{
+    caller, fresh_id, now, set_from_row, sheets_for, writer, Answer, Denied, Everything, Shared,
+    SET_COLUMNS,
+};
+use crate::store::Store;
+
+/// What a markup brought forward from the issue before says about itself,
+/// in the status column every markup list already shows.
+pub const CARRIED: &str = "Carried forward — check";
+
+/// The longest reference a program may file a project under.
+const LONGEST_REFERENCE: usize = 200;
+
+const PROJECT_COLUMNS: &str = "p.id, p.number, p.name, p.created,
+     (SELECT count(*) FROM sets WHERE sets.project = p.id AND sets.superseded_by IS NULL),
+     p.reference, p.archived";
+
+fn project_from_row(r: &rusqlite::Row) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: r.get(0)?,
+        number: r.get(1)?,
+        name: r.get(2)?,
+        created: r.get(3)?,
+        sets: r.get::<_, i64>(4)? as usize,
+        reference: r.get(5)?,
+        archived: r.get(6)?,
+    })
+}
+
+pub(crate) fn read_project(db: &Connection, id: &str) -> rusqlite::Result<Option<Project>> {
+    db.query_row(
+        &format!("SELECT {PROJECT_COLUMNS} FROM projects p WHERE p.id = ?1"),
+        params![id],
+        project_from_row,
+    )
+    .optional()
+}
+
+fn by_reference(db: &Connection, reference: &str) -> rusqlite::Result<Option<Project>> {
+    db.query_row(
+        &format!("SELECT {PROJECT_COLUMNS} FROM projects p WHERE p.reference = ?1"),
+        params![reference],
+        project_from_row,
+    )
+    .optional()
+}
+
+// ---- the routes -----------------------------------------------------------
+
+/// `GET /projects` — the jobs, archived ones left off unless `?all=1`.
+pub async fn list(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Query(everything): Query<Everything>,
+) -> Answer<Json<Vec<Project>>> {
+    caller(&server, &headers)?;
+    let list = server
+        .store
+        .with(|db| {
+            let mut statement = db.prepare(&format!(
+                "SELECT {PROJECT_COLUMNS} FROM projects p
+                 WHERE ?1 OR p.archived IS NULL
+                 ORDER BY p.number"
+            ))?;
+            let rows = statement
+                .query_map(params![everything.all], project_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+        .map_err(|e| Denied::broke("list the projects", e))?;
+    Ok(Json(list))
+}
+
+/// `POST /projects` — a new job, or, when it carries a reference that already
+/// has one, that one: brought back if it had been archived, and renamed if the
+/// other program has renamed it.
+pub async fn create(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<NewProject>,
+) -> Answer<Json<Project>> {
+    writer(&server, &headers)?;
+    let number = body.number.trim().to_string();
+    let name = body.name.trim().to_string();
+    if number.is_empty() {
+        return Err(Denied::wrong("A project needs a job number."));
+    }
+    let reference = body
+        .reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(str::to_string);
+    if reference.as_ref().is_some_and(|r| r.chars().count() > LONGEST_REFERENCE) {
+        return Err(Denied::wrong(format!(
+            "A project's reference can be at most {LONGEST_REFERENCE} characters."
+        )));
+    }
+    let project = server
+        .store
+        .with(|db| {
+            if let Some(reference) = &reference {
+                if let Some(there) = by_reference(db, reference)? {
+                    db.execute(
+                        "UPDATE projects SET archived = NULL, number = ?1,
+                                name = CASE WHEN ?2 = '' THEN name ELSE ?2 END
+                         WHERE id = ?3",
+                        params![number, name, there.id],
+                    )?;
+                    return Ok(read_project(db, &there.id)?.unwrap_or(there));
+                }
+            }
+            let id = fresh_id("prj");
+            db.execute(
+                "INSERT INTO projects (id, number, name, created, reference)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, number, name, now(), reference],
+            )?;
+            read_project(db, &id)?.ok_or_else(|| anyhow::anyhow!("the project just made is not there"))
+        })
+        .map_err(|e| Denied::broke("create that project", e))?;
+    Ok(Json(project))
+}
+
+/// `GET /projects/{id}`.
+pub async fn one(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<Project>> {
+    caller(&server, &headers)?;
+    server
+        .store
+        .with(|db| Ok(read_project(db, &id)?))
+        .map_err(|e| Denied::broke("read that project", e))?
+        .map(Json)
+        .ok_or_else(|| Denied::missing("project"))
+}
+
+#[derive(Deserialize)]
+pub struct Archiving {
+    #[serde(default = "yes")]
+    pub archived: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// `POST /projects/{id}/archive` — `{"archived": false}` brings it back.
+pub async fn archive(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Archiving>,
+) -> Answer<Json<Project>> {
+    writer(&server, &headers)?;
+    server
+        .store
+        .with(|db| {
+            let when = body.archived.then(now);
+            let changed = db.execute(
+                "UPDATE projects SET archived = ?1 WHERE id = ?2",
+                params![when, id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            Ok(read_project(db, &id)?)
+        })
+        .map_err(|e| Denied::broke("archive that project", e))?
+        .map(Json)
+        .ok_or_else(|| Denied::missing("project"))
+}
+
+/// What has changed on a project, without reading it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Stamp {
+    pub project: String,
+    /// Changes whenever anything that would change the takeoff does: a markup
+    /// drawn, moved or deleted, a drawing added or issued again.
+    pub stamp: String,
+    /// Drawing sets that count — not the ones issued again since.
+    pub sets: usize,
+    pub superseded: usize,
+    /// Markups on the sets that count.
+    pub markups: usize,
+    /// Of those, how many were brought forward from an earlier issue.
+    pub carried_forward: usize,
+    pub archived: Option<String>,
+}
+
+/// `GET /projects/{id}/stamp`.
+pub async fn stamp(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<Stamp>> {
+    caller(&server, &headers)?;
+    server
+        .store
+        .with(|db| stamp_of(db, &id))
+        .map_err(|e| Denied::broke("read that project", e))?
+        .map(Json)
+        .ok_or_else(|| Denied::missing("project"))
+}
+
+pub(crate) fn stamp_of(db: &Connection, id: &str) -> anyhow::Result<Option<Stamp>> {
+    let Some(project) = read_project(db, id)? else {
+        return Ok(None);
+    };
+    let mut statement = db.prepare(
+        "SELECT id, revision, superseded_by IS NOT NULL FROM sets WHERE project = ?1 ORDER BY id",
+    )?;
+    let sets: Vec<(String, i64, bool)> = statement
+        .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let current: Vec<&(String, i64, bool)> = sets.iter().filter(|s| !s.2).collect();
+    let (markups, carried): (i64, i64) = db.query_row(
+        "SELECT count(*), count(m.carried_from) FROM markups m
+         JOIN sets s ON s.id = m.set_id
+         WHERE s.project = ?1 AND s.superseded_by IS NULL AND m.removed = 0",
+        params![id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for (set, revision, _) in &current {
+        hasher.update(format!("{set}:{revision};").as_bytes());
+    }
+    let stamp = crate::store::hex(&hasher.finalize()[..8]);
+    Ok(Some(Stamp {
+        project: project.id,
+        stamp,
+        sets: current.len(),
+        superseded: sets.len() - current.len(),
+        markups: markups as usize,
+        carried_forward: carried as usize,
+        archived: project.archived,
+    }))
+}
+
+// ---- drawings arriving ----------------------------------------------------
+
+/// A set in this project holding exactly these bytes, if there is one. The
+/// current one is preferred to one it replaced.
+pub(crate) fn same_drawing(
+    db: &Connection,
+    project: &str,
+    digest: &str,
+) -> rusqlite::Result<Option<DrawingSet>> {
+    db.query_row(
+        &format!(
+            "SELECT {SET_COLUMNS} FROM sets WHERE project = ?1 AND digest = ?2
+             ORDER BY superseded_by IS NOT NULL, uploaded DESC LIMIT 1"
+        ),
+        params![project, digest],
+        set_from_row,
+    )
+    .optional()
+}
+
+/// How two names for a drawing are compared: case, spacing and a trailing
+/// `.pdf` do not make it a different drawing.
+pub fn same_name(a: &str, b: &str) -> bool {
+    fn plain(n: &str) -> String {
+        let n = n.trim().to_lowercase();
+        let n = n.strip_suffix(".pdf").unwrap_or(&n).trim().to_string();
+        n.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+    plain(a) == plain(b)
+}
+
+/// The current set this project already has under the same name: the issue a
+/// new upload of that drawing replaces.
+pub(crate) fn issued_before(
+    db: &Connection,
+    project: &str,
+    name: &str,
+) -> rusqlite::Result<Option<DrawingSet>> {
+    let mut statement = db.prepare(&format!(
+        "SELECT {SET_COLUMNS} FROM sets WHERE project = ?1 AND superseded_by IS NULL
+         ORDER BY uploaded DESC"
+    ))?;
+    let found = statement
+        .query_map(params![project], set_from_row)?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|s| same_name(&s.name, name));
+    Ok(found)
+}
+
+/// Whether a sheet is the same sheet of paper as another: the same size, the
+/// same way up. A markup is only brought across between two of those, because
+/// anywhere else its coordinates are somewhere else on the drawing.
+fn same_paper(a: &Sheet, b: &Sheet) -> bool {
+    (a.width - b.width).abs() <= 1.0 && (a.height - b.height).abs() <= 1.0 && a.rotation == b.rotation
+}
+
+/// Brings the markups on `from` across to `to`, the issue that replaced it.
+///
+/// Sheet for sheet, and only when the two issues have the same number of
+/// sheets: with a sheet added or taken out there is no telling which is
+/// which, and a takeoff put on the wrong sheet is worse than one that has to
+/// be carried across by hand. A sheet whose size changed keeps its markups
+/// where they were. Everything brought across says so in its status.
+///
+/// Returns how many came across, and, when some did not, why.
+pub(crate) fn carry_forward(
+    db: &Connection,
+    from: &str,
+    to: &str,
+    to_sheets: &[Sheet],
+) -> anyhow::Result<(usize, Option<String>)> {
+    let from_sheets = sheets_for(db, from)?;
+    let mut statement = db.prepare(
+        "SELECT id, page, subject, kind, caption, author, colour, dictionary
+         FROM markups WHERE set_id = ?1 AND removed = 0 ORDER BY revision, id",
+    )?;
+    type Old = (String, i64, String, String, String, String, String, Vec<u8>);
+    let old: Vec<Old> = statement
+        .query_map(params![from], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+                r.get(6)?,
+                r.get(7)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if old.is_empty() {
+        return Ok((0, None));
+    }
+    if from_sheets.len() != to_sheets.len() {
+        return Ok((
+            0,
+            Some(format!(
+                "The new issue has {} sheets and the one before had {}, so which sheet became \
+                 which cannot be told for certain. None of the {} markups were brought forward: \
+                 open both issues in Excalibur View to carry the takeoff across by hand.",
+                to_sheets.len(),
+                from_sheets.len(),
+                old.len()
+            )),
+        ));
+    }
+    let revision = Store::bump(db, to)?;
+    let when = now();
+    let mut carried = 0usize;
+    let mut left: Vec<usize> = Vec::new();
+    for (id, page, subject, kind, caption, author, colour, dictionary) in old {
+        let page_index = page as usize;
+        let paper_matches = match (from_sheets.get(page_index), to_sheets.get(page_index)) {
+            (Some(a), Some(b)) => same_paper(a, b),
+            _ => false,
+        };
+        let markup = paper_matches
+            .then(|| crate::quantities::read_markup(&dictionary))
+            .flatten();
+        let Some(mut markup) = markup else {
+            left.push(page_index);
+            continue;
+        };
+        markup.set("BSIStatus", pdf::Object::text(CARRIED));
+        let bytes = crate::quantities::write_markup(&markup);
+        db.execute(
+            "INSERT INTO markups (id, set_id, page, subject, kind, caption, author, colour,
+                                  created, dictionary, revision, removed, carried_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12)",
+            params![
+                fresh_id("mk"),
+                to,
+                page,
+                subject,
+                kind,
+                caption,
+                author,
+                colour,
+                when,
+                bytes,
+                revision as i64,
+                id
+            ],
+        )?;
+        carried += 1;
+    }
+    let note = if left.is_empty() {
+        None
+    } else {
+        let mut pages: Vec<usize> = left.clone();
+        pages.sort_unstable();
+        pages.dedup();
+        let named: Vec<String> = pages.iter().map(|p| format!("{}", p + 1)).collect();
+        Some(format!(
+            "{} markup(s) stayed on the earlier issue because the sheet changed size or could not \
+             be read (page {}). Carry those across by hand.",
+            left.len(),
+            named.join(", ")
+        ))
+    };
+    Ok((carried, note))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_drawing_is_the_same_drawing_whatever_case_or_extension_it_arrives_in() {
+        assert!(same_name("S-101 Framing Plan.pdf", "s-101  framing plan"));
+        assert!(same_name(" S-101.PDF", "S-101"));
+        assert!(!same_name("S-101", "S-102"));
+        assert!(!same_name("S-101 Rev 2", "S-101"));
+    }
+
+    #[test]
+    fn a_sheet_that_changed_size_is_not_the_same_paper() {
+        let sheet = |w: f64, h: f64, r: i32| Sheet {
+            page: 0,
+            number: String::new(),
+            title: String::new(),
+            width: w,
+            height: h,
+            rotation: r,
+            scale: None,
+        };
+        assert!(same_paper(&sheet(2592.0, 1728.0, 0), &sheet(2592.4, 1727.8, 0)));
+        assert!(!same_paper(&sheet(2592.0, 1728.0, 0), &sheet(3024.0, 2160.0, 0)));
+        assert!(!same_paper(&sheet(2592.0, 1728.0, 0), &sheet(2592.0, 1728.0, 90)));
+    }
+}

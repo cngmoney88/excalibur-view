@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<policyDefinitionResources revision="1.0" schemaVersion="1.0">
+  <displayName>Excalibur View</displayName>
+  <description>Machine policy for Excalibur View.</description>
+  <resources>
+    <stringTable>
+      <string id="Excalibur">Excalibur Construction Technologies</string>
+      <string id="ExcaliburView">Excalibur View</string>
+      <string id="ExcaliburView_Help">Settings an administrator sets for every user of a computer. Excalibur View cannot change them, and neither can the people using it.</string>
+
+      <string id="Sealed">Seal this computer (no connection to the outside world)</string>
+      <string id="Sealed_Help">Switches off every connection Excalibur View would otherwise make beyond your own network.
+
+Sealed:
+  - No update check and no download. Updates arrive as a signed file your administrator installs.
+  - No assistant. Claude runs on another company's computers and is unavailable.
+  - No Excalibur Fleet.
+  - No links out to a website.
+
+Not affected, because none of it leaves your network:
+  - The office server, and everything on it - drawings, markups, takeoff, tool chests, people.
+  - Opening, marking up, measuring, printing and exporting.
+  - A server reached by name or by a private address (10.x, 172.16-31.x, 192.168.x, localhost, .local, .lan, .internal).
+
+If you enable this setting, the computer is sealed whatever license it is using, including no license, and whether or not anybody has signed in. Nothing inside Excalibur View can undo it.
+
+If you disable this setting or do not configure it, the computer is sealed only when the office's license is an Excalibur View Sealed license.
+
+The setting is read when Excalibur View starts, so a computer that is already running picks it up the next time the program opens.</string>
+    </stringTable>
+  </resources>
+</policyDefinitionResources>

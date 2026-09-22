@@ -1,0 +1,479 @@
+//! Where it all lives: a SQLite file and a folder of drawings.
+//!
+//! SQLite because a six-person fabricator should not have to run a database
+//! server, and because a single file is something a person can back up by
+//! copying it. It goes a very long way; when a company outgrows it, the
+//! schema here is ordinary SQL and moves.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{anyhow, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
+
+pub struct Store {
+    db: std::sync::Mutex<Connection>,
+    blobs: PathBuf,
+}
+
+/// The schema. Written out rather than migrated from nothing each time, so
+/// what the server expects can be read in one place.
+const SCHEMA: &str = r#"
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS people (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    email       TEXT NOT NULL UNIQUE,
+    password    TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    created     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token       TEXT PRIMARY KEY,
+    person      TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    issued      TEXT NOT NULL,
+    expires     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS projects (
+    id          TEXT PRIMARY KEY,
+    number      TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    created     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sets (
+    id          TEXT PRIMARY KEY,
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    sheets      INTEGER NOT NULL,
+    uploaded    TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL,
+    revision    INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS sheets (
+    set_id      TEXT NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+    page        INTEGER NOT NULL,
+    number      TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    width       REAL NOT NULL,
+    height      REAL NOT NULL,
+    rotation    INTEGER NOT NULL,
+    scale       TEXT,
+    PRIMARY KEY (set_id, page)
+);
+
+-- A markup is the annotation dictionary. Everything beside it is derived, and
+-- is here so an integration can filter and total without parsing PDF.
+CREATE TABLE IF NOT EXISTS markups (
+    id          TEXT PRIMARY KEY,
+    set_id      TEXT NOT NULL REFERENCES sets(id) ON DELETE CASCADE,
+    page        INTEGER NOT NULL,
+    subject     TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    caption     TEXT NOT NULL,
+    author      TEXT NOT NULL,
+    colour      TEXT NOT NULL,
+    created     TEXT NOT NULL,
+    dictionary  BLOB NOT NULL,
+    revision    INTEGER NOT NULL,
+    removed     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS markups_by_revision ON markups(set_id, revision);
+
+CREATE TABLE IF NOT EXISTS chests (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    filename    TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    tools       INTEGER NOT NULL,
+    sets        INTEGER NOT NULL,
+    uploaded    TEXT NOT NULL,
+    shared      INTEGER NOT NULL DEFAULT 1
+);
+
+-- Plugins the office hands every seat, one row per plugin id: adding a newer
+-- version of one replaces the older. The file itself is a blob.
+CREATE TABLE IF NOT EXISTS plugins (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    version     TEXT NOT NULL,
+    digest      TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    key         TEXT NOT NULL,
+    uploaded    TEXT NOT NULL,
+    uploaded_by TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS releases (
+    version     TEXT NOT NULL,
+    channel     TEXT NOT NULL,
+    platform    TEXT NOT NULL,
+    published   TEXT NOT NULL,
+    notes       TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    digest      TEXT NOT NULL,
+    signature   TEXT NOT NULL,
+    signing_key TEXT NOT NULL,
+    minimum_api INTEGER NOT NULL DEFAULT 1,
+    -- A release nobody has approved is not offered to anybody. One seat tries
+    -- it first; the other five carry on working.
+    ready       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (version, platform)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL
+);
+
+-- What happened on this server, and who did it. Kept because an office
+-- handling Controlled Unclassified Information is asked, by an auditor, to
+-- show exactly this: who reached which drawing, and when.
+--
+-- Append only. There is no route in the program that edits or deletes a row,
+-- which is the property that makes it worth anything. Whoever administers the
+-- machine can of course reach the database - that is true of every log there
+-- has ever been, and is why an auditor asks who administers the machine.
+--
+-- `person` is kept as the id and the email as it read at the time, so a row
+-- still says who did it after somebody leaves and their account is removed.
+CREATE TABLE IF NOT EXISTS audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    at          TEXT NOT NULL,
+    person      TEXT,
+    email       TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    subject     TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT '',
+    address     TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS audit_at ON audit (at);
+CREATE INDEX IF NOT EXISTS audit_person ON audit (person, at);
+
+-- Keys for programs rather than people: an assistant that reads the takeoffs
+-- (MCP only, read-only), or another system such as FabWire that uses the API
+-- as the person who made the key. Stored as a digest, shown once, never
+-- expiring on their own, taken back one at a time.
+CREATE TABLE IF NOT EXISTS keys (
+    id          TEXT PRIMARY KEY,
+    digest      TEXT NOT NULL UNIQUE,
+    person      TEXT NOT NULL REFERENCES people(id),
+    purpose     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    made        TEXT NOT NULL,
+    last_used   TEXT
+);
+"#;
+
+impl Store {
+    pub fn open(database: &Path, blobs: &Path) -> Result<Store> {
+        if let Some(parent) = database.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("making {}", parent.display()))?;
+        }
+        std::fs::create_dir_all(blobs).with_context(|| format!("making {}", blobs.display()))?;
+        let db = Connection::open(database)
+            .with_context(|| format!("opening {}", database.display()))?;
+        db.execute_batch(SCHEMA).context("setting up the database")?;
+        upgrade(&db).context("bringing the database up to date")?;
+        Ok(Store {
+            db: std::sync::Mutex::new(db),
+            blobs: blobs.to_path_buf(),
+        })
+    }
+
+    /// An in-memory store, for tests.
+    pub fn temporary(blobs: &Path) -> Result<Store> {
+        std::fs::create_dir_all(blobs)?;
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(SCHEMA)?;
+        upgrade(&db)?;
+        Ok(Store {
+            db: std::sync::Mutex::new(db),
+            blobs: blobs.to_path_buf(),
+        })
+    }
+
+    pub fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+        let db = self.db.lock().map_err(|_| anyhow!("the database lock was poisoned"))?;
+        f(&db)
+    }
+
+    // ---- files -----------------------------------------------------------
+
+    /// Where a file with this digest lives. Two levels of directory, because a
+    /// hundred thousand files in one folder is slow on every filesystem people
+    /// actually run.
+    pub fn blob_path(&self, digest: &str) -> PathBuf {
+        self.blobs.join(&digest[0..2]).join(&digest[2..4]).join(digest)
+    }
+
+    /// Stores bytes under their own digest, and says what that digest is.
+    /// Uploading the same drawing twice costs one copy, not two.
+    pub fn put_blob(&self, bytes: &[u8]) -> Result<String> {
+        let digest = hex(&Sha256::digest(bytes));
+        let path = self.blob_path(&digest);
+        if path.exists() {
+            return Ok(digest);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Written beside and moved into place, so a half-written drawing is
+        // never visible under a digest that promises the whole one.
+        let temp = path.with_extension("part");
+        std::fs::write(&temp, bytes)?;
+        std::fs::rename(&temp, &path)?;
+        Ok(digest)
+    }
+
+    pub fn get_blob(&self, digest: &str) -> Result<Vec<u8>> {
+        // A digest is used to build a path, so it gets checked before it is.
+        if !is_digest(digest) {
+            return Err(anyhow!("that is not a digest"));
+        }
+        let path = self.blob_path(digest);
+        std::fs::read(&path).with_context(|| format!("reading {}", path.display()))
+    }
+
+    pub fn blob_exists(&self, digest: &str) -> bool {
+        is_digest(digest) && self.blob_path(digest).exists()
+    }
+
+    // ---- settings --------------------------------------------------------
+
+    pub fn setting(&self, key: &str) -> Result<Option<String>> {
+        self.with(|db| {
+            Ok(db
+                .query_row("SELECT value FROM settings WHERE key = ?1", params![key], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?)
+        })
+    }
+
+    /// Writes one line into the audit log. Never fails the thing it is
+    /// recording: a log that can stop somebody opening a drawing is a log
+    /// that gets switched off.
+    pub fn audit(&self, entry: &crate::audit::Entry) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "INSERT INTO audit (at, person, email, action, subject, detail, address)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    entry.at,
+                    entry.person,
+                    entry.email,
+                    entry.action,
+                    entry.subject,
+                    entry.detail,
+                    entry.address
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The log, newest first, for an administrator or an export.
+    pub fn audit_since(&self, since: Option<&str>, limit: usize) -> Result<Vec<crate::audit::Entry>> {
+        self.with(|db| {
+            let mut statement = db.prepare(
+                "SELECT at, person, email, action, subject, detail, address
+                 FROM audit
+                 WHERE (?1 IS NULL OR at >= ?1)
+                 ORDER BY at DESC, id DESC
+                 LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![since, limit as i64], |r| {
+                Ok(crate::audit::Entry {
+                    at: r.get(0)?,
+                    person: r.get(1)?,
+                    email: r.get(2)?,
+                    action: r.get(3)?,
+                    subject: r.get(4)?,
+                    detail: r.get(5)?,
+                    address: r.get(6)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "INSERT INTO settings (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![key, value],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The next revision for a drawing set, bumped as one step with whatever
+    /// is being written into it.
+    pub fn bump(db: &Connection, set: &str) -> Result<u64> {
+        db.execute("UPDATE sets SET revision = revision + 1 WHERE id = ?1", params![set])?;
+        let revision: i64 = db.query_row(
+            "SELECT revision FROM sets WHERE id = ?1",
+            params![set],
+            |r| r.get(0),
+        )?;
+        Ok(revision as u64)
+    }
+
+    pub fn is_empty(&self) -> Result<bool> {
+        self.with(|db| {
+            let people: i64 = db.query_row("SELECT count(*) FROM people", [], |r| r.get(0))?;
+            Ok(people == 0)
+        })
+    }
+}
+
+/// Columns added after the first servers went out.
+///
+/// `CREATE TABLE IF NOT EXISTS` leaves an existing table exactly as it was, so
+/// a server that has been running since 0.5 would never grow a column added
+/// to the schema above. Each one is added here, once, if it is not there —
+/// nothing is ever dropped or rewritten, and a database that already has them
+/// is left alone.
+fn upgrade(db: &Connection) -> Result<()> {
+    // Who a project belongs to in another program: "fabwire:bid:2630". A
+    // program that asks for the same reference twice gets the same project,
+    // which is what stops a retried push from making a second one.
+    add_column(db, "projects", "reference", "TEXT")?;
+    // When a job was put away. Archived is not deleted: its drawings, markups
+    // and takeoff stay exactly as they were, and it can be brought back.
+    add_column(db, "projects", "archived", "TEXT")?;
+    // A drawing re-issued under the same name supersedes the one before it.
+    // Both are kept; the newer one is the one that counts.
+    add_column(db, "sets", "supersedes", "TEXT")?;
+    add_column(db, "sets", "superseded_by", "TEXT")?;
+    // A markup brought forward from the revision before this one, so the
+    // takeoff on a revised sheet is not lost and is plainly marked as needing
+    // a look.
+    add_column(db, "markups", "carried_from", "TEXT")?;
+    db.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS projects_by_reference
+             ON projects(reference) WHERE reference IS NOT NULL;
+         CREATE INDEX IF NOT EXISTS sets_by_project ON sets(project);",
+    )?;
+    Ok(())
+}
+
+fn add_column(db: &Connection, table: &str, column: &str, declaration: &str) -> Result<()> {
+    let mut statement = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let exists = statement
+        .query_map([], |r| r.get::<_, String>(1))?
+        .flatten()
+        .any(|name| name == column);
+    if !exists {
+        db.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"))?;
+    }
+    Ok(())
+}
+
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A digest and nothing else: sixty-four lower-case hex characters.
+///
+/// This is the check that stops a digest arriving from outside being used to
+/// walk out of the file store. Anything that is not exactly a digest is not a
+/// digest.
+pub fn is_digest(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> (Store, tempdir::Dir) {
+        let dir = tempdir::Dir::new();
+        let store = Store::temporary(&dir.path().join("files")).unwrap();
+        (store, dir)
+    }
+
+    #[test]
+    fn the_same_file_twice_is_stored_once() {
+        let (store, _dir) = store();
+        let a = store.put_blob(b"a drawing").unwrap();
+        let b = store.put_blob(b"a drawing").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(store.get_blob(&a).unwrap(), b"a drawing");
+    }
+
+    #[test]
+    fn a_digest_that_is_really_a_path_is_refused() {
+        let (store, _dir) = store();
+        for nonsense in [
+            "../../../etc/passwd",
+            "..",
+            "/etc/passwd",
+            "AABBCCDD",
+            "",
+            &"a".repeat(63),
+            &format!("{}/", "a".repeat(63)),
+        ] {
+            assert!(!is_digest(nonsense), "{nonsense} should not pass as a digest");
+            assert!(store.get_blob(nonsense).is_err(), "{nonsense} was read anyway");
+        }
+        assert!(is_digest(&"a".repeat(64)));
+        // Upper case is not what we write, so it is not what we accept.
+        assert!(!is_digest(&"A".repeat(64)));
+    }
+
+    #[test]
+    fn a_fresh_server_knows_that_nobody_has_signed_up_yet() {
+        let (store, _dir) = store();
+        assert!(store.is_empty().unwrap());
+    }
+
+    #[test]
+    fn a_setting_can_be_written_and_read_back() {
+        let (store, _dir) = store();
+        assert_eq!(store.setting("pin").unwrap(), None);
+        store.set_setting("pin", "1.4.2").unwrap();
+        assert_eq!(store.setting("pin").unwrap().as_deref(), Some("1.4.2"));
+        store.set_setting("pin", "1.5.0").unwrap();
+        assert_eq!(store.setting("pin").unwrap().as_deref(), Some("1.5.0"));
+    }
+}
+
+/// A scratch directory that cleans up after itself.
+#[cfg(test)]
+pub mod tempdir {
+    use std::path::{Path, PathBuf};
+
+    pub struct Dir(PathBuf);
+
+    impl Dir {
+        pub fn new() -> Dir {
+            let n: u64 = rand::random();
+            let path = std::env::temp_dir().join(format!("hyperview-test-{n:016x}"));
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Dir(path)
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+}

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    The hardened runtime is required for notarization. These are the two
+    exceptions it needs and nothing more.
+
+    JIT: wgpu's Metal shader compilation.
+    disable-library-validation: the program writes PDFium out beside itself
+    and loads it, and that library is not signed by us.
+
+    Deliberately NOT here: no camera, no microphone, no address book, no
+    automation, no sandbox exceptions for arbitrary files. A notarized app
+    without the sandbox already reaches the user's own files by asking the
+    system, which is what a drawing program should do.
+  -->
+  <key>com.apple.security.cs.allow-jit</key>                     <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>    <true/>
+</dict>
+</plist>

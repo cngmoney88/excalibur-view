@@ -1,0 +1,28 @@
+{
+  "app": {
+    "version": "9.1.0",
+    "channel": "preview",
+    "platform": "windows-x64",
+    "published": "2026-09-21T12:00:00Z",
+    "notes": "Better grid bubbles.",
+    "download": "Hyperview.exe",
+    "bytes": 23,
+    "digest": "3db9665d89ed30ac37fbd5b5e950fd1b451da54ff4ad6ac88ae15b6bc392d719",
+    "signature": "bc4c1367d519fbb6baacbb424eecfd9fa129c9a8d74161ef1ab595cef13dbe979f36a076287dd084e3d248f387ed9ce20063c4b1f9c3be1ed027894f040b8c05",
+    "key": "test-2026",
+    "minimum_api_version": 1
+  },
+  "server": {
+    "version": "9.1.0",
+    "channel": "preview",
+    "platform": "windows-x64-server",
+    "published": "2026-09-21T12:00:00Z",
+    "notes": "Better grid bubbles.",
+    "download": "Hyperview-Server.exe",
+    "bytes": 23,
+    "digest": "5134c1127a4a7dab24ac632c843788b2374de8c5120f524b0dfbf0223ae0245b",
+    "signature": "e6985856234c6bf0f047c2708ddaa672ba068eba1b27e17498bb79fe709777ee8aee452ffe50f179deef8b90506451cec290236e2d2ba2465cb0d29947d5620d",
+    "key": "test-2026",
+    "minimum_api_version": 1
+  }
+}

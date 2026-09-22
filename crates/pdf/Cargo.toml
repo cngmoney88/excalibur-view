@@ -1,0 +1,13 @@
+[package]
+name = "pdf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+flate2 = "1"
+sha2 = "0.10"
+memmap2 = "0.9"
+weezl = "0.1"
+
+[dev-dependencies]

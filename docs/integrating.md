@@ -1,0 +1,322 @@
+# Building on Excalibur View
+
+Written for a developer at a customer's shop, and for whoever is writing the
+website's developer pages. Everything here is what the program actually does
+today — if something is not built yet it says so.
+
+There are four ways in, and they answer different questions.
+
+| You want to | Use |
+|---|---|
+| Add a command to the program that reads a drawing and proposes markups | **A plugin** |
+| Get quantities out of the office server into your own system | **The API** |
+| Let an assistant read your takeoffs | **The MCP endpoint** |
+| Ship your own tools, weights and columns | **A tool chest** |
+
+None of them require anything from us. No developer account, no approval, no
+store, no revenue share. Your server is yours.
+
+---
+
+## 1. Plugins
+
+A plugin is a **WebAssembly module**. Excalibur View runs it in a sandbox: it
+cannot open files, reach the network, see the screen or touch the drawing. It
+is handed a description of the sheets and markups as JSON, and hands back what
+it found and what it suggests, also as JSON.
+
+**Nothing a plugin says changes the drawing.** It returns *findings*, and a
+finding may carry *fixes*. A fix is applied by Excalibur View itself, only when
+somebody clicks it. The worst a plugin can do is be wrong.
+
+That shape is deliberate. It is what lets one office run its own tools without
+those tools ever being in anybody else's copy of the program.
+
+### What a plugin is for
+
+Real examples: check every sheet is scaled before a bid goes out; find items
+counted twice across a set; price a takeoff against your own cost tables;
+enforce a company standard for mark numbers; pull a bill of material out in
+whatever shape your ERP wants; flag members that changed between issues.
+
+### The contract
+
+A module exports its `memory` and three functions:
+
+```
+hv_alloc(len: i32) -> i32            room for len bytes
+hv_manifest() -> i64                 the Manifest, as JSON
+hv_run(ptr: i32, len: i32) -> i64    runs one command
+```
+
+The two that answer return the address in the high 32 bits and the length in
+the low 32. In Rust, the `plugin!` macro writes all of that for you.
+
+```rust
+use plugin_api::{plugin, Input, Manifest, Output, Command, Level, Finding};
+
+fn manifest() -> Manifest {
+    Manifest {
+        id: "mesafab-estimating".into(),   // short, permanent, letters/digits/dashes
+        name: "Mesa Fab Estimating".into(),
+        version: "1.0.0".into(),
+        publisher: "Mesa Fab, Inc.".into(),
+        description: "Our own checks.".into(),
+        abi: plugin_api::ABI,
+        commands: vec![Command {
+            id: "unscaled".into(),
+            name: "Find unscaled sheets".into(),
+            description: "Every sheet that has a measurement on it but no scale.".into(),
+            scope: plugin_api::Scope::Drawing,
+            needs: Default::default(),     // words and line-work both cost time
+        }],
+        settings: vec![],
+    }
+}
+
+fn run(input: Input) -> Result<Output, String> {
+    let mut out = Output { title: "Unscaled sheets".into(), ..Default::default() };
+    for sheet in &input.sheets {
+        if sheet.scale.is_none() && input.markups.iter().any(|m| m.page == sheet.page) {
+            out.findings.push(Finding::new(
+                Level::Warning,
+                format!("{} has markups and no scale — every quantity on it is wrong.", sheet.name),
+            ));
+        }
+    }
+    Ok(out)
+}
+
+plugin!(manifest, run);
+```
+
+Build it with `cargo build --target wasm32-unknown-unknown --release`. Any
+language that compiles to WebAssembly works; Rust is simply what the helper
+macro is written for.
+
+### What it is handed
+
+`Input` carries the command id, the drawing's name, which sheet was on screen,
+the sheets, the markups, the person's settings, and the office's custom column
+names. A `Command` declares what it `needs` — `words`, `lines`, both or
+neither — because reading the line-work of a three-hundred-sheet set takes a
+while and a command that only needs text should not pay for it.
+
+**Coordinates are sheet space**: points (1/72 inch of paper), measured right
+and down from the top left of the sheet as it is shown. Real lengths are in
+feet, real areas in square feet, whatever the sheet is set up in.
+
+### What it hands back
+
+```rust
+enum Answer { Done(Output), Failed(String) }
+```
+
+An `Output` has a title, a summary, `findings` and `tables`. A `Finding` has a
+level, a message, optionally a page and an area (Excalibur View outlines it
+while the results are open), the markups it is about, and `fixes`.
+
+A fix carries one or more `Action`s, and this is the whole list:
+
+```
+SetSheetScale { page, ratio, text }
+SetSubject    { markup, subject }
+SetColumn     { markup, column, value }      // custom column, counted from 0
+SetQuantity   { markup, quantity }
+SetSlope      { markup, rise, run }
+AddLength     { page, points, subject }
+AddCount      { page, points, subject }
+AddArea       { page, points, subject }
+AddCloud      { page, area, note }
+AddText       { page, area, text }
+```
+
+One detail worth knowing: when `AddLength`, `AddCount` or `AddArea` names a
+subject the office's tool chest already has a tool for, the markup is made
+**with that tool** — colour, columns, unit weight and all. So a plugin that
+proposes `W14X38` gets the shop's own W14x38, not a generic line.
+
+A `Table` has columns, rows and an optional totals line, and comes with
+`to_csv()`.
+
+### Packaging and signing
+
+A plugin file is one line of magic, one line of JSON header, then the wasm:
+
+```
+HVPLUGIN1
+{"id":"…","version":"…","name":"…","sha256":"…","bytes":123456,"key":"…","signature":"…"}
+<the WebAssembly>
+```
+
+The signature is Ed25519 over exactly:
+
+```
+hyperview-plugin/1\n<id>\n<version>\n<sha256 lowercase hex>\n
+```
+
+`key` names which trusted key signed it. **A plugin that is not signed by a key
+the program trusts does not run** — not a warning, it does not run. That is
+what stops a plugin arriving by email and being trusted because somebody said
+it was fine.
+
+For your own plugins you have two routes, and you should pick deliberately:
+
+- **We sign it**, and it runs in any copy of Excalibur View. Send us the wasm.
+- **You add your own key** to your own build, and it runs only in your shop.
+  Nobody has to ask us for anything, ever. This is the right answer for tools
+  that encode your costs or your standards.
+
+### How a plugin reaches a seat
+
+Two ways. An administrator uploads it to the office server — `POST /plugins` —
+and every seat gets it automatically on connecting. Or a person loads one on
+their own machine, for a tool only they use. Server plugins appear in the
+Plugins menu grouped under the office's name.
+
+---
+
+## 2. The API
+
+The office server has an HTTP API, and **its full description lives on your own
+server** at `GET /openapi.json`. That document is generated from the routes
+themselves and there is a test that fails the build if a route exists without
+being described, so it cannot drift out of date.
+
+Point your tooling at it and generate a client. Nothing to read here that the
+server will not tell you.
+
+### Getting a key
+
+Studio → Office → Keys → make one. Two purposes:
+
+- **`integration`** — the API as the person who made the key. What another
+  system uses.
+- **`assistant`** — the MCP endpoint only, read only.
+
+Keys start `hvk_`, are stored on the server as digests, shown once, never
+expire on their own, and are revoked one at a time. A key can never be mistaken
+for a session because of that prefix.
+
+```
+Authorization: Bearer hvk_…
+```
+
+### The routes you will actually use
+
+| | |
+|---|---|
+| `GET /projects` | the jobs |
+| `GET /projects/{id}/sets` | the drawing sets in one |
+| `GET /sets/{id}/sheets` | sheet numbers, titles, scales |
+| `GET /sets/{id}/markups` | every markup as its PDF annotation |
+| `GET /sets/{id}/takeoff` | the quantities, totalled |
+| `GET /sets/{id}/takeoff.csv` | the same, for a spreadsheet |
+| `GET /sets/{id}/markuplist` | the markups list as the program shows it |
+| `POST /sets/{id}/copy` | a copy of a set to take off on |
+| `POST /sets/{id}/markups` | push markups up |
+| `GET /audit`, `/audit.csv` | who did what (administrators) |
+
+A set carries a `revision` that goes up whenever its markups change, so you can
+ask for everything since the revision you last saw rather than polling the
+whole thing.
+
+**A markup is a PDF annotation dictionary**, not our own invention. That means
+a markup Excalibur View drew is a markup every PDF reader shows, and your code
+can read it with any PDF library. Everything beside it in the API — subject,
+author, quantity, the custom columns — is derived, and is there so you never
+have to parse PDF to filter and total.
+
+### Writing back
+
+`POST /sets/{id}/markups` takes markups and returns the page's new revision.
+Every markup carries a stable name (`NM` in the PDF) that survives the round
+trip, so you can update one you pushed earlier rather than making a second.
+
+---
+
+## 3. The MCP endpoint
+
+`Hyperview.exe --mcp` speaks Model Context Protocol, so an assistant can read
+your takeoffs. Tools available today:
+
+```
+list_projects   list_sets   sheets   takeoff
+shop_list       counted_twice        revision_cost
+takeoff_totals
+```
+
+It is **read only**, and an `assistant` key reaches nothing else. An assistant
+can tell you what a drawing says; it cannot change one.
+
+In Excalibur View Sealed the assistant is switched off entirely, because Claude
+runs on somebody else's computers and that is the whole of the objection.
+
+---
+
+## 4. Tool chests
+
+A chest is **plain JSON** in a file you own, extension `.evtools`. Not a
+database, not a proprietary blob — open it in a text editor.
+
+```json
+{
+  "format": "excalibur-view-tools",
+  "version": 1,
+  "name": "Our Steel",
+  "columns": [
+    { "slot": 0, "name": "LBS Per FT", "kind": "Number", "decimals": 3 },
+    { "slot": 1, "name": "Total LBS", "kind": "Formula",
+      "formula": "[Length] * [LBS Per FT]", "decimals": 1 }
+  ],
+  "sets": [
+    { "title": "Wide Flange",
+      "tools": [
+        { "subject": "W14X38", "kind": "Length", "colour": "#1f4fb8",
+          "columns": ["38", "", "", "", "", ""],
+          "template": "<base64 of the PDF annotation dictionary>" }
+      ] }
+  ]
+}
+```
+
+Generate one from your own catalogue and every estimator in the shop has your
+sizes, your weights, your naming, your colours. That is how the six chests that
+ship with the program are made — the steel one is generated from the AISC
+Shapes Database, so a weight can never disagree with the designation above it.
+
+Revu profiles (`.bpx`) and tool sets (`.btx`) are read on the way in and saved
+as one of these. After that it is yours.
+
+**One thing worth knowing if you are coming from Bluebeam:** its custom columns
+are scoped to the document, not the tool — their own documentation says columns
+"operate at the document level, not per individual tool". Open a bid set
+without the right profile loaded and every unit weight lands in a column that
+does not exist; the weight vanishes and the tonnage is wrong with no error.
+Excalibur View keeps the columns with the chest, so this cannot happen.
+
+---
+
+## Which one do I want?
+
+- **Read our quantities into our ERP.** The API, `integration` key, poll
+  `revision` and pull `takeoff`.
+- **Check our drawings against our own rules.** A plugin, signed with your own
+  key.
+- **Price a takeoff with our cost tables.** A plugin. It gets the takeoff and
+  returns a table, and it never sees the network, so your costs stay in it.
+- **Ship our sizes to every estimator.** A tool chest.
+- **Let an assistant answer questions about a job.** The MCP endpoint, an
+  `assistant` key.
+
+## Things that will not change under you
+
+- A markup is a PDF annotation. Any PDF library reads it.
+- A tool chest is JSON you can read.
+- The API describes itself at `/openapi.json`, and the build fails if a route
+  is missing from it.
+- The plugin ABI is versioned. A plugin built for a later contract than the
+  program knows is refused with a reason rather than run and misread.
+- It all runs on your server. Nothing here needs us to be online, or to exist.
+
+Questions: hello@excaliburct.com.

@@ -1,0 +1,14 @@
+[package]
+name = "plugin-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "What a Hyperview plugin is handed and what it hands back. Shared by the program and by every plugin, so both sides agree to the letter."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# The glue a plugin compiled to WebAssembly needs: the exports Hyperview calls.
+guest = []

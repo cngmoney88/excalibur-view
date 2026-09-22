@@ -1,0 +1,12 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+egui = "0.32"
+annot = { path = "../annot" }
+chest = { path = "../chest" }
+pdf = { path = "../pdf" }
+takeoff = { path = "../takeoff" }

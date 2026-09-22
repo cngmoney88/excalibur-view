@@ -1,0 +1,207 @@
+//! Running one.
+//!
+//! This is the whole server as one call, because there are two ways it gets
+//! started and they must be the same server. A shop that runs
+//! `hyperview-server` on a Linux box and a shop where somebody ticked "host the
+//! drawings on this computer" in the program are running identical code; the
+//! only difference is which process it is inside.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+
+use crate::api::{self, Server};
+use crate::{Config, Store, VERSION};
+
+/// A running server, and the things worth knowing about it.
+pub struct Serving {
+    /// Where it actually ended up listening, which is not always where it was
+    /// asked to: port zero means the operating system picks one.
+    pub address: SocketAddr,
+    pub name: String,
+    /// Whether anybody has set it up yet.
+    pub claimed: bool,
+}
+
+impl Serving {
+    /// The address to hand to somebody at another desk. Never `0.0.0.0`, which
+    /// means "every address on this machine" to the machine and nothing at all
+    /// to anybody typing it.
+    pub fn url(&self) -> String {
+        if self.address.ip().is_unspecified() {
+            match local_address() {
+                Some(mine) => format!("http://{mine}:{}", self.address.port()),
+                None => format!("http://localhost:{}", self.address.port()),
+            }
+        } else {
+            format!("http://{}", self.address)
+        }
+    }
+}
+
+/// Starts a server and serves until told to stop.
+///
+/// `ready` is called once, as soon as it is listening, with where it landed.
+/// That is how the program that started it knows what address to show somebody
+/// without guessing or racing it.
+pub async fn serve(
+    config: Config,
+    stop: impl std::future::Future<Output = ()> + Send + 'static,
+    ready: impl FnOnce(&Serving),
+) -> Result<()> {
+    std::fs::create_dir_all(&config.data)
+        .with_context(|| format!("making {}", config.data.display()))?;
+    let store = Store::open(&config.database(), &config.blobs())?;
+
+    let listener = tokio::net::TcpListener::bind(config.listen)
+        .await
+        .with_context(|| format!("listening on {}", config.listen))?;
+    let address = listener.local_addr().unwrap_or(config.listen);
+
+    let server = Arc::new(Server::new(store, config));
+    let claimed = !server.store.is_empty().unwrap_or(false);
+    let name = api::installation_name(&server);
+
+    // Answering for itself on the local network, so nobody in the office has to
+    // be told an IP address. It is its own thread rather than a task because it
+    // is a blocking socket that lives as long as the process, and it is not
+    // worth failing a server over: a machine where something else already holds
+    // the port simply will not be found automatically.
+    let announcing = Arc::clone(&server);
+    let port = address.port();
+    // Settled before the thread starts, so the first question does not race
+    // two of them into making one each.
+    let id = api::installation_id(&server);
+    std::thread::Builder::new()
+        .name("hyperview-announce".into())
+        .spawn(move || {
+            hub::discover::answer_for(|asker| {
+                let host = hub::discover::facing(asker.ip())
+                    .map(|ip| ip.to_string())
+                    .unwrap_or_else(|| "localhost".into());
+                hub::discover::Answer {
+                    name: api::installation_name(&announcing),
+                    url: format!("http://{host}:{port}"),
+                    version: VERSION.to_string(),
+                    api_version: hub::API_VERSION,
+                    // Read fresh every time, so a server that is set up while
+                    // somebody is looking stops advertising itself as free.
+                    ready: !announcing.store.is_empty().unwrap_or(false),
+                    id: id.clone(),
+                }
+            })
+        })
+        .ok();
+
+    let serving = Serving {
+        address,
+        name: name.clone(),
+        claimed,
+    };
+    if server.config.check_for_updates {
+        tokio::spawn(crate::updates::keep_up_to_date(Arc::clone(&server)));
+    }
+
+    let app = api::router(server).layer(tower_http::trace::TraceLayer::new_for_http());
+    ready(&serving);
+
+    tracing::info!("{name} is serving the Excalibur View API on {}/api/v1", serving.url());
+    // With connect info, so the presence ledger can say which machine a seat
+    // is — "who is connected and from where" needs the address, and on a shop
+    // LAN there is no proxy header to read it from.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+        .with_graceful_shutdown(stop)
+        .await
+        .context("serving")?;
+    tracing::info!("stopped cleanly");
+    Ok(())
+}
+
+/// This machine's address on the network it is actually on. Asked of the
+/// operating system rather than guessed from a list of interfaces, because a
+/// shop machine has four of those and only one of them is the answer.
+pub fn local_address() -> Option<std::net::IpAddr> {
+    // Nothing is sent: connecting a UDP socket only picks a route.
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("192.168.1.1:9").ok()?;
+    let mine = socket.local_addr().ok()?.ip();
+    (!mine.is_unspecified() && !mine.is_loopback()).then_some(mine)
+}
+
+/// Ctrl-C, or the service manager asking it to stop.
+pub async fn on_a_signal() {
+    let interrupt = async {
+        tokio::signal::ctrl_c().await.ok();
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut signal) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            signal.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = interrupt => {},
+        _ = terminate => {},
+    }
+    tracing::info!("stopping");
+}
+
+/// Makes the first account when a server is started with nothing on it and
+/// nobody is going to be sitting in front of the program to set it up — the
+/// headless case, where somebody installed this on a Linux box.
+pub fn first_administrator(store: &Store) -> Result<String> {
+    let password = crate::auth::readable_secret();
+    let hashed = crate::auth::hash_password(&password)?;
+    let now = api::now();
+    store.with(|db| {
+        db.execute(
+            "INSERT INTO people (id, name, email, password, role, created)
+             VALUES (?1, ?2, ?3, ?4, 'admin', ?5)",
+            rusqlite::params![
+                api::fresh_id("usr"),
+                "Administrator",
+                "admin@localhost",
+                hashed,
+                now
+            ],
+        )?;
+        Ok(())
+    })?;
+    Ok(password)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_address_to_hand_somebody_is_never_the_anywhere_one() {
+        let serving = Serving {
+            address: "0.0.0.0:8714".parse().unwrap(),
+            name: "Mesa Fab".into(),
+            claimed: true,
+        };
+        let url = serving.url();
+        assert!(!url.contains("0.0.0.0"), "{url} is not something to type");
+        assert!(url.ends_with(":8714"));
+    }
+
+    #[test]
+    fn a_server_told_exactly_where_to_listen_says_exactly_that() {
+        let serving = Serving {
+            address: "192.168.1.40:8714".parse().unwrap(),
+            name: "Mesa Fab".into(),
+            claimed: true,
+        };
+        assert_eq!(serving.url(), "http://192.168.1.40:8714");
+    }
+}

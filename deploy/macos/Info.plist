@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>                 <string>Excalibur View</string>
+  <key>CFBundleDisplayName</key>          <string>Excalibur View</string>
+  <key>CFBundleIdentifier</key>           <string>com.excaliburct.view</string>
+  <key>CFBundleExecutable</key>           <string>Excalibur View</string>
+  <key>CFBundleIconFile</key>             <string>AppIcon</string>
+  <key>CFBundlePackageType</key>          <string>APPL</string>
+  <key>CFBundleShortVersionString</key>   <string>__VERSION__</string>
+  <key>CFBundleVersion</key>              <string>__VERSION__</string>
+  <key>NSHumanReadableCopyright</key>     <string>Excalibur Construction Technologies</string>
+  <key>LSMinimumSystemVersion</key>       <string>11.0</string>
+  <key>NSHighResolutionCapable</key>      <true/>
+  <!-- Drawings and the program's own files, so double-clicking one opens it. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>         <string>PDF drawing</string>
+      <key>CFBundleTypeRole</key>         <string>Editor</string>
+      <key>LSHandlerRank</key>            <string>Alternate</string>
+      <key>LSItemContentTypes</key>       <array><string>com.adobe.pdf</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>         <string>Excalibur View Office license</string>
+      <key>CFBundleTypeRole</key>         <string>Viewer</string>
+      <key>LSHandlerRank</key>            <string>Owner</string>
+      <key>LSItemContentTypes</key>       <array><string>com.excaliburct.evlicense</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>         <string>Excalibur View tool chest</string>
+      <key>CFBundleTypeRole</key>         <string>Editor</string>
+      <key>LSHandlerRank</key>            <string>Owner</string>
+      <key>LSItemContentTypes</key>       <array><string>com.excaliburct.evtools</string></array>
+    </dict>
+  </array>
+  <!-- The two file types this program owns, declared so the system knows them. -->
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>         <string>com.excaliburct.evlicense</string>
+      <key>UTTypeDescription</key>        <string>Excalibur View Office license</string>
+      <key>UTTypeConformsTo</key>         <array><string>public.json</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>evlicense</string></array></dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>         <string>com.excaliburct.evtools</string>
+      <key>UTTypeDescription</key>        <string>Excalibur View tool chest</string>
+      <key>UTTypeConformsTo</key>         <array><string>public.json</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>evtools</string></array></dict>
+    </dict>
+  </array>
+  <!-- hyperview:// links, the same as on Windows. -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>          <string>com.excaliburct.view</string>
+      <key>CFBundleURLSchemes</key>       <array><string>hyperview</string></array>
+    </dict>
+  </array>
+  <!-- Finding the office server on the shop's own network. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Excalibur View looks on your own network for your office server. Nothing is sent outside it.</string>
+</dict>
+</plist>
