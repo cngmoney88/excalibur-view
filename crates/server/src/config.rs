@@ -1,0 +1,187 @@
+//! What the administrator sets.
+
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+/// The port a Hyperview server serves on unless somebody says otherwise. Not
+/// the port it is *found* on — that is [`hub::discover::PORT`], and the two are
+/// deliberately different so a machine that cannot hold one can still do the
+/// other.
+pub const DEFAULT_PORT: u16 = 8714;
+
+#[derive(Clone, Debug)]
+pub struct Config {
+    /// What the company calls this installation. It shows in the client, so
+    /// nobody marks up a drawing on the wrong server.
+    pub name: String,
+    pub listen: SocketAddr,
+    /// Everything the server keeps: the database and the drawings.
+    pub data: PathBuf,
+    /// Largest drawing set it will accept, in bytes.
+    pub largest_upload: u64,
+    /// Hold every seat on this version. Empty means whatever is newest.
+    pub pin_version: Option<String>,
+    /// Where releases come from when this server mirrors rather than hosts.
+    pub release_feed: Option<String>,
+    /// A token for that feed, when it is a private repository.
+    pub release_token: Option<String>,
+    /// Browser origins allowed to call the API. Empty means none, which is the
+    /// right default for a server whose clients are desktop programs.
+    pub allow_origins: Vec<String>,
+    /// The key whoever looks after this box uses to reach its maintenance
+    /// routes. **None means those routes do not exist** — not that they are
+    /// open. A shop that has not asked to be looked after should not quietly
+    /// grow a remote channel into its drawings.
+    pub maintenance_key: Option<String>,
+    /// Which release channel this installation follows: `stable` or `preview`.
+    /// An administrator's choice in the program wins over this.
+    pub channel: String,
+    /// Whether to read the publisher's feed at all. Off unless whatever
+    /// started the server turns it on, so a test or a server embedded in
+    /// something else never goes out to the internet by surprise.
+    pub check_for_updates: bool,
+    /// Whether this server may replace its own program file with a newer
+    /// signed one and restart. Only the installed Windows service does: it
+    /// is the one with a service manager to start it again.
+    pub replace_self: bool,
+    /// Keys a plugin may be signed with besides the ones compiled in. Empty
+    /// in every server that is started as a program — nothing reads it from a
+    /// file, the command line or the environment — and set only by a test,
+    /// which cannot hold the publisher's private key.
+    pub plugin_keys_for_tests: Vec<(String, [u8; 32])>,
+}
+
+impl Default for Config {
+    fn default() -> Config {
+        Config {
+            name: "Excalibur View".into(),
+            listen: SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT)),
+            data: beside_the_program(),
+            // Sixty drawing sets the size of a stamped structural package.
+            largest_upload: 512 * 1024 * 1024,
+            pin_version: None,
+            release_feed: None,
+            release_token: None,
+            allow_origins: Vec::new(),
+            maintenance_key: None,
+            channel: "stable".into(),
+            check_for_updates: false,
+            replace_self: false,
+            plugin_keys_for_tests: Vec::new(),
+        }
+    }
+}
+
+/// Where a server keeps its things when nobody has said.
+///
+/// Beside the program itself, not in whatever folder it happened to be
+/// started from. Somebody who drops `hyperview-server.exe` in a folder on the
+/// office server and double-clicks it should find the drawings in that same
+/// folder afterwards — not in `C:\\Windows\\System32` because a shortcut had
+/// a different "start in". When the program's own folder cannot be written
+/// to, which is the ordinary case for `/usr/local/bin`, it falls back to the
+/// working directory and says so by simply using it.
+pub fn beside_the_program() -> PathBuf {
+    let here = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(PathBuf::from));
+    if let Some(here) = here {
+        let scratch = here.join(".hyperview-write-test");
+        if std::fs::write(&scratch, b"x").is_ok() {
+            let _ = std::fs::remove_file(&scratch);
+            return here.join("hyperview-data");
+        }
+    }
+    PathBuf::from("./hyperview-data")
+}
+
+impl Config {
+    /// Reads the environment. Everything has a working default, so the first
+    /// run needs no configuration at all.
+    pub fn from_environment() -> Config {
+        let mut config = Config::default();
+        if let Ok(name) = std::env::var("HYPERVIEW_NAME") {
+            if !name.trim().is_empty() {
+                config.name = name;
+            }
+        }
+        if let Ok(listen) = std::env::var("HYPERVIEW_LISTEN") {
+            match listen.parse() {
+                Ok(address) => config.listen = address,
+                Err(_) => eprintln!(
+                    "HYPERVIEW_LISTEN is not an address ({listen}); using {}",
+                    config.listen
+                ),
+            }
+        }
+        if let Ok(data) = std::env::var("HYPERVIEW_DATA") {
+            config.data = PathBuf::from(data);
+        }
+        if let Ok(size) = std::env::var("HYPERVIEW_MAX_UPLOAD_MB") {
+            if let Ok(mb) = size.parse::<u64>() {
+                config.largest_upload = mb * 1024 * 1024;
+            }
+        }
+        config.maintenance_key = non_empty("HYPERVIEW_MAINTENANCE_KEY");
+        if let Some(channel) = non_empty("HYPERVIEW_CHANNEL") {
+            config.channel = channel;
+        }
+        config.pin_version = non_empty("HYPERVIEW_PIN_VERSION");
+        config.release_feed = non_empty("HYPERVIEW_RELEASE_FEED");
+        config.release_token = non_empty("HYPERVIEW_RELEASE_TOKEN");
+        if let Some(origins) = non_empty("HYPERVIEW_ALLOW_ORIGINS") {
+            config.allow_origins = origins
+                .split(',')
+                .map(|o| o.trim().to_string())
+                .filter(|o| !o.is_empty())
+                .collect();
+        }
+        config
+    }
+
+    pub fn database(&self) -> PathBuf {
+        self.data.join("hyperview.sqlite")
+    }
+
+    /// Drawings and chests, kept by the digest of their contents so the same
+    /// file uploaded twice is stored once.
+    pub fn blobs(&self) -> PathBuf {
+        self.data.join("files")
+    }
+
+    pub fn releases(&self) -> PathBuf {
+        self.data.join("releases")
+    }
+}
+
+fn non_empty(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_with_nothing_configured_still_knows_where_to_listen() {
+        let config = Config::default();
+        assert_eq!(config.listen.port(), 8714);
+        assert!(config.pin_version.is_none());
+        // No browser may call it until somebody says which one, because the
+        // clients are desktop programs and a wide-open origin list on a server
+        // holding a company's drawings is nobody's idea of a default.
+        assert!(config.allow_origins.is_empty());
+        // And no maintenance channel until somebody sets a key for one.
+        assert!(config.maintenance_key.is_none());
+    }
+
+    #[test]
+    fn the_database_and_the_drawings_live_under_the_data_folder() {
+        let config = Config {
+            data: PathBuf::from("/srv/hyperview"),
+            ..Config::default()
+        };
+        assert_eq!(config.database(), PathBuf::from("/srv/hyperview/hyperview.sqlite"));
+        assert_eq!(config.blobs(), PathBuf::from("/srv/hyperview/files"));
+    }
+}

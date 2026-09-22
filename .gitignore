@@ -1,0 +1,45 @@
+/target
+# A plugin is built in its own folder, and its build output is no more source
+# than the program's is.
+/plugins/*/target/
+
+# ---- never committed, never shipped -------------------------------------
+#
+# A signing key lets its holder ship software to every machine running
+# Hyperview. It belongs in a password manager, not in a repository.
+*.key
+hyperview-signing.key
+
+# Tool chests are the estimator's own work: their sections, their unit weights,
+# their years of building the thing. They are not part of this program and they
+# do not ship with it. Anyone running Hyperview builds their own, the same way
+# they would in Revu.
+/profiles/
+*.bpx
+*.btx
+
+# Drawing sets are somebody's project, under somebody's contract.
+*.pdf
+/research/
+/private/
+
+# Build and scratch.
+/dist
+/stage
+/pdfium
+/hyperview-data
+/third_party
+*.saving
+*.part
+
+# Private reference only: a real estimator's profile, used to learn how a chest
+# is organised. Never shipped, never committed.
+research/
+
+# Python leftovers
+__pycache__/
+
+# The trade chests are sold, so the data and the generator stay out of the
+# published source. The chest FORMAT is open, and so is reading and writing one:
+# anybody can build their own.
+private/

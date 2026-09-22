@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Group Policy template for Excalibur View.
+
+  Copy ExcaliburView.admx into the PolicyDefinitions folder and
+  en-US\ExcaliburView.adml into PolicyDefinitions\en-US. On a domain that is
+  \\<domain>\SYSVOL\<domain>\Policies\PolicyDefinitions; on one computer it is
+  C:\Windows\PolicyDefinitions.
+
+  The settings appear under Computer Configuration - Administrative Templates -
+  Excalibur Construction Technologies - Excalibur View.
+
+  Everything here is machine policy under HKLM\Software\Policies, which an
+  ordinary user cannot write to and the program cannot change. A computer
+  sealed here is sealed before anybody signs in to anything, and nothing inside
+  Excalibur View can unseal it.
+-->
+<policyDefinitions revision="1.0" schemaVersion="1.0">
+  <policyNamespaces>
+    <target prefix="excaliburview" namespace="ExcaliburConstructionTechnologies.Policies.ExcaliburView" />
+    <using prefix="windows" namespace="Microsoft.Policies.Windows" />
+  </policyNamespaces>
+  <resources minRequiredRevision="1.0" />
+
+  <categories>
+    <category name="Excalibur" displayName="$(string.Excalibur)" />
+    <category name="ExcaliburView" displayName="$(string.ExcaliburView)" explainText="$(string.ExcaliburView_Help)">
+      <parentCategory ref="Excalibur" />
+    </category>
+  </categories>
+
+  <policies>
+    <policy name="Sealed"
+            class="Machine"
+            displayName="$(string.Sealed)"
+            explainText="$(string.Sealed_Help)"
+            key="Software\Policies\Excalibur\View"
+            valueName="Sealed">
+      <parentCategory ref="ExcaliburView" />
+      <supportedOn ref="windows:SUPPORTED_Windows10" />
+      <enabledValue><decimal value="1" /></enabledValue>
+      <disabledValue><decimal value="0" /></disabledValue>
+    </policy>
+  </policies>
+</policyDefinitions>

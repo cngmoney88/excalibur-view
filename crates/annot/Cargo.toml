@@ -1,0 +1,11 @@
+[package]
+name = "annot"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pdf = { path = "../pdf" }
+
+[dev-dependencies]
+chest = { path = "../chest" }

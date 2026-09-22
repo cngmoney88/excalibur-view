@@ -1,0 +1,10 @@
+[package]
+name = "takeoff"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pdf = { path = "../pdf" }
+annot = { path = "../annot" }
+serde_json = "1"
