@@ -35,6 +35,9 @@ import argparse
 import datetime
 import json
 import os
+import shutil
+import zipfile
+import secrets
 import re
 import sys
 import time
@@ -53,15 +56,37 @@ import publish
 # each, quantity one, and the price is the price however many people use it.
 CHEST_PRICE = 14900
 CHEST_BUNDLE_PRICE = 49900
+# The name is the name of the file the buyer gets. Somebody who pays for
+# "Structural steel" and is sent "Structural Steel and Misc Metals.evtools"
+# has to stop and work out whether they got the right thing, and that doubt
+# is worth more than the tidier name.
 CHESTS = [
-    ("steel", "Structural steel", "Shapes, plate, bolts, welds and connections, off the AISC Shapes Database."),
-    ("concrete", "Concrete", "Rebar, formwork, placement and finishing."),
-    ("gc", "General contractor", "Sitework, demolition, waste and the general conditions."),
-    ("plumbing", "Plumbing", "Pipe, fittings, fixtures and hangers."),
-    ("electrical", "Electrical", "Conduit, wire, devices and gear."),
-    ("mechanical", "Mechanical", "Duct, equipment, and the gauges that go with them."),
+    ("steel", "Structural Steel and Misc Metals",
+     "3,439 tools in 27 sets. Shapes, plate, bolts, welds and connections, off the AISC Shapes Database."),
+    ("concrete", "Concrete and Earthwork",
+     "523 tools in 18 sets. Rebar, formwork, placement, finishing, excavation and haul."),
+    ("gc", "General Contractor",
+     "491 tools in 16 sets. Sitework, demolition, waste and the general conditions."),
+    ("plumbing", "Plumbing",
+     "392 tools in 12 sets. Pipe, fittings, fixtures and hangers."),
+    ("electrical", "Electrical",
+     "385 tools in 10 sets. Conduit, wire, devices and gear."),
+    ("mechanical", "Mechanical",
+     "364 tools in 12 sets. Duct, equipment, and the gauges that go with them."),
 ]
-CHEST_BUNDLE = ("all", "All six trade chests", "Every trade, one price.")
+CHEST_BUNDLE = ("all", "All six trade chests",
+                "5,594 tools. Every trade, one price.")
+
+# Sealed is Office for a shop that is not allowed to let a program reach the
+# internet at all, and it is sold the same way: per user, with a year of
+# updates in the first price. Double, because what it buys is not a feature
+# but a guarantee -- every outward connection refused, not merely switched
+# off -- and because the shops that need it are the ones that cannot use
+# anything else.
+SEALED_ITEM = "Excalibur View Sealed - per user"
+SEALED_RENEWAL_ITEM = "Excalibur View Sealed updates - per user, one year"
+SEALED_PRICE = 50000  # cents
+SEALED_RENEWAL_PRICE = 20000
 
 SEATS_ITEM = "Excalibur View Office - per user"
 RENEWAL_ITEM = "Excalibur View Office updates - per user, one year"
@@ -282,6 +307,13 @@ PRODUCTS_TO_SELL = [
      "Excalibur View Office, bought once per user. Updates for the first year are included."),
     ("renewal", RENEWAL_ITEM, "renewal",
      "Another year of updates for Excalibur View Office. Everything keeps working either way."),
+    ("sealed", SEALED_ITEM, "sealed",
+     "Excalibur View Sealed, bought once per user. Every outward connection refused, "
+     "set by your administrator through Group Policy or a managed preference. "
+     "Updates for the first year are included, and they arrive as files, by hand."),
+    ("sealed_renewal", SEALED_RENEWAL_ITEM, "sealed_renewal",
+     "Another year of updates for Excalibur View Sealed. A sealed office never fetches "
+     "them, so they come to you as a file. Everything keeps working either way."),
 ]
 
 
@@ -309,7 +341,27 @@ def a_ladder(square, kind, name, price, most, site, note, location, had):
     return rungs, made, kept
 
 
-def one_link(square, kind, name, price, site, note, location):
+def a_download_name(key, had):
+    """The address a bought chest is fetched from, made once and kept.
+
+    Not derived from the chest's name. This scheme is open source, so a name
+    anybody could work out is a name anybody could fetch, and the chests are
+    the thing being sold. A random one, written down in square-links.json,
+    is unguessable and never changes -- which matters, because it is baked
+    into a payment link that outlives this script.
+
+    What it is not is a lock. A chest is a file, the format is open, and
+    somebody who bought one can pass it to anybody. That is the honest
+    position and it is the same one we take when we tell people they can
+    build their own.
+    """
+    before = (had.get(key) or {}).get("download")
+    if before:
+        return before
+    return secrets.token_urlsafe(18)
+
+
+def one_link(square, kind, name, price, site, note, location, redirect=None):
     """A single payment link for something sold once per company.
 
     No ladder: a chest costs what it costs whether two people use it or
@@ -318,9 +370,15 @@ def one_link(square, kind, name, price, site, note, location):
     """
     body = link_body(kind, name, price, 1, site, note)
     body["order"]["location_id"] = location["id"]
-    made = square.post("/v2/online-checkout/payment-links", body)
-    link = made["payment_link"]
-    return {"id": link["id"], "url": link["url"], "price": price}
+    if redirect:
+        body["checkout_options"]["redirect_url"] = redirect
+    # `call`, not `post`. There is no `post`, and there never was: this
+    # function was written beside a_ladder and never once run, because no
+    # chest link had ever been made. The first time anybody sold a chest it
+    # would have stopped here.
+    made = square.call("POST", "/v2/online-checkout/payment-links", body)
+    link = made.get("payment_link") or {}
+    return {"id": link.get("id"), "url": link.get("url") or link.get("long_url"), "price": price}
 
 
 def chest_links(square, site, location, had):
@@ -332,12 +390,22 @@ def chest_links(square, site, location, had):
                      CHEST_BUNDLE_PRICE, CHEST_BUNDLE[2]))
     for key, name, price, note in products:
         already = had.get(key)
-        if already and already.get("price") == price:
+        if already and already.get("price") == price and already.get("download"):
             rungs[key] = already
             kept += 1
             continue
+        # Paying takes them straight to the file. No email to send, nothing
+        # for anybody to remember to do, and no gap between somebody paying
+        # and somebody getting what they paid for.
+        download = a_download_name(key, had)
+        # All six is a zip; one trade is the chest itself.
+        suffix = "zip" if key == CHEST_BUNDLE[0] else "evtools"
+        url = f"{site.rstrip('/')}/f/{download}.{suffix}"
         rungs[key] = one_link(square, f"chest-{key}", name, price, site,
-                              f"{note} One price for the whole office.", location)
+                              f"{note} One price for the whole office.", location,
+                              redirect=url)
+        rungs[key]["download"] = download
+        rungs[key]["url_file"] = url
         made += 1
     return rungs, made, kept
 
@@ -375,6 +443,11 @@ def cmd_setup(a):
         "chest_price": f"${CHEST_PRICE // 100}",
         "chest_bundle_price": f"${CHEST_BUNDLE_PRICE // 100}",
         "buy_chest_links": {key: r["url"] for key, r in chests.items()},
+        "buy_sealed_url": block["sealed"]["1"]["url"],
+        "buy_sealed_renewal_url": block["sealed_renewal"]["1"]["url"],
+        "buy_sealed_links": {n: r["url"] for n, r in sorted(block["sealed"].items(), key=lambda kv: int(kv[0]))},
+        "buy_sealed_renewal_links": {n: r["url"] for n, r in
+                                     sorted(block["sealed_renewal"].items(), key=lambda kv: int(kv[0]))},
     }
     out = os.path.join(a.folder, "square-site.json")
     write_json(out, lines)
@@ -387,7 +460,11 @@ def cmd_setup(a):
     print(f'  "buy_renewal_links": {{ ... {most} links ... }}')
     print(f'  "chest_price": "${CHEST_PRICE // 100}",')
     print(f'  "chest_bundle_price": "${CHEST_BUNDLE_PRICE // 100}",')
-    print(f'  "buy_chest_links": {{ ... {len(chests)} links ... }}')
+    print(f'  "buy_chest_links": {{ ... {len(chests)} links ... }},')
+    print(f'  "buy_sealed_url": "{lines["buy_sealed_url"]}",')
+    print(f'  "buy_sealed_renewal_url": "{lines["buy_sealed_renewal_url"]}",')
+    print(f'  "buy_sealed_links": {{ ... {most} links ... }},')
+    print(f'  "buy_sealed_renewal_links": {{ ... {most} links ... }}')
 
 
 # ---- reading what was bought -----------------------------------------------
@@ -407,11 +484,31 @@ def what_was_bought(order, links):
         # contains the word that would otherwise read as a seat.
         if "tool chest" in name:
             kind, users = "chest", 1
+        # Sealed before Office, and before the renewal test, because every
+        # Sealed line item also contains the words the others are looking
+        # for: "Excalibur View Sealed updates - per user" has "updates" and
+        # "per user" in it. Checked in the wrong order, a shop that paid for
+        # Sealed is issued an ordinary Office license -- which would work,
+        # and would be the wrong program for the only reason they bought it.
+        elif "sealed" in name:
+            sealed_renewal = "renewal" in name or "updates" in name
+            kind = "sealed_renewal" if sealed_renewal else "sealed"
+            users = users + count
         elif "renewal" in name or "updates" in name:
             kind, users = "renewal", users + count
         elif "office" in name or "per user" in name or "seat" in name:
             kind, users = kind or "seats", users + count
     return kind, users
+
+
+# The two ways of buying each edition: what it is, and what a renewal of it
+# looks like. One place, so nothing has to remember four strings.
+BUYING = {
+    "seats": ("office", False),
+    "renewal": ("office", True),
+    "sealed": ("sealed", False),
+    "sealed_renewal": ("sealed", True),
+}
 
 
 def chest_ordered(order):
@@ -575,7 +672,11 @@ def next_license(folder, sale, company, key_path):
     held = held_by(folder, company)
     if held and held.get("updates_through") == publish.FOREVER:
         return None, "that company's license already covers every user and every update, for good. Nothing to issue."
-    if sale["kind"] == "seats":
+    edition, renewing = BUYING.get(sale["kind"], ("office", False))
+    if held and held.get("edition", "office") != edition:
+        return None, (f"that company holds a {held.get('edition', 'office')} license and this order is "
+                      f"for {edition}. The two are different programs, so this one is issued by hand.")
+    if not renewing:
         if held:
             if held.get("users") == 0:
                 return None, "that company's license already covers every user. Nothing to issue."
@@ -597,7 +698,7 @@ def next_license(folder, sale, company, key_path):
         through = publish.a_year_on(from_day)
         note = "Updates renewed"
     lic = publish.make_license(
-        key_path, company, users=users, updates_through=through, note=note,
+        key_path, company, edition=edition, users=users, updates_through=through, note=note,
         id=held["id"] if held else None,
     )
     return lic, None
@@ -608,7 +709,9 @@ def next_license(folder, sale, company, key_path):
 def email_text(lic, sale, site):
     users = "every user" if lic["users"] == 0 else f"{lic['users']} user" + ("" if lic["users"] == 1 else "s")
     through = "for good" if lic["updates_through"] == publish.FOREVER else f"through {publish.long_date(lic['updates_through'])}"
-    what = "Your Excalibur View Office license" if sale["kind"] == "seats" else "Your renewed Excalibur View Office license"
+    edition, renewing = BUYING.get(sale["kind"], ("office", False))
+    named = "Excalibur View Sealed" if edition == "sealed" else "Excalibur View Office"
+    what = f"Your renewed {named} license" if renewing else f"Your {named} license"
     return (
         f"Subject: {what} - {lic['company']}\n"
         f"To: {sale.get('email') or '(the administrator)'}\n"
@@ -651,6 +754,9 @@ def issue_one(folder, sale, company, quiet=False, site="https://excaliburct.com"
     folder.remember(sale["payment"]["id"], {
         "company": lic["company"],
         "license": lic["id"],
+        # Kept so a later order can be refused when it is for the other
+        # edition. Office and Sealed are different programs.
+        "edition": lic.get("edition", "office"),
         "users": lic["users"],
         "updates_through": lic["updates_through"],
         "file": path,
@@ -662,6 +768,55 @@ def issue_one(folder, sale, company, quiet=False, site="https://excaliburct.com"
     users = "every user" if lic["users"] == 0 else f"{lic['users']} users"
     folder.say(f"  {lic['company']}: {users}, updates through {lic['updates_through']} -> {os.path.basename(path)}", quiet)
     return path
+
+
+def cmd_files(a):
+    """Lays out the folder the website serves, from the chests on this disk.
+
+    A bought chest is the same file for every buyer, so there is nothing to
+    generate per order: the payment link already points at a fixed address
+    and this puts the file there. Run it again whenever a chest changes; the
+    addresses do not move, so nobody's link goes stale.
+    """
+    folder = Folder(a.folder)
+    links = folder.links()
+    by_trade = (links.get("chests") or {}).get("by_trade") or {}
+    if not by_trade:
+        raise SystemExit("no chest links yet - run `python square.py setup` first.")
+
+    source = a.chests or os.path.join(a.folder, "chests")
+    into = a.into
+    os.makedirs(into, exist_ok=True)
+
+    wanted = {key: f"{name}.evtools" for key, name, _ in CHESTS}
+    missing = [f for f in wanted.values() if not os.path.exists(os.path.join(source, f))]
+    if missing:
+        raise SystemExit(f"{source} is missing: {', '.join(missing)}")
+
+    made = []
+    for key, filename in wanted.items():
+        rung = by_trade.get(key)
+        if not rung or not rung.get("download"):
+            print(f"  {key}: no download address - run setup again")
+            continue
+        out = os.path.join(into, f"{rung['download']}.evtools")
+        shutil.copyfile(os.path.join(source, filename), out)
+        made.append((key, out))
+
+    bundle = by_trade.get(CHEST_BUNDLE[0])
+    if bundle and bundle.get("download"):
+        out = os.path.join(into, f"{bundle['download']}.zip")
+        with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+            for filename in wanted.values():
+                z.write(os.path.join(source, filename), filename)
+        made.append((CHEST_BUNDLE[0], out))
+
+    print(f"{len(made)} file(s) in {into}:\n")
+    for key, out in made:
+        size = os.path.getsize(out) / 1024
+        print(f"  {key:<11} {os.path.basename(out):<32} {size:>8.1f} KB")
+    print("\nThese go in the site's f/ folder. The addresses never change, so a")
+    print("payment link made today still works after the next chest update.")
 
 
 def cmd_orders(a):
@@ -740,9 +895,16 @@ def main():
     p.add_argument("--sandbox", action="store_true", help="Square's test account rather than the real one")
     p.add_argument("--site", default="https://excaliburct.com")
     sub = p.add_subparsers(dest="command", required=True)
+    fi = sub.add_parser("files", help="lay out the f/ folder the website serves")
+    fi.add_argument("--into", required=True, help="where to write them (the site's f/ folder)")
+    fi.add_argument("--chests", help="where the .evtools files are (default: <folder>/chests)")
+
     s = sub.add_parser("setup", help="make the payment links the website's Buy buttons use")
     s.add_argument("--price", type=int, default=SEATS_PRICE, help="cents per user, one time")
     s.add_argument("--renewal", type=int, default=RENEWAL_PRICE, help="cents per user per year")
+    s.add_argument("--sealed", type=int, default=SEALED_PRICE, help="Sealed: cents per user, one time")
+    s.add_argument("--sealed-renewal", type=int, default=SEALED_RENEWAL_PRICE,
+                   dest="sealed_renewal", help="Sealed: cents per user per year")
     s.add_argument("--most", type=int, default=MOST_SEATS,
                    help="the largest number of users with a link of its own (default %(default)s)")
     s.add_argument("--location", help="which Square location, by name or id")
@@ -758,7 +920,8 @@ def main():
     w.add_argument("--days", type=int, default=7)
     a = p.parse_args()
     try:
-        {"setup": cmd_setup, "orders": cmd_orders, "issue": cmd_issue, "watch": cmd_watch}[a.command](a)
+        {"setup": cmd_setup, "orders": cmd_orders, "issue": cmd_issue,
+         "watch": cmd_watch, "files": cmd_files}[a.command](a)
     except SquareSaid as e:
         raise SystemExit(str(e))
 
