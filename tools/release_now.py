@@ -15,6 +15,7 @@ this computer rather than somewhere more convenient.
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -220,41 +221,34 @@ def commits_between(older, newer):
         return []
 
 
-def mac_build_from_github(version, token, any_commit=False):
-    """Fetches the Mac build GitHub made for this version.
+def artifact_from_github(want, token, any_commit=False, into_name="from-github"):
+    """Downloads a named artifact GitHub built for this release, unpacked.
 
-    A Mac is the only machine that can sign and notarize a Mac program, so
-    GitHub keeps one for exactly that. What comes back is the same two files a
-    Mac would have produced, and they are checked against the signing key here
-    like anything else.
-
-    It must have been built from the commit being released. The Mac half and
-    the Windows half of a release are one program, and the only thing stopping
-    them being two different programs is this check: an artifact keeps its name
-    after the code has moved on, and "newest one called mac-0.6.4" will happily
-    hand over a build of last week's source.
-
-    Returns (zip, dmg) as paths, or (None, None) with a reason printed.
+    One function for both halves, because they are the same job: find the
+    artifact by name, refuse it if it was built from code that differs from
+    what is being released, download it, unpack it. Returns the folder, or
+    None with a reason printed.
     """
-    want = f"mac-{version}"
     try:
         url = f"https://api.github.com/repos/{SOURCE_REPO}/actions/artifacts?per_page=100"
         with github(url, token) as answer:
             artifacts = json.load(answer).get("artifacts", [])
     except urllib.error.HTTPError as e:
-        say(f"  GitHub said {e.code} when asked for the Mac build.")
-        return None, None
+        say(f"  GitHub said {e.code} when asked for {want}.")
+        return None
     except Exception as e:  # a laptop on a hotel network, most likely
         say(f"  Could not reach GitHub: {e}")
-        return None, None
+        return None
 
     mine = [a for a in artifacts if a.get("name") == want and not a.get("expired")]
     if not mine:
-        names = sorted({a.get("name", "") for a in artifacts if str(a.get("name", "")).startswith("mac-")})
-        say(f"  GitHub has no Mac build for {version}.")
+        stem = want.rsplit("-", 1)[0]
+        names = sorted({a.get("name", "") for a in artifacts
+                        if str(a.get("name", "")).startswith(stem)})
+        say(f"  GitHub has no {want}.")
         if names:
             say(f"  It has: {', '.join(names[:6])}")
-        return None, None
+        return None
 
     here = commit_here()
     if here and not any_commit:
@@ -265,33 +259,73 @@ def mac_build_from_github(version, token, any_commit=False):
         if not matching:
             newest = max(mine, key=lambda a: a.get("created_at", ""))
             made_from = (newest.get("workflow_run") or {}).get("head_sha") or "?"
-            say(f"  GitHub's Mac build for {version} was made from {made_from[:7]},")
-            say(f"  and this release is {here[:7]}. The code that gets compiled")
-            say("  is not the same, so those would be two different programs.")
+            say(f"  {want} was made from {made_from[:7]}, and this release is")
+            say(f"  {here[:7]}. The code that gets compiled is not the same, so")
+            say("  those would be two different programs.")
             ahead = commits_between(made_from, here) if made_from != "?" else []
             if ahead:
-                say(f"  {len(ahead)} commit(s) the Mac build has not got:")
+                say(f"  {len(ahead)} commit(s) it has not got:")
                 for line in ahead[:8]:
                     say(f"    {line}")
                 if len(ahead) > 8:
                     say(f"    ...and {len(ahead) - 8} more")
-            say("  Run the Mac build workflow on this commit and then run this again.")
-            return None, None
+            say("  Run that build workflow on this commit and then run this again.")
+            return None
         mine = matching
 
     newest = max(mine, key=lambda a: a.get("created_at", ""))
-    into = os.path.join(ROOT, "target", "mac-from-github")
+    into = os.path.join(ROOT, "target", into_name)
     os.makedirs(into, exist_ok=True)
-    say(f"  Downloading the Mac build GitHub made on {newest.get('created_at', '')[:10]}...")
+    say(f"  Downloading {want}, built {newest.get('created_at', '')[:10]}...")
     try:
         with github(newest["archive_download_url"], token) as answer:
             blob = answer.read()
     except Exception as e:
         say(f"  The download did not finish: {e}")
-        return None, None
-
+        return None
     with zipfile.ZipFile(io.BytesIO(blob)) as bundle:
         bundle.extractall(into)
+    return into
+
+
+def windows_build_from_github(version, token, any_commit=False):
+    """The two Windows programs, built and tested by GitHub.
+
+    There is no compiler on the computer that holds the signing key, and
+    there is no reason there should be: the key is the only thing that has
+    to live there. Returns (app, server), or (None, None).
+    """
+    into = artifact_from_github(f"windows-{version}", token, any_commit,
+                                into_name="windows-from-github")
+    if not into:
+        return None, None
+    app = server = None
+    for name in os.listdir(into):
+        full = os.path.join(into, name)
+        if name.lower().endswith("-server.exe"):
+            server = full
+        elif name.lower().endswith(".exe"):
+            app = full
+    if not (app and server):
+        say(f"  That artifact did not hold both programs: {os.listdir(into)}")
+        return None, None
+    return app, server
+
+
+def mac_build_from_github(version, token, any_commit=False):
+    """The Mac build GitHub made for this version.
+
+    A Mac is the only machine that can sign and notarize a Mac program, so
+    GitHub keeps one for exactly that. What comes back is the same two files a
+    Mac would have produced, and they are checked against the signing key here
+    like anything else.
+
+    Returns (zip, dmg) as paths, or (None, None) with a reason printed.
+    """
+    into = artifact_from_github(f"mac-{version}", token, any_commit,
+                               into_name="mac-from-github")
+    if not into:
+        return None, None
     zip_path = dmg_path = None
     for name in os.listdir(into):
         full = os.path.join(into, name)
@@ -354,11 +388,33 @@ def main():
     if not token:
         stop("The GitHub token is not where this expects it.",
              "It should be github-token.txt, in dev\\ExcaliburSigning.")
+    the_token = open(token).read().strip() if token else None
+
+    say()
+    say(bold("Getting the Windows programs"))
+    app = server = None
+    if the_token:
+        app, server = windows_build_from_github(version, the_token, any_commit)
+    if not app:
+        if shutil.which("cargo"):
+            say("  Not on GitHub. This computer will build them itself.")
+        else:
+            stop(
+                "The Windows programs are not on GitHub, and this computer has no Rust.",
+                "",
+                "  On GitHub, open the Windows build workflow and press Run",
+                "  workflow. It builds both programs and runs the tests, the same",
+                "  way the Mac build does. Then run this again.",
+                "",
+                "  Rust is not needed on this computer and never was. The reason",
+                "  releases happen here is the signing key, which cannot leave.",
+            )
+
     say()
     say(bold("Getting the Mac build"))
     mac_zip, mac_dmg = (None, None)
-    if token:
-        mac_zip, mac_dmg = mac_build_from_github(version, open(token).read().strip(), any_commit)
+    if the_token:
+        mac_zip, mac_dmg = mac_build_from_github(version, the_token, any_commit)
     # Failing that, anything a Mac left lying about on this computer. This is
     # the path when GitHub cannot build -- no minutes, no network, no account
     # -- and somebody has sat in front of the Mac and run deploy/macos/build.sh
@@ -379,6 +435,8 @@ def main():
     say(f"  signing key    {shorten(key)}")
     say(f"  GitHub token   {shorten(token)}")
     say(f"  release notes  {shorten(notes)}")
+    say(f"  Windows app    {shorten(app)}")
+    say(f"  Windows server {shorten(server)}")
     say(f"  Mac update     {shorten(mac_zip)}{'  (from this computer)' if from_disk else ''}")
     say(f"  Mac download   {shorten(mac_dmg)}")
     say()
@@ -414,9 +472,15 @@ def main():
             return
         mac_zip = mac_dmg = None
 
-    say("This will run the tests, build both Windows programs, sign everything")
-    say("with your key, and publish it as an early release. Offices set to try")
-    say("new versions first will take it; everybody else waits until you say so.")
+    if app:
+        say("This will sign everything with your key and publish it as an early")
+        say("release. GitHub built and tested both halves; the signing is the")
+        say("part only this computer can do.")
+    else:
+        say("This will run the tests, build both Windows programs, sign everything")
+        say("with your key, and publish it as an early release.")
+    say("Offices set to try new versions first will take it; everybody else")
+    say("waits until you say so.")
     say()
     if input("Press return to go ahead, or type no to stop: ").strip().lower() in ("n", "no"):
         say("\nStopped. Nothing was published.")
@@ -428,6 +492,8 @@ def main():
             "--version", version]
     if notes:
         args += ["--notes-file", notes]
+    if app and server:
+        args += ["--app", app, "--server", server]
     if mac_zip:
         args += ["--mac-zip", mac_zip, "--mac-dmg", mac_dmg]
 

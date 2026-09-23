@@ -1,0 +1,90 @@
+# Builds the two Windows programs, so that a compiler is not something
+# anybody has to have installed to put a version out.
+#
+# The Mac half has worked this way since 0.6.4 and the Windows half did not,
+# on the assumption that the computer holding the signing key would also be a
+# computer with Rust on it. It was not, and there was no reason it should be:
+# the key is the only thing that genuinely has to live there.
+#
+# So both halves are built the same way now. What this produces is unsigned by
+# us. The release is signed and published from the machine that holds the key,
+# which never leaves it. See docs/RELEASING.md.
+
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The PDF engine is a third-party binary kept out of this repository and
+      # pinned by third_party/pdfium/embedded/VERSION, so this fetches exactly
+      # the build a release was tested against. Straight off the release, not
+      # through the API: the API costs an anonymous request that every runner
+      # on GitHub shares, and when that allowance runs out a good build fails
+      # for a reason that has nothing to do with the code.
+      - name: The PDF engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/pdfium-win-x64.tgz"
+          echo "PDFium $build: $url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$url" -o pdfium.tgz
+          mkdir -p unpacked
+          tar -xzf pdfium.tgz -C unpacked
+          found="$(find unpacked -name 'pdfium.dll' | head -1)"
+          test -n "$found" || { echo "no pdfium.dll in that archive" >&2; exit 1; }
+          cp "$found" third_party/pdfium/embedded/pdfium.dll
+          ls -l third_party/pdfium/embedded/pdfium.dll
+
+      # A release that does not pass its own tests is not a release. This is
+      # the same suite Check runs; it runs again here because this is the
+      # build somebody is about to sign and hand to every seat in a shop.
+      - name: The whole test suite
+        run: cargo test --workspace
+
+      - name: Build both programs
+        run: cargo build --release -p hyperview -p hyperview-server
+
+      # Named the way the release publishes them, so nobody has to know which
+      # crate produced which file.
+      - name: Name them the way they ship
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          mkdir -p out
+          cp target/release/hyperview.exe out/ExcaliburView.exe
+          cp target/release/hyperview-server.exe out/ExcaliburView-Server.exe
+          ls -l out
+          sha256sum out/*.exe
+
+      - name: Hand them over
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ steps.files.outputs.version }}
+          path: out/*.exe
+          if-no-files-found: error
+          retention-days: 30
