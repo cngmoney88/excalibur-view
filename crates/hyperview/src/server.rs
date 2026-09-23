@@ -47,6 +47,25 @@ pub enum Ask {
     },
     SignOut,
     Projects,
+    /// Everybody with an account on this server. Administrators only.
+    People,
+    /// Give somebody an account.
+    AddPerson {
+        name: String,
+        email: String,
+        password: String,
+        role: hub::Role,
+    },
+    /// Change what somebody is allowed to do.
+    ChangeRole {
+        id: String,
+        role: hub::Role,
+    },
+    /// Take somebody's account away.
+    RemovePerson {
+        id: String,
+        name: String,
+    },
     Sets(String),
     /// Fetch a drawing into the cache and open it.
     Open {
@@ -172,6 +191,15 @@ pub enum Told {
     SignedIn(Box<Session>),
     SignedOut,
     Projects(Vec<Project>),
+    /// Everybody with an account here.
+    People(Vec<hub::User>),
+    /// What just happened to somebody's account, and the list as it stands
+    /// afterwards -- sent together, so there is never a moment where the
+    /// screen says somebody was removed and still shows their row.
+    PeopleChanged {
+        people: Vec<hub::User>,
+        said: String,
+    },
     Sets(Vec<DrawingSet>),
     /// The drawing is on this machine and ready to open.
     Downloaded {
@@ -388,6 +416,64 @@ pub fn start(repaint: egui::Context) -> Link {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.projects() {
                             Ok(list) => say(&told, Told::Projects(list)),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+
+                    Ask::People => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => match client.people() {
+                            Ok(list) => say(&told, Told::People(list)),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+
+                    Ask::AddPerson { name, email, password, role } => {
+                        match connected(&client) {
+                            Err(message) => say(&told, Told::Trouble(message)),
+                            Ok(client) => {
+                                match client.add_person(&name, &email, &password, role) {
+                                    Ok(person) => people_now(
+                                        client,
+                                        &told,
+                                        format!(
+                                            "{} has an account here, as {}.",
+                                            person.name,
+                                            role_said(person.role)
+                                        ),
+                                    ),
+                                    Err(e) => say(&told, Told::Trouble(e.to_string())),
+                                }
+                            }
+                        }
+                    }
+
+                    Ask::ChangeRole { id, role } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => match client.change_role(&id, role) {
+                            Ok(person) => people_now(
+                                client,
+                                &told,
+                                format!("{} is now {}.", person.name, role_said(person.role)),
+                            ),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+
+                    Ask::RemovePerson { id, name } => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => match client.remove_person(&id) {
+                            // The server takes their sessions and keys with
+                            // them, and what they made stays. Worth saying,
+                            // because the second half is the half somebody
+                            // removing a colleague is anxious about.
+                            Ok(_) => people_now(
+                                client,
+                                &told,
+                                format!(
+                                    "{name} has been removed. Their markups and sets stay.",
+                                ),
+                            ),
                             Err(e) => say(&told, Told::Trouble(e.to_string())),
                         },
                     },
@@ -1107,6 +1193,29 @@ fn office(client: &Client, told: &Sender<Told>) {
     }
 }
 
+/// Sends what just happened together with the list as it now stands.
+///
+/// Asking the server again rather than editing the list here is deliberate:
+/// the server is what decides, and a screen that guesses at the answer is a
+/// screen that will eventually be wrong about who can do what.
+fn people_now(client: &Client, told: &Sender<Told>, said: String) {
+    let _ = match client.people() {
+        Ok(people) => told.send(Told::PeopleChanged { people, said }),
+        // The change worked; only the re-read did not. Say so, rather than
+        // reporting a failure that did not happen.
+        Err(e) => told.send(Told::Trouble(format!("{said} The list did not come back: {e}"))),
+    };
+}
+
+/// A role as somebody would say it out loud.
+fn role_said(role: hub::Role) -> &'static str {
+    match role {
+        hub::Role::Viewer => "a viewer",
+        hub::Role::Estimator => "an estimator",
+        hub::Role::Admin => "an administrator",
+    }
+}
+
 fn connected(client: &Option<Client>) -> Result<&Client, String> {
     client
         .as_ref()
@@ -1208,6 +1317,10 @@ pub struct Standing {
     pub projects: Vec<Project>,
     pub sets: Vec<DrawingSet>,
     pub chests: Vec<Chest>,
+    /// Everybody with an account here, as the server last listed them.
+    /// Administrators only; empty for everybody else because the server
+    /// refuses the question rather than answering it thinly.
+    pub people: Vec<hub::User>,
     /// The plugins the office hands out, as the server last listed them.
     pub plugins: Vec<hub::PluginInfo>,
     pub looking_at: Option<String>,

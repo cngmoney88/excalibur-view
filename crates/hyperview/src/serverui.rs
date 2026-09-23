@@ -95,6 +95,14 @@ pub struct OfficePanel {
     /// Licenses found lying about — in Downloads, on the desktop, on the USB
     /// stick somebody carried one over on. Looked for once, not every frame.
     pub licenses_about: Option<Vec<FoundLicense>>,
+    /// Somebody being given an account: name, email, password, role.
+    pub new_person: Option<NewPerson>,
+    /// Somebody about to be removed, by id. Removing an account is not a
+    /// thing that should happen on one click of a small button.
+    pub removing: Option<String>,
+    /// Asked for once when the Office section is first opened; after that it
+    /// comes back with every change.
+    pub people_asked: bool,
     /// When this panel last asked the server what is on it.
     ///
     /// The list used to be asked for once, at sign-in, and never again. That
@@ -104,6 +112,15 @@ pub struct OfficePanel {
     /// until somebody quit the program. What you are looking at should be
     /// what is there.
     pub last_looked: Option<std::time::Instant>,
+}
+
+/// An account being made for somebody, as it is being typed.
+#[derive(Default)]
+pub struct NewPerson {
+    pub name: String,
+    pub email: String,
+    pub password: String,
+    pub role: Option<hub::Role>,
 }
 
 /// A license file the program noticed, and who it is for.
@@ -136,6 +153,13 @@ struct PanelActions {
     use_found_license: Option<std::path::PathBuf>,
     /// Ask the server what is on it again.
     look_again: bool,
+    /// Ask who has an account here.
+    people: bool,
+    add_person: Option<(String, String, String, hub::Role)>,
+    change_role: Option<(String, hub::Role)>,
+    /// (id, name) -- the name so the sentence afterwards can use it, since
+    /// the row it came from is gone by then.
+    remove_person: Option<(String, String)>,
 }
 
 impl App {
@@ -267,6 +291,17 @@ impl App {
                 Told::Projects(list) => {
                     self.standing.busy = None;
                     self.standing.projects = list;
+                }
+                Told::People(list) => {
+                    self.standing.busy = None;
+                    self.standing.people = list;
+                }
+                Told::PeopleChanged { people, said } => {
+                    self.standing.busy = None;
+                    self.standing.people = people;
+                    self.office.removing = None;
+                    self.office.new_person = None;
+                    self.status = said;
                 }
                 Told::Sets(list) => {
                     self.standing.busy = None;
@@ -952,6 +987,10 @@ impl App {
         let mut actions = PanelActions::default();
         let role = self.standing.who.as_ref().map(|w| w.role);
         let is_admin = role == Some(hub::Role::Admin);
+        // Cloned because the panel is drawn with `self` borrowed mutably, and
+        // a list of a shop's staff is a handful of short strings.
+        let people = self.standing.people.clone();
+        let me = self.standing.who.as_ref().map(|w| w.id.clone()).unwrap_or_default();
         let may_write = matches!(role, Some(hub::Role::Admin) | Some(hub::Role::Estimator));
 
         // While this panel is on screen it keeps itself current, because the
@@ -1120,7 +1159,15 @@ impl App {
                         ui.separator();
                         if is_admin {
                             self.office.base = self.standing.base.clone();
-                            office_section(ui, theme, &mut self.office, self.standing.license.as_ref(), &mut actions);
+                            office_section(
+                                ui,
+                                theme,
+                                &mut self.office,
+                                self.standing.license.as_ref(),
+                                &people,
+                                &me,
+                                &mut actions,
+                            );
                         }
                         password_section(ui, theme, &mut self.office, &mut actions);
                     }
@@ -1197,6 +1244,21 @@ impl App {
                 }
             });
 
+        if actions.people {
+            self.ask(Ask::People);
+        }
+        if let Some((name, email, password, role)) = actions.add_person.take() {
+            self.standing.busy = Some("Making the account…".into());
+            self.ask(Ask::AddPerson { name, email, password, role });
+        }
+        if let Some((id, role)) = actions.change_role.take() {
+            self.standing.busy = Some("Changing what they can do…".into());
+            self.ask(Ask::ChangeRole { id, role });
+        }
+        if let Some((id, name)) = actions.remove_person.take() {
+            self.standing.busy = Some("Removing them…".into());
+            self.ask(Ask::RemovePerson { id, name });
+        }
         if actions.look_again {
             self.office.last_looked = Some(std::time::Instant::now());
             self.ask(Ask::Projects);
@@ -1607,11 +1669,162 @@ impl App {
 
 /// What an administrator looks after: the code people join with, and how the
 /// office keeps up to date.
+/// Who is on this server, and what an administrator can do about it.
+///
+/// The server has been able to change a role and remove a person since
+/// 0.6.4, and for that whole time the only way to do either was to make the
+/// request by hand. A shop foreman is not going to do that, so in practice
+/// the shop could not take a departing employee's access away -- which is
+/// not access control, it is a suggestion.
+///
+/// Three rules this screen keeps. Nothing about somebody else's account
+/// changes on a single click of a small button. Your own row cannot be the
+/// one you remove -- the server refuses it, and so does this, before you
+/// find out the hard way. And every change is followed by the list as the
+/// server now has it, rather than by this screen editing its own copy and
+/// hoping.
+fn people_section(
+    ui: &mut egui::Ui,
+    theme: ui::chrome::Theme,
+    office: &mut OfficePanel,
+    people: &[hub::User],
+    me: &str,
+    actions: &mut PanelActions,
+) {
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("People").strong().size(12.0));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if office.new_person.is_none() && ui.small_button("Add somebody").clicked() {
+                office.new_person = Some(NewPerson::default());
+            }
+        });
+    });
+
+    if people.is_empty() {
+        ui.label(RichText::new("Asking the server…").color(theme.faint).size(10.0));
+        ui.spinner();
+    }
+
+    for person in people {
+        let is_me = person.id == me;
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(if is_me {
+                    format!("{} — you", person.name)
+                } else {
+                    person.name.clone()
+                }))
+                ;
+                ui.label(RichText::new(&person.email).color(theme.faint).size(10.0));
+            });
+        });
+        ui.horizontal(|ui| {
+            let mut role = person.role;
+            egui::ComboBox::from_id_salt(format!("role-{}", person.id))
+                .selected_text(role_name(role))
+                .width(120.0)
+                .show_ui(ui, |ui| {
+                    for choice in
+                        [hub::Role::Viewer, hub::Role::Estimator, hub::Role::Admin]
+                    {
+                        ui.selectable_value(&mut role, choice, role_name(choice));
+                    }
+                });
+            if role != person.role {
+                actions.change_role = Some((person.id.clone(), role));
+            }
+            if !is_me {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").clicked() {
+                        office.removing = Some(person.id.clone());
+                    }
+                });
+            }
+        });
+        if office.removing.as_deref() == Some(person.id.as_str()) {
+            ui.add_space(2.0);
+            ui.label(
+                RichText::new(format!(
+                    "Remove {}? They are signed out at once and their keys stop \
+                     working. Their markups and the sets they uploaded stay.",
+                    person.name
+                ))
+                .color(theme.warn)
+                .size(10.0),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Remove them").clicked() {
+                    actions.remove_person = Some((person.id.clone(), person.name.clone()));
+                }
+                if ui.button("Cancel").clicked() {
+                    office.removing = None;
+                }
+            });
+        }
+        ui.add_space(2.0);
+        ui.separator();
+    }
+
+    let mut cancel_new = false;
+    if let Some(new) = office.new_person.as_mut() {
+        ui.add_space(6.0);
+        field(ui, theme, "Name", &mut new.name, "As it should read on a markup");
+        field(ui, theme, "Email", &mut new.email, "What they sign in with");
+        let mut role = new.role.unwrap_or(hub::Role::Estimator);
+        egui::ComboBox::from_id_salt("new-person-role")
+            .selected_text(role_name(role))
+            .width(120.0)
+            .show_ui(ui, |ui| {
+                for choice in [hub::Role::Viewer, hub::Role::Estimator, hub::Role::Admin] {
+                    ui.selectable_value(&mut role, choice, role_name(choice));
+                }
+            });
+        new.role = Some(role);
+        ui.add(
+            egui::TextEdit::singleline(&mut new.password)
+                .password(true)
+                .hint_text("Password — at least twelve characters")
+                .desired_width(f32::INFINITY),
+        );
+        ui.label(
+            RichText::new(
+                "Four unrelated words is easier to type and far harder to guess \
+                 than a short one with symbols in it.",
+            )
+            .color(theme.faint)
+            .size(10.0),
+        );
+        let ready = !new.name.trim().is_empty()
+            && new.email.contains('@')
+            && new.password.chars().count() >= 12;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Give them an account")).clicked() {
+                actions.add_person = Some((
+                    new.name.trim().to_string(),
+                    new.email.trim().to_string(),
+                    new.password.clone(),
+                    role,
+                ));
+            }
+            if ui.button("Cancel").clicked() {
+                cancel_new = true;
+            }
+        });
+    }
+    if cancel_new {
+        office.new_person = None;
+    }
+}
+
 fn office_section(
     ui: &mut egui::Ui,
     theme: ui::chrome::Theme,
     office: &mut OfficePanel,
     license: Option<&hub::license::Standing>,
+    people: &[hub::User],
+    me: &str,
     actions: &mut PanelActions,
 ) {
     let shown = egui::CollapsingHeader::new(RichText::new("Office").color(theme.faint).size(11.0))
@@ -1662,11 +1875,17 @@ fn office_section(
             }
             if ui
                 .small_button("Make a new code")
-                .on_hover_text("The old code stops working. What to do when somebody leaves.")
+                .on_hover_text(
+                    "The old code stops working. It does nothing to the accounts \
+                     people already have -- to deal with somebody leaving, remove \
+                     them below.",
+                )
                 .clicked()
             {
                 actions.new_code = true;
             }
+
+            people_section(ui, theme, office, people, me, actions);
 
             // Updates
             ui.add_space(10.0);
@@ -1819,11 +2038,13 @@ fn office_section(
     if shown.body_returned.is_some() && !office.asked {
         office.asked = true;
         actions.office = true;
+        actions.people = true;
     }
     if shown.header_response.clicked() && shown.body_returned.is_none() {
-        // Closed again. Next time it opens it asks again, so the code and the
-        // update status are never a day stale.
+        // Closed again. Next time it opens it asks again, so the code, the
+        // update status and who is on the server are never a day stale.
         office.asked = false;
+        office.removing = None;
     }
 }
 

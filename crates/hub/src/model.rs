@@ -25,6 +25,21 @@ pub enum Role {
 }
 
 impl Role {
+    /// The word a server reads this role back from.
+    ///
+    /// One function, because a server that does not recognise the word does
+    /// not refuse it -- it hands out an ordinary seat. So a spelling mistake
+    /// here would not be an error anybody sees; it would be an administrator
+    /// quietly becoming an estimator, and nobody finding out until the day
+    /// they needed to remove somebody.
+    pub fn word(self) -> &'static str {
+        match self {
+            Role::Viewer => "viewer",
+            Role::Estimator => "estimator",
+            Role::Admin => "admin",
+        }
+    }
+
     pub fn may_write(self) -> bool {
         !matches!(self, Role::Viewer)
     }

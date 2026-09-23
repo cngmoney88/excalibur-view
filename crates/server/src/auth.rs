@@ -87,11 +87,7 @@ pub fn role_from(text: &str) -> Role {
 }
 
 pub fn role_name(role: Role) -> &'static str {
-    match role {
-        Role::Admin => "admin",
-        Role::Viewer => "viewer",
-        Role::Estimator => "estimator",
-    }
+    role.word()
 }
 
 /// Finds who a token belongs to, if it is still good — and, since the token
@@ -211,6 +207,38 @@ pub fn whose_key(db: &Connection, key: &str, purposes: &[&str], now: &str) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The word the desktop program sends for a role, and the word this
+    /// server reads, have to be the same word.
+    ///
+    /// Nothing else would notice if they were not. `role_from` does not
+    /// refuse a word it does not know -- it hands out an ordinary seat -- so
+    /// a mismatch is silent: "make her an administrator" makes her an
+    /// estimator, the screen says estimator, and the day somebody has to be
+    /// removed there is nobody who can do it. This is the only place the two
+    /// halves are checked against each other.
+    #[test]
+    fn a_role_survives_the_trip_to_a_server_and_back() {
+        for role in [Role::Viewer, Role::Estimator, Role::Admin] {
+            assert_eq!(
+                role_from(role.word()),
+                role,
+                "{:?} did not come back as itself through the word {:?}",
+                role,
+                role.word()
+            );
+        }
+    }
+
+    /// And the words themselves are pinned, because they are on the wire:
+    /// a server that started calling an administrator something else would
+    /// be refusing every older copy of the program in the shop.
+    #[test]
+    fn the_words_on_the_wire_are_the_ones_every_seat_already_sends() {
+        assert_eq!(Role::Viewer.word(), "viewer");
+        assert_eq!(Role::Estimator.word(), "estimator");
+        assert_eq!(Role::Admin.word(), "admin");
+    }
 
     /// A database with one person and one session, expiring when told.
     fn a_server_with_a_session(expires: &str) -> Connection {
