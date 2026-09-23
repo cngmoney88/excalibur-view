@@ -492,6 +492,20 @@ pub struct Calibrating {
     pub error: Option<String>,
 }
 
+/// A locked drawing set, and the box asking for its password.
+///
+/// Nothing here is kept once the set opens: the typed password moves into
+/// `App::passwords`, which itself lives only as long as the program does.
+pub struct AskPassword {
+    pub path: std::path::PathBuf,
+    /// Just the file name, which is what somebody recognises.
+    pub name: String,
+    pub typed: String,
+    /// True when a password has already been tried and refused, so the box
+    /// can say so rather than looking as though nothing happened.
+    pub wrong: bool,
+}
+
 pub struct App {
     pub svc: render::Service,
     pub library_error: Option<String>,
@@ -527,6 +541,18 @@ pub struct App {
     pub list: crate::markuplist::State,
     pub chest_filter: String,
     pub chest_open: std::collections::BTreeSet<String>,
+    /// Passwords for locked drawing sets, typed this session.
+    ///
+    /// Held in memory and nowhere else: never written to the preferences,
+    /// never to disk, gone when the program closes. Somebody who locks a set
+    /// and then finds the password saved beside it has been given a lock with
+    /// the key taped to it.
+    pub passwords: std::collections::HashMap<std::path::PathBuf, String>,
+    /// The drawing waiting on a password, when one is.
+    pub asking_password: Option<AskPassword>,
+    /// Which file the open now in flight is for, so a refusal knows what to
+    /// ask about.
+    pub opening_path: Option<std::path::PathBuf>,
     pub wheel_zooms: bool,
     pub last_save: std::time::Instant,
     /// Markups counted at the last autosave check, so a save happens once the
@@ -743,6 +769,9 @@ impl App {
             list: Default::default(),
             chest_filter: String::new(),
             chest_open: Default::default(),
+            passwords: Default::default(),
+            asking_password: None,
+            opening_path: None,
             wheel_zooms: true,
             last_save: std::time::Instant::now(),
             settled: None,
@@ -937,7 +966,91 @@ impl App {
         // somebody will go to try it again once they have the password.
         self.prefs.opened(&path);
         let _ = self.prefs.save();
-        self.svc.send(ToWorker::Open { doc, path });
+        let password = self.passwords.get(&path).cloned().unwrap_or_default();
+        self.opening_path = Some(path.clone());
+        self.svc.send(ToWorker::Open { doc, path, password });
+    }
+
+
+    /// Asks for the password on a locked drawing set.
+    ///
+    /// Modal on purpose: there is nothing useful to do with a set that has not
+    /// opened, and a box somebody can click behind and lose is worse than one
+    /// they have to answer.
+    pub fn password_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut asking) = self.asking_password.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut try_it = false;
+        let mut give_up = false;
+        egui::Window::new("This drawing set is locked")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label(egui::RichText::new(&asking.name).strong());
+                ui.add_space(6.0);
+                ui.label("It needs the password it was locked with. Either the one for opening it or the owner's will do.");
+                ui.add_space(10.0);
+                let box_ = ui.add(
+                    egui::TextEdit::singleline(&mut asking.typed)
+                        .password(true)
+                        .hint_text("Password")
+                        .desired_width(f32::INFINITY),
+                );
+                box_.request_focus();
+                if box_.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    try_it = true;
+                }
+                if asking.wrong {
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("That password was not accepted.")
+                            .color(self.chrome.theme.warn)
+                            .size(11.0),
+                    );
+                }
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open").clicked() {
+                        try_it = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        give_up = true;
+                    }
+                });
+                ui.add_space(4.0);
+                // Said here rather than discovered later, because somebody
+                // about to mark up a locked set should know before they start.
+                ui.label(
+                    egui::RichText::new(
+                        "A locked set opens for reading and marking up. Saving back into \
+                         it is not possible yet — use Save a Copy.",
+                    )
+                    .weak()
+                    .size(11.0),
+                );
+            });
+
+        if give_up || !open {
+            self.status = format!("{} was not opened.", asking.name);
+            return;
+        }
+        if try_it {
+            if asking.typed.is_empty() {
+                asking.wrong = true;
+                self.asking_password = Some(asking);
+                return;
+            }
+            let path = asking.path.clone();
+            self.passwords.insert(path.clone(), asking.typed.clone());
+            self.open(path);
+            return;
+        }
+        self.asking_password = Some(asking);
     }
 
     /// Reads a drawing again from disk, after something changed it underneath.
@@ -1193,13 +1306,35 @@ impl App {
                     self.library_error = Some(why);
                     self.opening = false;
                 }
-                FromWorker::OpenFailed { doc, why } => {
+                FromWorker::OpenFailed {
+                    doc,
+                    why,
+                    wants_password,
+                } => {
+                    let path = self.opening_path.clone();
                     if self.pending_open == Some(doc) {
                         self.pending_open = None;
                         self.opening = false;
                     }
-                    self.error = Some(why);
-                    self.status = "Could not open that file.".into();
+                    match (wants_password, path) {
+                        // Not an error yet: the set is locked and nobody has
+                        // typed the password. Asking is the whole answer.
+                        (true, Some(path)) => {
+                            let tried = self.passwords.remove(&path).is_some();
+                            let name = name_of(&path);
+                            self.status = format!("{name} is locked.");
+                            self.asking_password = Some(AskPassword {
+                                path,
+                                name,
+                                typed: String::new(),
+                                wrong: tried,
+                            });
+                        }
+                        _ => {
+                            self.error = Some(why);
+                            self.status = "Could not open that file.".into();
+                        }
+                    }
                 }
                 FromWorker::Opened {
                     doc: id,
@@ -1209,9 +1344,21 @@ impl App {
                 } => {
                     // Open the same file at object level. The renderer draws
                     // pixels; this is what reads and writes the markups.
-                    let mut doc = match Doc::open(path.clone()) {
+                    let password = self.passwords.get(&path).cloned().unwrap_or_default();
+                    let mut doc = match Doc::open_with(path.clone(), &password) {
                         Ok(doc) => doc,
-                        Err(e) => {
+                        Err(crate::sheet::Shut::WantsPassword(name)) => {
+                            // Pdfium opened it and this did not, which means
+                            // the two disagree about the file. Rare, and worth
+                            // saying plainly rather than showing half a set.
+                            self.error = Some(format!(
+                                "{name} opened for drawing but not for its markups. \
+                                 The file may be damaged."
+                            ));
+                            self.opening = false;
+                            continue;
+                        }
+                        Err(crate::sheet::Shut::Trouble(e)) => {
                             self.error = Some(e);
                             self.opening = false;
                             continue;
@@ -1220,10 +1367,18 @@ impl App {
                     doc.open_millis = millis;
                     doc.drawing = self.prefs.drawing();
                     if doc.read_only {
-                        self.status = format!(
-                            "{} is read-only. You can mark it up, but saving needs Save As.",
-                            name_of(&doc.path)
-                        );
+                        self.status = if doc.locked.is_some() {
+                            format!(
+                                "{} is locked. You can read it and mark it up, but saving \
+                                 needs Save a Copy.",
+                                name_of(&doc.path)
+                            )
+                        } else {
+                            format!(
+                                "{} is read-only. You can mark it up, but saving needs Save As.",
+                                name_of(&doc.path)
+                            )
+                        };
                     }
                     // The renderer's page sizes are authoritative for what is
                     // on screen, so take those where they agree in count.
@@ -1689,6 +1844,7 @@ impl eframe::App for App {
         self.undo_history(ctx);
         self.address_dialog(ctx);
         self.properties_window(ctx);
+        self.password_dialog(ctx);
         self.pen_chooser(ctx);
         self.spell_window(ctx);
         self.depth_dialog(ctx);
