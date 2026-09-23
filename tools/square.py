@@ -33,9 +33,11 @@ and says so, and one command with `--company` finishes it.
 
 import argparse
 import datetime
+import hashlib
 import json
 import os
 import shutil
+import subprocess
 import zipfile
 import secrets
 import re
@@ -759,7 +761,87 @@ def email_text(lic, sale, site):
     )
 
 
-def issue_one(folder, sale, company, quiet=False, site="https://excaliburct.com"):
+def a_receipt_name(payment_id):
+    """The second address a licence is published at: the buyer's own receipt.
+
+    A customer who loses the file has lost the licence id with it, so the
+    first address is no use to them. What they still have is the Square
+    receipt, and the payment id on it -- unguessable, theirs, and already in
+    their inbox.
+
+    So the same licence is published a second time under the payment id put
+    through SHA-256. A page on the website can work that out in the browser
+    and fetch the file: no account, no password, no service to run, and
+    nothing for anybody to look up by hand. Somebody who has not got a
+    receipt cannot guess one.
+    """
+    return hashlib.sha256(("receipt:" + payment_id.strip()).encode("utf-8")).hexdigest() + ".evlicense"
+
+
+def publish_into(lic, feed, quiet=False, say=print, receipt=None):
+    """Puts a signed licence where the customer's server will fetch it.
+
+    The whole of "they bought three more seats": the server asks for its own
+    licence by id on the same half-hourly trip it already makes for updates,
+    finds a newer one, and takes it. Nobody emails anybody a file and nobody
+    waits on an inbox.
+
+    Published under the id put through SHA-256, so the address cannot be
+    worked out from a company's name and the customer list is not walkable.
+    """
+    os.makedirs(feed, exist_ok=True)
+    out = os.path.join(feed, publish.license_filename_for(lic["id"]))
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(lic, f, indent=2)
+    if not quiet:
+        say(f"    published -> {os.path.basename(out)}")
+    if receipt:
+        # The same file again, at the address the buyer can work out from
+        # their own receipt. Losing the licence should not mean waiting on
+        # somebody to look it up.
+        spare = os.path.join(feed, a_receipt_name(receipt))
+        with open(spare, "w", encoding="utf-8") as f:
+            json.dump(lic, f, indent=2)
+        if not quiet:
+            say(f"    and under their receipt -> {os.path.basename(spare)}")
+    return out
+
+
+def push_the_feed(site_repo, what, quiet=False, say=print):
+    """Commits and pushes the folder the licences are published from.
+
+    Without this the file sits on the signing machine and the customer's
+    server never sees it, which is the same as not having published it at
+    all. Run on the machine that holds the key, because that is the only
+    machine that ever has a licence to publish.
+    """
+    if not os.path.isdir(os.path.join(site_repo, ".git")):
+        raise SystemExit(f"{site_repo} is not a git checkout.")
+    was = os.getcwd()
+    try:
+        os.chdir(site_repo)
+        if not subprocess.run(["git", "status", "--porcelain"],
+                              capture_output=True, text=True).stdout.strip():
+            if not quiet:
+                say("    nothing to push - the feed was already up to date")
+            return False
+        subprocess.run(["git", "add", "-A", "--", "static/f"], check=True,
+                       capture_output=True)
+        # Deliberately says nothing about who bought what. A commit message is
+        # forever and this one is about a customer.
+        subprocess.run(["git", "commit", "-q", "-m", what], check=True,
+                       capture_output=True)
+        pushed = subprocess.run(["git", "push", "-q"], capture_output=True, text=True)
+        if pushed.returncode != 0:
+            raise SystemExit("could not push the licence feed: " + (pushed.stderr or "").strip())
+        if not quiet:
+            say("    pushed. Their server has it within the half hour.")
+        return True
+    finally:
+        os.chdir(was)
+
+
+def issue_one(folder, sale, company, quiet=False, site="https://excaliburct.com", feed=None):
     lic, why = next_license(folder, sale, company, folder.key)
     if why:
         folder.say(f"  {sale['payment']['id']}: {why}", quiet)
@@ -786,6 +868,12 @@ def issue_one(folder, sale, company, quiet=False, site="https://excaliburct.com"
     })
     users = "every user" if lic["users"] == 0 else f"{lic['users']} users"
     folder.say(f"  {lic['company']}: {users}, updates through {lic['updates_through']} -> {os.path.basename(path)}", quiet)
+    if feed:
+        publish_into(
+            lic, feed, quiet,
+            say=lambda line: folder.say(line, quiet),
+            receipt=sale.get("payment", {}).get("id"),
+        )
     return path
 
 
@@ -882,6 +970,7 @@ def cmd_issue(a):
         return
     folder.say(f"{len(sales)} order(s) to issue:", a.quiet)
     waiting = 0
+    published = 0
     for sale in sales:
         if sale["kind"] == "chest":
             which = chest_ordered(sale.get("order") or {}) or "a chest"
@@ -899,9 +988,21 @@ def cmd_issue(a):
         if a.dry_run:
             folder.say(f"  would issue: {company}, {sale['kind']}, {sale['users']} user(s)", a.quiet)
             continue
-        issue_one(folder, sale, company, a.quiet, a.site)
+        if issue_one(folder, sale, company, a.quiet, a.site, feed=getattr(a, "publish_into", None)):
+            published += 1
     if waiting:
         folder.say(f"{waiting} order(s) waiting on a company name.", a.quiet)
+    # The last link in the chain. A licence written to this machine and never
+    # pushed has not reached anybody, which looks exactly like success from
+    # here and like nothing at all from the customer's server.
+    if published and getattr(a, "push", False):
+        site_repo = a.site_repo or os.path.dirname(os.path.dirname(os.path.abspath(a.publish_into)))
+        push_the_feed(
+            site_repo,
+            f"Publish {published} licence{'s' if published != 1 else ''}",
+            a.quiet,
+            say=lambda line: folder.say(line, a.quiet),
+        )
     if not a.quiet and not a.dry_run:
         print(f"\nThe files and their emails are in {folder.licenses}. Attach the .evlicense to the email.")
 
@@ -967,11 +1068,37 @@ def cmd_thanks(a):
 
 
 def cmd_watch(a):
+    """Issues and publishes whatever has been paid for, over and over.
+
+    Meant to be left running, or fired by a scheduled task. With
+    `--publish-into` and `--push` this is the whole path from somebody
+    pressing Buy to their server holding the licence, with nobody in the
+    middle: Square is asked what has been paid, each order is signed against
+    the key on this machine, the licence is written under its published name,
+    and the folder is pushed. Their server picks it up on the same
+    half-hourly trip it already makes.
+
+    Run it once with `--every 0`, which is what a scheduled task wants.
+    """
     a.quiet = True
     a.company = None
     a.payment = None
     a.dry_run = False
-    cmd_issue(a)
+    if a.every <= 0:
+        cmd_issue(a)
+        return
+    print(f"Watching for paid orders every {a.every}s. Ctrl-C stops it.")
+    while True:
+        try:
+            cmd_issue(a)
+        except SystemExit as stop:
+            # One bad run must not end the watch: a network hiccup at three in
+            # the morning should not mean nobody gets a licence until somebody
+            # notices in the morning.
+            print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M}] {stop}", flush=True)
+        except Exception as e:  # noqa: BLE001 - the same reasoning
+            print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M}] {e}", flush=True)
+        time.sleep(a.every)
 
 
 def main():
@@ -1004,9 +1131,23 @@ def main():
     i.add_argument("--payment", help="just this one payment")
     i.add_argument("--company", help="the company name for it, when Square did not pass one on")
     i.add_argument("--dry-run", action="store_true")
+    i.add_argument("--publish-into", dest="publish_into",
+                   help="the site's static/f folder, so a licence publishes itself")
+    i.add_argument("--push", action="store_true",
+                   help="commit and push the feed afterwards, so it actually reaches them")
+    i.add_argument("--site-repo", dest="site_repo",
+                   help="the site checkout, if it is not two levels above --publish-into")
     i.add_argument("--quiet", action="store_true")
-    w = sub.add_parser("watch", help="issue quietly, for a scheduled task")
+    w = sub.add_parser("watch", help="issue and publish, over and over")
     w.add_argument("--days", type=int, default=7)
+    w.add_argument("--every", type=int, default=0,
+                   help="seconds between checks; 0 runs once and stops (default)")
+    w.add_argument("--publish-into", dest="publish_into",
+                   help="the site's static/f folder, so a licence publishes itself")
+    w.add_argument("--push", action="store_true",
+                   help="commit and push the feed afterwards, so it actually reaches them")
+    w.add_argument("--site-repo", dest="site_repo",
+                   help="the site checkout, if it is not two levels above --publish-into")
     a = p.parse_args()
     try:
         {"setup": cmd_setup, "orders": cmd_orders, "issue": cmd_issue,
