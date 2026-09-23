@@ -1422,7 +1422,7 @@ mod the_keys_belong_to_the_drawing {
     /// too, and the id it reports comes back through a cell rather than a
     /// return value.
     fn a_pass(ctx: &egui::Context, mut build: impl FnMut(&mut egui::Ui)) {
-        ctx.run(egui::RawInput::default(), |ctx| {
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, &mut build);
         });
     }
@@ -1438,7 +1438,7 @@ mod the_keys_belong_to_the_drawing {
         });
         // Focus is settled on the next pass, the way it is in the program.
         a_pass(&ctx, |ui| {
-            ui.button("Length");
+            let _ = ui.button("Length");
         });
         assert_eq!(ctx.memory(|m| m.focused()), id, "the button should have focus");
         assert!(
@@ -1458,7 +1458,7 @@ mod the_keys_belong_to_the_drawing {
             id = Some(field.id);
         });
         a_pass(&ctx, |ui| {
-            ui.text_edit_singleline(&mut typed);
+            let _ = ui.text_edit_singleline(&mut typed);
         });
         assert_eq!(ctx.memory(|m| m.focused()), id, "the field should have focus");
         assert!(

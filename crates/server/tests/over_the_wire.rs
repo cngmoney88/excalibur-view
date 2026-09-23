@@ -249,6 +249,57 @@ fn a_wrong_password_and_an_unknown_address_are_told_apart_by_nobody() {
     );
 }
 
+/// The one that matters once a server is on the internet.
+///
+/// Unit tests prove the counter counts. This proves the door is actually
+/// shut: a real client, over a real socket, guessing at a real account, gets
+/// told to wait -- and the right password does not get them in either, which
+/// is what "wait" has to mean or it is only a suggestion.
+#[test]
+fn guessing_at_a_password_stops_working_after_a_while() {
+    let server = start();
+    let mut client = Client::new(&server.base);
+
+    // Five are free, because people mistype their own passwords.
+    for attempt in 1..=5 {
+        let said = client
+            .sign_in("creede@mesafab.com", "not the password")
+            .expect_err("it must refuse")
+            .to_string();
+        assert!(
+            !said.contains("Too many"),
+            "attempt {attempt} should still be free: {said}"
+        );
+    }
+
+    let said = client
+        .sign_in("creede@mesafab.com", "not the password")
+        .expect_err("it must refuse")
+        .to_string();
+    assert!(said.contains("Too many wrong tries"), "{said}");
+    assert!(said.contains("administrator"), "it says what to do: {said}");
+    assert!(
+        !said.to_lowercase().contains("left"),
+        "never a hint about how many tries remain: {said}"
+    );
+
+    // And the real password is refused too, for as long as the wait lasts.
+    // A limit that the right answer walks straight past is not a limit; it
+    // is a way to find out when you have guessed right.
+    let even_right = client
+        .sign_in("creede@mesafab.com", "brace-gusset-purlin-shim-42")
+        .expect_err("held off, even with the right password")
+        .to_string();
+    assert!(even_right.contains("Too many wrong tries"), "{even_right}");
+
+    // Somebody else's account is untouched. One person guessing must not
+    // lock out the shop.
+    let mut other = Client::new(&server.base);
+    other
+        .sign_in("est@mesafab.com", "camber-weld-joist-plate-19")
+        .expect("a different account is not held up by somebody else's guessing");
+}
+
 #[test]
 fn nothing_is_readable_without_a_token() {
     let server = start();
