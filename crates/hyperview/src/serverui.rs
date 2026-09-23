@@ -1081,9 +1081,9 @@ impl App {
                         }
                         for project in &self.standing.projects {
                             let response = ui.add(
-                                egui::Button::new(RichText::new(format!(
-                                    "{}  {}",
-                                    project.number, project.name
+                                egui::Button::new(RichText::new(how_it_reads(
+                                    &project.number,
+                                    &project.name,
                                 )))
                                 .frame(false)
                                 .min_size(egui::vec2(ui.available_width(), 22.0)),
@@ -2660,5 +2660,74 @@ mod tests {
         write(&dir, "huge.evlicense", &"x".repeat(9 * 1024));
         assert!(licenses_in(&[(dir.clone(), "E:".into())]).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+
+/// How a project reads in the list: the name first, and the job number only
+/// when it is one.
+///
+/// A bid pushed from FabWire without a job number used to arrive named after
+/// its internal id -- `J-1776359550436`, a millisecond timestamp wearing a J
+/// -- and the list is sorted and scanned by that column. A number nobody
+/// recognises is worse than no number: it fills the space where the thing
+/// somebody is looking for should be.
+fn how_it_reads(number: &str, name: &str) -> String {
+    let number = number.trim();
+    let name = name.trim();
+    if name.is_empty() {
+        return number.to_string();
+    }
+    if number.is_empty() || looks_made_up(number) {
+        return name.to_string();
+    }
+    format!("{number}  {name}")
+}
+
+/// A "number" that is really an internal id: a long run of digits, with or
+/// without a letter and a dash in front of it.
+///
+/// Job numbers are short and people say them out loud. Nobody has a job 2559
+/// and a job 1776359550436 in the same shop.
+fn looks_made_up(number: &str) -> bool {
+    let digits = number.trim_start_matches(|c: char| c.is_ascii_alphabetic() || c == '-');
+    digits.len() >= 10 && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod what_a_project_is_called {
+    use super::{how_it_reads, looks_made_up};
+
+    #[test]
+    fn a_real_job_number_leads() {
+        assert_eq!(how_it_reads("2559", "Fort Carson Range Tower"), "2559  Fort Carson Range Tower");
+    }
+
+    #[test]
+    fn a_timestamp_wearing_a_j_is_dropped() {
+        assert_eq!(how_it_reads("J-1776359550436", "Fox Theater"), "Fox Theater");
+        assert_eq!(how_it_reads("1776359550436", "Fox Theater"), "Fox Theater");
+    }
+
+    #[test]
+    fn no_number_at_all_is_fine() {
+        assert_eq!(how_it_reads("", "Fox Theater"), "Fox Theater");
+        assert_eq!(how_it_reads("   ", "Fox Theater"), "Fox Theater");
+    }
+
+    #[test]
+    fn a_project_with_only_a_number_still_shows_it() {
+        assert_eq!(how_it_reads("2559", ""), "2559");
+    }
+
+    #[test]
+    fn short_numbers_are_never_mistaken_for_ids() {
+        // Shops really do use these shapes.
+        for real in ["2559", "MFS-2559", "24-114", "J-1042", "2026-07"] {
+            assert!(!looks_made_up(real), "{real} should read as a job number");
+        }
+        for made_up in ["1776359550436", "J-1776359550436", "hv1727041234567"] {
+            assert!(looks_made_up(made_up), "{made_up} should not");
+        }
     }
 }
