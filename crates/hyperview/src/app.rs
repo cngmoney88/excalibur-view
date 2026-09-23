@@ -1723,10 +1723,28 @@ impl App {
             ui.vertical_centered(|ui| {
                 ui.heading("The PDF engine is missing");
                 ui.add_space(8.0);
-                ui.label(
-                    "Excalibur View needs pdfium.dll sitting next to hyperview.exe. If you unzipped \
-                     the download, make sure both files came out into the same folder.",
-                );
+                // Named for the platform this is running on. Telling somebody
+                // on a Mac to go and find pdfium.dll sends them looking for a
+                // file that does not exist on their computer.
+                let engine = if cfg!(target_os = "windows") {
+                    "pdfium.dll"
+                } else if cfg!(target_os = "macos") {
+                    "libpdfium.dylib"
+                } else {
+                    "libpdfium.so"
+                };
+                ui.label(if cfg!(embedded_pdfium) {
+                    format!(
+                        "Excalibur View carries {engine} inside itself and writes it out the \
+                         first time it opens a drawing, and that did not work here. What it \
+                         tried is below."
+                    )
+                } else {
+                    format!(
+                        "This copy was built without {engine} inside it, so it needs one \
+                         sitting beside the program. What it looked for is below."
+                    )
+                });
                 ui.add_space(12.0);
                 ui.collapsing("What it tried", |ui| {
                     ui.monospace(why);

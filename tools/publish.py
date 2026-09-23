@@ -6,7 +6,8 @@ never goes anywhere else. Standard library plus `cryptography` for Ed25519.
 
     python3 publish.py sign     --key hyperview-signing.key --version 0.5.0 \\
                                 --channel preview --notes-file notes.txt \\
-                                --app Hyperview.exe --server Hyperview-Server.exe \\
+                                --app ExcaliburView.exe --server ExcaliburView-Server.exe \\
+                                --mac ExcaliburView-mac.zip \\
                                 --out release.json
     python3 publish.py upload   --token-file github-token.txt --repo owner/name \\
                                 --version 0.5.0 --notes-file notes.txt \\
@@ -56,6 +57,7 @@ import urllib.request
 
 APP_PLATFORM = "windows-x64"
 SERVER_PLATFORM = "windows-x64-server"
+MAC_PLATFORM = "macos-universal"
 # What each program is called on the release. Every installed copy finds its
 # update by the name in release.json, not by a name of its own, so these are
 # also the names the website's download buttons look for. (Up to 0.6.1 they
@@ -63,6 +65,14 @@ SERVER_PLATFORM = "windows-x64-server"
 # can be called anything - they are matched to the manifest by fingerprint.)
 APP_FILE = "ExcaliburView.exe"
 SERVER_FILE = "ExcaliburView-Server.exe"
+# A Mac gets two files and they are not interchangeable. The .dmg is what a
+# person downloads and drags into Applications. The .zip is the same program
+# in the form an update can unpack without breaking Apple's signature over it,
+# and it is the one the manifest names, because the manifest is read by the
+# updater and not by a person.
+MAC_FILE = "ExcaliburView-mac.zip"
+MAC_DISK_IMAGE = "ExcaliburView-mac.dmg"
+FILES = {APP_PLATFORM: APP_FILE, SERVER_PLATFORM: SERVER_FILE, MAC_PLATFORM: MAC_FILE}
 MANIFEST = "release.json"
 
 # Under every release on the page, for whoever downloads from it.
@@ -73,6 +83,8 @@ HOW_TO = """
 **ExcaliburView.exe**: the desktop app. Double-click it on each computer. It installs itself for that person, opens, and finds the office's server by itself.
 
 **ExcaliburView-Server.exe**: the Office server. Double-click it once on the computer that should hold the company's drawings. Windows asks for permission once. After that it runs by itself, and keeps itself and every copy of Excalibur View in the office up to date.
+
+**ExcaliburView-mac.dmg**: the Mac version. Open it and drag Excalibur View into Applications. It is the whole program, not a viewer — Apple Silicon and Intel in one download.
 
 The first person to open Excalibur View after the server is up sets it up and gets a join code for everybody else."""
 
@@ -107,7 +119,7 @@ def describe(path, version, channel, platform, notes, published, min_api):
         "notes": notes,
         # What the file is called on the release, which is what a server
         # looks it up by. The files uploaded must carry these names.
-        "download": APP_FILE if platform == APP_PLATFORM else SERVER_FILE,
+        "download": FILES[platform],
         "bytes": len(data),
         "digest": hashlib.sha256(data).hexdigest(),
         "signature": "",
@@ -127,20 +139,57 @@ def verify(release, public):
     public.verify(bytes.fromhex(release["signature"]), payload(release))
 
 
+def parts(manifest):
+    """Every signed release in a manifest, whichever shape it is written in.
+
+    `app` and `server` are single releases; `apps` and `servers` are lists of
+    them. Anything that walks a manifest walks this, so adding a platform
+    never means remembering to update three loops.
+    """
+    found = []
+    for key in ("app", "server"):
+        if key in manifest:
+            found.append(manifest[key])
+    for key in ("apps", "servers"):
+        found.extend(manifest.get(key, []))
+    # `app` is repeated inside `apps` on purpose; count each build once.
+    seen, unique = set(), []
+    for part in found:
+        if part["digest"] not in seen:
+            seen.add(part["digest"])
+            unique.append(part)
+    return unique
+
+
 def cmd_sign(a):
     name, key = load_key(a.key)
     notes = open(a.notes_file, encoding="utf-8").read().strip() if a.notes_file else ""
     published = a.published or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    app = sign_release(describe(a.app, a.version, a.channel, APP_PLATFORM, notes, published, a.min_api), name, key)
-    manifest = {"app": app}
+    signed = lambda path, platform: sign_release(
+        describe(path, a.version, a.channel, platform, notes, published, a.min_api), name, key)
+
+    apps = [signed(a.app, APP_PLATFORM)]
+    if a.mac:
+        apps.append(signed(a.mac, MAC_PLATFORM))
+
+    # `app` is the Windows build and stays exactly where it has always been.
+    # Every copy of Excalibur View installed before there was a Mac build reads
+    # that one field and knows nothing about the list beside it; move it and
+    # each of those copies is stranded on the version it happens to have, with
+    # no way of being told about another. `apps` is what a copy that knows to
+    # look reads, and it holds every build including the Windows one.
+    manifest = {"app": apps[0]}
     if a.server:
-        manifest["server"] = sign_release(
-            describe(a.server, a.version, a.channel, SERVER_PLATFORM, notes, published, a.min_api), name, key)
-    for part in manifest.values():
+        manifest["server"] = signed(a.server, SERVER_PLATFORM)
+    if len(apps) > 1:
+        manifest["apps"] = apps
+
+    for part in parts(manifest):
         verify(part, key.public_key())
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-    print(f"signed {a.version} ({a.channel}) with '{name}' -> {a.out}")
+    built = ", ".join(part["platform"] for part in parts(manifest))
+    print(f"signed {a.version} ({a.channel}) for {built} with '{name}' -> {a.out}")
 
 
 # ---- licenses --------------------------------------------------------------
@@ -391,14 +440,14 @@ class GitHubRefused(Exception):
 def cmd_upload(a):
     gh = GitHub(a.token_file, a.repo)
     manifest = json.load(open(a.files[0], encoding="utf-8"))
-    channel = manifest["app"]["channel"]
-    notes = open(a.notes_file, encoding="utf-8").read().strip() if a.notes_file else manifest["app"]["notes"]
+    channel = parts(manifest)[0]["channel"]
+    notes = open(a.notes_file, encoding="utf-8").read().strip() if a.notes_file else parts(manifest)[0]["notes"]
     tag = f"v{a.version}"
 
     # Each program goes up under the name release.json gives it, matched by
     # fingerprint, so a file on this computer can be called anything and the
     # manifest and the release can never disagree.
-    wanted = {part["digest"]: part["download"] for part in manifest.values()}
+    wanted = {part["digest"]: part["download"] for part in parts(manifest)}
     uploads = []
     for path in a.files[1:]:
         digest = hashlib.sha256(open(path, "rb").read()).hexdigest()
@@ -447,11 +496,20 @@ def cmd_promote(a):
         raise SystemExit(f"{tag} has no {MANIFEST}")
     raw = gh.call("GET", f"/releases/assets/{asset['id']}", accept="application/octet-stream")
     manifest = json.loads(raw)
-    for part in list(manifest):
-        release_part = dict(manifest[part])
-        release_part["channel"] = "stable"
-        manifest[part] = sign_release(release_part, name, key)
-        verify(manifest[part], key.public_key())
+
+    def promoted(release):
+        release = dict(release)
+        release["channel"] = "stable"
+        release = sign_release(release, name, key)
+        verify(release, key.public_key())
+        return release
+
+    for field in ("app", "server"):
+        if field in manifest:
+            manifest[field] = promoted(manifest[field])
+    for field in ("apps", "servers"):
+        if field in manifest:
+            manifest[field] = [promoted(part) for part in manifest[field]]
     out = os.path.join(os.path.dirname(os.path.abspath(a.key)), f"release-{a.version}-stable.json")
     with open(out, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
@@ -468,7 +526,8 @@ def main():
     s.add_argument("--version", required=True)
     s.add_argument("--channel", choices=["preview", "stable"], default="preview")
     s.add_argument("--notes-file")
-    s.add_argument("--app", required=True)
+    s.add_argument("--app", required=True, help="the Windows program")
+    s.add_argument("--mac", help="the Mac program, zipped by deploy/macos/build.sh")
     s.add_argument("--server")
     s.add_argument("--out", default=MANIFEST)
     s.add_argument("--published")

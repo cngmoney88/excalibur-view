@@ -1,0 +1,56 @@
+{
+  "app": {
+    "version": "9.4.0",
+    "channel": "preview",
+    "platform": "windows-x64",
+    "published": "2026-09-23T12:00:00Z",
+    "notes": "Two platforms now.",
+    "download": "ExcaliburView.exe",
+    "bytes": 23,
+    "digest": "38bc94a183218f7003f3d862b11faf7a68dd5bbaea4f6cbc6bad44937336d7b2",
+    "signature": "1ac78db1b35cbb47e7a3fab13a6b59165eaaeacd5bc9ada51e6b7b2def3c21bee58529520d98fca65fdd27095c01db040557ac3215c5835887da1b723e54d00c",
+    "key": "test-2026",
+    "minimum_api_version": 1
+  },
+  "server": {
+    "version": "9.4.0",
+    "channel": "preview",
+    "platform": "windows-x64-server",
+    "published": "2026-09-23T12:00:00Z",
+    "notes": "Two platforms now.",
+    "download": "ExcaliburView-Server.exe",
+    "bytes": 23,
+    "digest": "7f864a2efad5c301f91c54fe19981d15a68bbf32a35f1320fd74f30cc079b992",
+    "signature": "6b750a543cd3c3cf5253be12c5b64c24951f178a722334a96281b60d0b5a685751d94b667a15ed219bd7c1a6ff5d64136a1484962c8da7d8d6568a368cba4e04",
+    "key": "test-2026",
+    "minimum_api_version": 1
+  },
+  "apps": [
+    {
+      "version": "9.4.0",
+      "channel": "preview",
+      "platform": "windows-x64",
+      "published": "2026-09-23T12:00:00Z",
+      "notes": "Two platforms now.",
+      "download": "ExcaliburView.exe",
+      "bytes": 23,
+      "digest": "38bc94a183218f7003f3d862b11faf7a68dd5bbaea4f6cbc6bad44937336d7b2",
+      "signature": "1ac78db1b35cbb47e7a3fab13a6b59165eaaeacd5bc9ada51e6b7b2def3c21bee58529520d98fca65fdd27095c01db040557ac3215c5835887da1b723e54d00c",
+      "key": "test-2026",
+      "minimum_api_version": 1
+    },
+    {
+      "version": "9.4.0",
+      "channel": "preview",
+      "platform": "macos-universal",
+      "published": "2026-09-23T12:00:00Z",
+      "notes": "Two platforms now.",
+      "download": "ExcaliburView-mac.zip",
+      "bytes": 23,
+      "digest": "a583c455ff15c60ba73554676c70a0ed5adef1c8105a77e6551144de81f8f9ea",
+      "signature": "609d30e12dbbc9ba84f43d74d8e472e7cb9f3274632f802f133a86a877fc3c6952d84db5ce5c29d98a08850d0c42e55012cfed3a417943469d5031a65e8ade08",
+      "key": "test-2026",
+      "minimum_api_version": 1
+    }
+  ]
+}

@@ -425,14 +425,21 @@ fn bundle(args: &[String]) -> Result<(), String> {
             release.notes.clone()
         }
     });
+    // The platform is in the name because one version is now two builds, and
+    // two packages landing on the shelf under one name is the second one
+    // quietly replacing the first.
     let out = value(args, "--out")
-        .unwrap_or_else(|| format!("hyperview-{version}-{wave}.avpkg"));
+        .unwrap_or_else(|| format!("hyperview-{version}-{}-{wave}.avpkg", release.platform));
 
     let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let package = serde_json::json!({
         "fleet": {
             "product": "hyperview",
             "version": version,
+            // On the envelope rather than only inside the payload, so the
+            // Fleet can tell a Windows package from a Mac one without opening
+            // a payload it is meant to pass along unread.
+            "platform": release.platform,
             "wave": wave,
             "note": note,
             "files": 1,

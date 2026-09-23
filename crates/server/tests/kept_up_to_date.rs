@@ -75,8 +75,10 @@ struct Listed {
     tag: String,
     prerelease: bool,
     published: Published,
-    app: Vec<u8>,
-    server: Vec<u8>,
+    /// Every file on the release, by the name its manifest gives it. A
+    /// release carries one program per platform, so this is a list rather
+    /// than a field per program.
+    files: Vec<(String, Vec<u8>)>,
 }
 
 /// Serves releases the way GitHub does, and returns the list's address.
@@ -105,10 +107,8 @@ fn a_feed(runtime: &tokio::runtime::Runtime, releases: Vec<Listed>) -> String {
                         };
                         // Each program under the name its manifest gives it, as
                         // the publishing script uploads them.
-                        let mut assets = vec![asset("release.json"), asset(&r.published.app.download)];
-                        if let Some(server) = &r.published.server {
-                            assets.push(asset(&server.download));
-                        }
+                        let mut assets = vec![asset("release.json")];
+                        assets.extend(r.files.iter().map(|(name, _)| asset(name)));
                         serde_json::json!({
                             "tag_name": r.tag,
                             "draft": false,
@@ -129,13 +129,10 @@ fn a_feed(runtime: &tokio::runtime::Runtime, releases: Vec<Listed>) -> String {
                 let Some(r) = releases.iter().find(|r| r.tag == tag) else {
                     return (axum::http::StatusCode::NOT_FOUND, Vec::new());
                 };
-                let server_name = r.published.server.as_ref().map(|s| s.download.as_str());
                 let bytes = if name == "release.json" {
                     serde_json::to_vec(&r.published).unwrap()
-                } else if name == r.published.app.download {
-                    r.app.clone()
-                } else if Some(name.as_str()) == server_name {
-                    r.server.clone()
+                } else if let Some((_, bytes)) = r.files.iter().find(|(n, _)| *n == name) {
+                    bytes.clone()
                 } else {
                     return (axum::http::StatusCode::NOT_FOUND, Vec::new());
                 };
@@ -166,10 +163,43 @@ fn a_release_named(key: &SigningKey, version: &str, prerelease: bool, viewer: &s
         prerelease,
         published: Published {
             app: sign(key, version, channel, APP_PLATFORM, viewer, &app),
+            apps: Vec::new(),
             server: Some(sign(key, version, channel, SERVER_PLATFORM, server_file, &server)),
+            servers: Vec::new(),
         },
-        app,
-        server,
+        files: vec![(viewer.to_string(), app), (server_file.to_string(), server)],
+    }
+}
+
+/// The names the two platforms are published under, spelled out rather than
+/// taken from this build, because this test is about an office holding builds
+/// for machines that are not the one it runs on.
+const WINDOWS: &str = "windows-x64";
+const MAC: &str = "macos-universal";
+
+/// One release carrying both builds, the way the publishing script writes one
+/// once there is a Mac version.
+fn a_release_for_both_platforms(key: &SigningKey, version: &str) -> Listed {
+    let windows = format!("MZ pretend viewer {version}").into_bytes();
+    let mac = format!("PK pretend mac {version}").into_bytes();
+    let channel = Channel::Stable;
+    let for_windows = sign(key, version, channel, WINDOWS, "ExcaliburView.exe", &windows);
+    let for_mac = sign(key, version, channel, MAC, "ExcaliburView-mac.zip", &mac);
+    Listed {
+        tag: format!("v{version}"),
+        prerelease: false,
+        published: Published {
+            // `app` stays the Windows build, for every copy installed before
+            // there was another kind.
+            app: for_windows.clone(),
+            apps: vec![for_windows, for_mac],
+            server: None,
+            servers: Vec::new(),
+        },
+        files: vec![
+            ("ExcaliburView.exe".to_string(), windows),
+            ("ExcaliburView-mac.zip".to_string(), mac),
+        ],
     }
 }
 
@@ -688,4 +718,85 @@ fn a_server_will_not_hand_out_a_plugin_nobody_trusted_signed() {
     // Nor a file that is not a plugin at all.
     assert!(admin.upload_plugin(b"MZ a program").is_err());
     assert!(admin.plugins().unwrap().is_empty());
+}
+
+// ---- an office with Macs in it ----------------------------------------------
+
+/// The whole point of the release carrying two builds: a Windows office holds
+/// the Mac one for the Macs sitting in it, and each seat is handed its own.
+#[test]
+fn an_office_holds_both_builds_and_hands_each_seat_its_own() {
+    let office = an_office();
+    let (key, trusted) = publisher();
+    let feed = a_feed(&office.runtime, vec![a_release_for_both_platforms(&key, "9.4.0")]);
+
+    let outcome = check_with(&office.server, &Feed::new(&feed), &trusted);
+    assert_eq!(outcome, Outcome::Offered("9.4.0".into()));
+
+    let seat = signed_in(&office, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let windows = seat
+        .update_offer("0.6.3", Channel::Stable, WINDOWS)
+        .unwrap()
+        .release
+        .expect("the Windows seat is offered it");
+    assert_eq!(windows.platform, WINDOWS);
+    let bytes = seat.download_update(&windows.download).unwrap();
+    assert_eq!(trusted.check(&windows, &bytes), Ok(()));
+    assert_eq!(bytes, b"MZ pretend viewer 9.4.0");
+
+    let mac = seat
+        .update_offer("0.6.3", Channel::Stable, MAC)
+        .unwrap()
+        .release
+        .expect("the Mac seat is offered it");
+    assert_eq!(mac.platform, MAC);
+    let bytes = seat.download_update(&mac.download).unwrap();
+    assert_eq!(trusted.check(&mac, &bytes), Ok(()));
+    assert_eq!(bytes, b"PK pretend mac 9.4.0");
+
+    // Asking again downloads nothing: the office already holds both.
+    assert_eq!(
+        check_with(&office.server, &Feed::new(&feed), &trusted),
+        Outcome::UpToDate
+    );
+}
+
+/// A Mac that turns up in an office which has only ever held Windows builds
+/// is told there is nothing for it — not handed the Windows one, and not told
+/// it is up to date when it has never had a version at all.
+#[test]
+fn a_mac_in_an_office_with_no_mac_build_is_offered_nothing_rather_than_the_wrong_thing() {
+    let office = an_office();
+    let (key, trusted) = publisher();
+    let feed = a_feed(&office.runtime, vec![a_release(&key, "9.4.0", false)]);
+    assert_eq!(
+        check_with(&office.server, &Feed::new(&feed), &trusted),
+        Outcome::Offered("9.4.0".into())
+    );
+
+    let seat = signed_in(&office, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let offer = seat.update_offer("0.6.3", Channel::Stable, MAC).unwrap();
+    assert!(offer.release.is_none(), "a Mac was offered {:?}", offer.release);
+}
+
+/// The release before the Mac existed, read by a server that knows about
+/// Macs. It must still take the Windows build and still offer it.
+#[test]
+fn a_release_from_before_there_were_two_platforms_still_reaches_the_windows_seats() {
+    let office = an_office();
+    let (key, trusted) = publisher();
+    // `apps` absent, `app` alone — exactly what 0.6.3 and everything before it
+    // was published as.
+    let old_shape = a_release_named(&key, "9.4.0", false, "Hyperview.exe", "Hyperview-Server.exe");
+    assert!(old_shape.published.apps.is_empty());
+    let feed = a_feed(&office.runtime, vec![old_shape]);
+
+    assert_eq!(
+        check_with(&office.server, &Feed::new(&feed), &trusted),
+        Outcome::Offered("9.4.0".into())
+    );
+    let seat = signed_in(&office, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let offer = seat.update_offer("0.4.1", Channel::Stable, APP_PLATFORM).unwrap();
+    assert_eq!(offer.release.expect("still offered").version, "9.4.0");
 }

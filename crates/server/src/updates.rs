@@ -21,7 +21,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use hub::feed::{Feed, Found, APP_PLATFORM, SERVER_PLATFORM};
+use hub::feed::{Feed, Found, SERVER_PLATFORM};
 use hub::update::{newer, Channel, Release};
 use rusqlite::params;
 
@@ -242,8 +242,8 @@ pub fn check_with(server: &Server, feed: &Feed, trusted: &hub::update::Trusted) 
     // would only mean doing it twice.
     let mut not_covered = None;
     if server.config.replace_self {
-        if let Some(release) = found.published.server.as_ref() {
-            if release.platform == SERVER_PLATFORM && newer(&release.version, VERSION) {
+        if let Some(release) = found.published.server_for(SERVER_PLATFORM) {
+            if newer(&release.version, VERSION) {
                 // The server is what Office buys. The desktop app below is free
                 // and is offered whatever the license says.
                 if crate::license::covers(server, &release.published) {
@@ -257,19 +257,35 @@ pub fn check_with(server: &Server, feed: &Feed, trusted: &hub::update::Trusted) 
         }
     }
 
-    let app = &found.published.app;
-    if app.platform != APP_PLATFORM {
-        return Outcome::Trouble(format!("the feed's viewer is for {}", app.platform));
+    // Every platform in the release, not this server's own. A Windows server
+    // holds the Mac build for the Mac seats in the same office; a seat that
+    // turns up next month finds its version already here rather than waiting
+    // on the next look at the feed.
+    let mut offered: Option<String> = None;
+    let mut trouble: Option<String> = None;
+    for app in found.published.viewers() {
+        if already_have(server, app) || !newer(&app.version, &newest_held(server, &app.platform)) {
+            continue;
+        }
+        match take(server, app, &found, feed, trusted) {
+            Ok(()) => {
+                tracing::info!("holding {} for {}", app.version, app.platform);
+                offered = Some(app.version.clone());
+            }
+            // One platform failing does not stop another. A Mac build that
+            // will not download is a log line, not a Windows office stuck on
+            // an old version.
+            Err(why) => {
+                tracing::warn!("{} for {}: {why}", app.version, app.platform);
+                trouble.get_or_insert(why);
+            }
+        }
     }
-    if already_have(server, app) || !newer(&app.version, &newest_held(server)) {
-        return match not_covered {
-            Some(version) => Outcome::NotCovered(version),
-            None => Outcome::UpToDate,
-        };
-    }
-    match take(server, app, &found, feed, trusted) {
-        Ok(()) => Outcome::Offered(app.version.clone()),
-        Err(why) => Outcome::Trouble(why),
+    match (offered, trouble, not_covered) {
+        (Some(version), _, _) => Outcome::Offered(version),
+        (None, Some(why), _) => Outcome::Trouble(why),
+        (None, None, Some(version)) => Outcome::NotCovered(version),
+        (None, None, None) => Outcome::UpToDate,
     }
 }
 
@@ -359,15 +375,17 @@ fn already_have(server: &Server, release: &Release) -> bool {
         .unwrap_or(false)
 }
 
-/// The newest viewer this server already holds, or "0" when it holds none.
-fn newest_held(server: &Server) -> String {
+/// The newest viewer this server already holds for one platform, or "0" when
+/// it holds none. Per platform, because a Mac starting from nothing must not
+/// be told it is up to date by the Windows build sitting beside it.
+fn newest_held(server: &Server, platform: &str) -> String {
     let versions: Vec<String> = server
         .store
         .with(|db| {
             let mut statement =
                 db.prepare("SELECT version FROM releases WHERE platform = ?1")?;
             let all = statement
-                .query_map(params![APP_PLATFORM], |r| r.get::<_, String>(0))?
+                .query_map(params![platform], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(all)
         })

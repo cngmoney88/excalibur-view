@@ -1,17 +1,25 @@
-//! Hyperview.exe putting itself on a computer, and keeping itself current.
+//! Excalibur View putting itself on a computer, and keeping itself current.
 //!
-//! A company is handed one file. Whoever double-clicks it — from Downloads, a
-//! shared drive, a USB stick, an email — gets the program installed for them
-//! without being asked anything: it copies itself into their own app folder,
-//! puts itself in the Start menu, on the desktop and in Settings → Apps, and
-//! opens from there. No administrator, nothing in Program Files, no script.
-//! Double-clicking an older copy later does not install it over a newer one;
-//! it just opens the newer one.
+//! On Windows a company is handed one file. Whoever double-clicks it — from
+//! Downloads, a shared drive, a USB stick, an email — gets the program
+//! installed for them without being asked anything: it copies itself into
+//! their own app folder, puts itself in the Start menu, on the desktop and in
+//! Settings → Apps, and opens from there. No administrator, nothing in
+//! Program Files, no script. Double-clicking an older copy later does not
+//! install it over a newer one; it just opens the newer one.
 //!
-//! From then on it updates itself: a new version, checked against the signing
-//! key compiled into this program, is put in place while the program runs and
-//! takes over the next time it is opened. Nobody is restarted in the middle of
-//! a takeoff.
+//! On a Mac none of that happens, on purpose. A Mac program is dragged from a
+//! disk image into Applications by the person, which is what every Mac user
+//! already expects, and a program that moved itself there would be the odd one
+//! out rather than the helpful one. So the Mac build installs nothing and
+//! registers nothing.
+//!
+//! What both do from then on is the same: a new version, checked against the
+//! signing key compiled into this program, is put in place while the program
+//! runs and takes over the next time it is opened. Nobody is restarted in the
+//! middle of a takeoff. What "put in place" means is where the two part
+//! company — one file on Windows, a whole signed folder on a Mac — and that
+//! difference lives in [`hub::update`], not here.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -26,12 +34,45 @@ pub const PROGRAM: &str = "Hyperview.exe";
 /// Keeps the version readable off the file itself.
 pub static BUILD_MARK: &str = hub::build_mark!();
 
+/// Where this program keeps what belongs to it rather than to the person.
+#[cfg(not(target_os = "macos"))]
 pub fn home() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA").map(|base| PathBuf::from(base).join(FOLDER))
 }
 
+/// The place a Mac keeps this sort of thing. Not inside the bundle: an update
+/// replaces the whole bundle, and anything written in there would go with it.
+#[cfg(target_os = "macos")]
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(|base| PathBuf::from(base).join("Library/Application Support").join(FOLDER))
+}
+
+/// The `Excalibur View.app` this copy is running out of, when it is running
+/// out of one at all.
+///
+/// A Mac program's executable lives three folders down inside the bundle —
+/// `Excalibur View.app/Contents/MacOS/Excalibur View` — and it is the bundle,
+/// not the executable, that gets replaced by an update.
+#[cfg(target_os = "macos")]
+pub fn installed_bundle() -> Option<PathBuf> {
+    let me = std::env::current_exe().ok()?;
+    let app = me.parent()?.parent()?.parent()?;
+    (app.extension().is_some_and(|e| e == "app")).then(|| app.to_path_buf())
+}
+
+/// The program file itself: the one that carries the version mark and the one
+/// "Restart now" starts.
+#[cfg(not(target_os = "macos"))]
 pub fn installed_program() -> Option<PathBuf> {
     home().map(|h| h.join(PROGRAM))
+}
+
+/// On a Mac there is nowhere else it could be. It runs from wherever the
+/// person put the bundle, and that is the copy that updates itself.
+#[cfg(target_os = "macos")]
+pub fn installed_program() -> Option<PathBuf> {
+    installed_bundle().and(std::env::current_exe().ok())
 }
 
 /// Whether this copy is the installed one.
@@ -43,10 +84,12 @@ pub fn is_installed_copy() -> bool {
 }
 
 /// Whether this build installs and updates itself at all. A developer's
-/// build, a non-Windows build, and a copy somebody asked to keep portable do
-/// not.
+/// build, a build for a platform that has no answer for this, and a copy
+/// somebody asked to keep portable do not.
 fn manages_itself() -> bool {
-    cfg!(windows) && !cfg!(debug_assertions) && std::env::var_os("HYPERVIEW_PORTABLE").is_none()
+    (cfg!(windows) || cfg!(target_os = "macos"))
+        && !cfg!(debug_assertions)
+        && std::env::var_os("HYPERVIEW_PORTABLE").is_none()
 }
 
 /// The first thing the program does. Returns `true` when this process should
@@ -56,6 +99,20 @@ pub fn settle_in(args: &[OsString]) -> bool {
     if !manages_itself() {
         return false;
     }
+
+    // A Mac installs nothing and starts nothing in its own place. All there is
+    // to do is clear away the folders the last update left beside the bundle.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = args;
+        if let Some(app) = installed_bundle() {
+            hub::update::tidy_after_bundle_update(&app);
+        }
+        return false;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
     let (Ok(me), Some(target)) = (std::env::current_exe(), installed_program()) else {
         return false;
     };
@@ -94,6 +151,7 @@ pub fn settle_in(args: &[OsString]) -> bool {
             log::warn!("could not start {}: {e}", target.display());
             false
         }
+    }
     }
 }
 
@@ -442,6 +500,20 @@ pub const RESTARTED: &str = "--restarted";
 /// Starts the version now in place, with `open` — the drawings this window
 /// has open — and returns once it is started. The caller closes this window.
 pub fn restart(open: &[PathBuf]) -> Result<(), String> {
+    // On a Mac, through `open`, so the new copy arrives as a program with a
+    // Dock icon and the focus rather than as a stray process started by the
+    // one that is closing. `-n` because the old one has not quit yet, and
+    // without it macOS would simply bring that window back to the front.
+    #[cfg(target_os = "macos")]
+    if let Some(app) = installed_bundle() {
+        let mut command = std::process::Command::new("/usr/bin/open");
+        command.arg("-n").arg(&app).arg("--args").arg(RESTARTED).args(open);
+        return command
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("{}: {e}", app.display()));
+    }
+
     let program = installed_program()
         .filter(|p| p.exists())
         .or_else(|| std::env::current_exe().ok())
@@ -461,9 +533,21 @@ pub fn put_in_place(release: &Release, bytes: &[u8]) -> Result<(), String> {
         return Err(format!("that update is for {}, not this program", release.platform));
     }
     trusted().check(release, bytes).map_err(|refusal| refusal.to_string())?;
-    let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    hub::update::swap_in(&me, bytes)
-        .map_err(|e| format!("version {} could not be put in place: {e}", release.version))
+    let put = |e: std::io::Error| format!("version {} could not be put in place: {e}", release.version);
+
+    // A Mac replaces the whole signed bundle; Windows replaces one file.
+    #[cfg(target_os = "macos")]
+    {
+        let app = installed_bundle()
+            .ok_or_else(|| "this copy is not running from Excalibur View.app".to_string())?;
+        return hub::update::swap_bundle_in(&app, bytes).map_err(put);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let me = std::env::current_exe().map_err(|e| e.to_string())?;
+        hub::update::swap_in(&me, bytes).map_err(put)
+    }
 }
 
 // ---- the PDF engine --------------------------------------------------------
@@ -477,6 +561,15 @@ static PDFIUM: &[u8] = include_bytes!(env!("HYPERVIEW_PDFIUM"));
 pub fn pdfium_library() -> Option<PathBuf> {
     #[cfg(embedded_pdfium)]
     {
+        // On a Mac this goes next to the program's own data and never inside
+        // the program. A `.app` is a signed folder, and adding a file to it
+        // breaks the seal over it: the copy keeps running, and then macOS
+        // refuses to open it the next time and calls it damaged. That is a
+        // horrible thing to debug a day later, so it is simply never done.
+        #[cfg(target_os = "macos")]
+        let folder = home()?;
+
+        #[cfg(not(target_os = "macos"))]
         let folder = std::env::current_exe()
             .ok()
             .and_then(|me| me.parent().map(PathBuf::from))
@@ -510,7 +603,8 @@ pub fn pdfium_library() -> Option<PathBuf> {
     }
 }
 
-#[cfg(embedded_pdfium)]
+// Only the platforms that may put it beside the program need to ask.
+#[cfg(all(embedded_pdfium, not(target_os = "macos")))]
 fn writable(dir: &Path) -> bool {
     let probe = dir.join(".hyperview-write-test");
     let ok = std::fs::write(&probe, b"x").is_ok();

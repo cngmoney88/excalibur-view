@@ -17,23 +17,27 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(embedded_pdfium)");
 
     let target = std::env::var("TARGET").unwrap_or_default();
-    if !target.contains("windows") {
-        return;
-    }
 
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .parent()
         .and_then(|p| p.parent().map(PathBuf::from))
         .unwrap_or_default();
 
-    // The PDF engine goes inside the exe, so a company is handed one file
-    // rather than a program and a DLL that must be kept beside it. It is
-    // written out beside the installed program the first time it runs.
-    // The engine each platform loads. Named as that platform names a shared
-    // library, because that is what the loader asks for.
-    let engine = if cfg!(target_os = "windows") {
+    // The PDF engine goes inside the program, so a company is handed one file
+    // rather than a program and a library that has to be kept beside it. It is
+    // written out the first time a drawing is opened.
+    //
+    // This happens for every platform, and before the Windows-only part below
+    // returns. It used to sit after that return, which meant a Mac build
+    // carried no engine at all and opened to "The PDF engine is missing" --
+    // a program that looks finished and cannot do the one thing it is for.
+    //
+    // The name comes from TARGET, not from `cfg!`. In a build script `cfg!`
+    // describes the machine doing the building, so a Mac cross-building for
+    // Windows would go looking for a .dylib.
+    let engine = if target.contains("windows") {
         "pdfium.dll"
-    } else if cfg!(target_os = "macos") {
+    } else if target.contains("apple") || target.contains("darwin") {
         "libpdfium.dylib"
     } else {
         "libpdfium.so"
@@ -46,6 +50,13 @@ fn main() {
     } else {
         println!("cargo:warning=third_party/pdfium/embedded/{engine} is missing, so the program will need {engine} beside it");
     }
+
+    // The rest is the icon and version block Windows reads off the file
+    // itself, and only Windows has either.
+    if !target.contains("windows") {
+        return;
+    }
+
     let icon = root.join("assets").join("hyperview.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
     if !icon.exists() {
