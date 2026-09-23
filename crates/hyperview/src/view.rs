@@ -918,6 +918,45 @@ impl App {
                     self.finish_draft();
                     return;
                 }
+                // A plate is a rectangle, and a rectangle took four clicks.
+                //
+                // These tools collect corners one at a time, which is right
+                // for an irregular shape and tedious for the commonest shape
+                // there is. So they drag as well: press at one corner, let go
+                // at the opposite one. Only for the shapes that close back on
+                // themselves -- dragging out a polyline means nothing.
+                //
+                // A drag only starts one when nothing is part-drawn already,
+                // so somebody halfway round a footing who moves the mouse with
+                // the button down does not have their work replaced by a box.
+                if tool.is_closed() {
+                    let part_drawn = self.doc().map(|d| d.draft.is_some()).unwrap_or(false);
+                    if response.drag_started() && !part_drawn {
+                        self.dragged_box = Some(at);
+                        self.start_draft();
+                        self.set_box(at, at);
+                        return;
+                    }
+                    if let Some(from) = self.dragged_box {
+                        if response.dragged() {
+                            self.set_box(from, at);
+                            return;
+                        }
+                        if response.drag_stopped() {
+                            self.dragged_box = None;
+                            // A press that barely moved is somebody putting
+                            // down a first corner, not drawing a box. Leave
+                            // the one point and let them carry on clicking.
+                            if a_real_drag(from, at, self.zoom_now()) {
+                                self.set_box(from, at);
+                                self.finish_draft();
+                            } else {
+                                self.set_points(vec![at]);
+                            }
+                            return;
+                        }
+                    }
+                }
                 if response.clicked() {
                     self.push_point(at);
                 }
@@ -1204,6 +1243,26 @@ impl App {
         }
         doc.dirty = true;
         doc.selected = None;
+    }
+
+    /// The four corners of the box between two opposite ones, going round it
+    /// rather than crossing over.
+    fn set_box(&mut self, from: [f64; 2], to: [f64; 2]) {
+        self.set_points(vec![from, [to[0], from[1]], to, [from[0], to[1]]]);
+    }
+
+    fn set_points(&mut self, points: Vec<[f64; 2]>) {
+        if let Some(doc) = self.doc_mut() {
+            if let Some(draft) = doc.draft.as_mut() {
+                draft.points = points;
+            }
+        }
+    }
+
+    /// The zoom on the drawing being worked on, so a drag is judged in the
+    /// sheet's own units rather than in screen pixels.
+    fn zoom_now(&self) -> f64 {
+        self.doc().map(|d| d.view.zoom as f64).unwrap_or(1.0)
     }
 
     fn start_draft(&mut self) {
@@ -2321,5 +2380,48 @@ mod tests {
         assert!(look.caption.ends_with('…'));
         assert!(!look.caption.contains('\n'));
         assert!(look.caption.starts_with("COVER SHEET EXISTING CONDITIONS PLAN"));
+    }
+}
+
+
+/// Whether a press-and-release was a drag or just a click that wobbled.
+///
+/// Judged on the sheet rather than on the screen: four pixels at a zoom of
+/// eight is half a sheet unit, and somebody zoomed right in on a connection
+/// should not have a twitch turned into a plate.
+fn a_real_drag(from: [f64; 2], to: [f64; 2], zoom: f64) -> bool {
+    let zoom = if zoom > 0.0 { zoom } else { 1.0 };
+    let enough = 4.0 / zoom;
+    (to[0] - from[0]).abs() > enough && (to[1] - from[1]).abs() > enough
+}
+
+#[cfg(test)]
+mod dragging_out_a_box {
+    use super::a_real_drag;
+
+    #[test]
+    fn a_click_that_wobbled_is_not_a_drag() {
+        assert!(!a_real_drag([100.0, 100.0], [101.0, 101.0], 1.0));
+        assert!(!a_real_drag([100.0, 100.0], [100.0, 100.0], 1.0));
+    }
+
+    #[test]
+    fn a_box_dragged_out_is() {
+        assert!(a_real_drag([100.0, 100.0], [340.0, 260.0], 1.0));
+    }
+
+    #[test]
+    fn a_line_is_not_a_box_however_long_it_is() {
+        // Dragged along one axis only: that is not a rectangle, it is a
+        // line, and turning it into a zero-area plate would be wrong.
+        assert!(!a_real_drag([100.0, 100.0], [900.0, 100.0], 1.0));
+        assert!(!a_real_drag([100.0, 100.0], [100.0, 900.0], 1.0));
+    }
+
+    #[test]
+    fn zoomed_right_in_a_smaller_movement_still_counts() {
+        // Two sheet units is a big movement at 8x and a twitch at 1x.
+        assert!(a_real_drag([10.0, 10.0], [12.0, 12.0], 8.0));
+        assert!(!a_real_drag([10.0, 10.0], [12.0, 12.0], 1.0));
     }
 }

@@ -23,6 +23,100 @@ pub struct Client {
     agent: ureq::Agent,
 }
 
+/// A request on its way out, and whether it may be sent a second time.
+///
+/// Every call in this file ends in `.call()`, `.send_json()` or
+/// `.send_bytes()`, and those are the three that go through here, so nothing
+/// above has to know retrying exists.
+pub struct Attempt {
+    request: ureq::Request,
+    twice: bool,
+}
+
+impl Attempt {
+    fn again(request: ureq::Request) -> Attempt {
+        Attempt { request, twice: true }
+    }
+
+    fn once(request: ureq::Request) -> Attempt {
+        Attempt { request, twice: false }
+    }
+
+    fn call(self) -> Result<ureq::Response, ureq::Error> {
+        let spare = self.twice.then(|| self.request.clone());
+        match (self.request.call(), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => spare.call(),
+            (result, _) => result,
+        }
+    }
+
+    fn send_json(self, body: impl serde::Serialize) -> Result<ureq::Response, ureq::Error> {
+        // Turned into a value first, so the same bytes can go twice without
+        // the caller having to hand over something cloneable.
+        let body = match serde_json::to_value(body) {
+            Ok(body) => body,
+            Err(e) => return Err(ureq::Error::from(std::io::Error::other(e))),
+        };
+        let spare = self.twice.then(|| self.request.clone());
+        match (self.request.send_json(&body), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => spare.send_json(&body),
+            (result, _) => result,
+        }
+    }
+
+    /// The two builder methods callers use, passed straight through so a
+    /// request can still have a header or a query added before it goes.
+    fn set(mut self, header: &str, value: &str) -> Attempt {
+        self.request = self.request.set(header, value);
+        self
+    }
+
+    fn query(mut self, key: &str, value: &str) -> Attempt {
+        self.request = self.request.query(key, value);
+        self
+    }
+
+    fn send_bytes(self, body: &[u8]) -> Result<ureq::Response, ureq::Error> {
+        let spare = self.twice.then(|| self.request.clone());
+        match (self.request.send_bytes(body), spare) {
+            (Err(e), Some(spare)) if never_arrived(&e) => spare.send_bytes(body),
+            (result, _) => result,
+        }
+    }
+}
+
+/// True when the request died on the way out rather than being answered.
+///
+/// A pooled connection the server closed while it sat idle fails like this,
+/// and the giveaway is that there is no status: the server never saw it. Worth
+/// one more go on a request where asking twice is the same as asking once.
+fn never_arrived(e: &ureq::Error) -> bool {
+    match e {
+        // The server answered. Whatever it said, it said it on purpose.
+        ureq::Error::Status(_, _) => false,
+        ureq::Error::Transport(t) => matches!(t.kind(), ureq::ErrorKind::Io),
+    }
+}
+
+/// What to tell somebody, when the machine's own words are no use.
+///
+/// "Invalid argument (os error 22)" is what a closed connection produces and
+/// it is not a sentence anybody can do anything with.
+fn in_words(e: &ureq::Error) -> String {
+    match e {
+        ureq::Error::Transport(t) if matches!(t.kind(), ureq::ErrorKind::Io) => {
+            "the connection to the server dropped. Try that again.".into()
+        }
+        ureq::Error::Transport(t) if matches!(t.kind(), ureq::ErrorKind::Dns) => {
+            "that address could not be looked up. Check the server address.".into()
+        }
+        ureq::Error::Transport(t) if matches!(t.kind(), ureq::ErrorKind::ConnectionFailed) => {
+            "nothing answered at that address. The server may be off, or the address wrong.".into()
+        }
+        other => other.to_string(),
+    }
+}
+
 /// Anything that can go wrong on the way to a server.
 #[derive(Debug)]
 pub enum Trouble {
@@ -84,12 +178,24 @@ impl Client {
         format!("{}{}{}", self.base, API_ROOT, path)
     }
 
-    fn get(&self, path: &str) -> ureq::Request {
-        self.sign(self.agent.get(&self.url(path)))
+    /// A GET, which may be sent twice.
+    ///
+    /// Connections are pooled, and a pooled connection the server has already
+    /// closed fails on the way out rather than on the way in -- the request
+    /// never arrives. Sending it again is the whole fix, and it is safe here
+    /// because asking twice is the same as asking once.
+    fn get(&self, path: &str) -> Attempt {
+        Attempt::again(self.sign(self.agent.get(&self.url(path))))
     }
 
-    fn post(&self, path: &str) -> ureq::Request {
-        self.sign(self.agent.post(&self.url(path)))
+    /// A POST, which is sent once and once only.
+    ///
+    /// The same dead-connection failure happens, but a POST that did reach the
+    /// server and died on the way back would be done twice -- two projects,
+    /// two people, two of whatever it made. Better a sentence somebody can act
+    /// on than a duplicate they have to find.
+    fn post(&self, path: &str) -> Attempt {
+        Attempt::once(self.sign(self.agent.post(&self.url(path))))
     }
 
     fn sign(&self, request: ureq::Request) -> ureq::Request {
@@ -103,9 +209,21 @@ impl Client {
 
     fn read<T: serde::de::DeserializeOwned>(result: Result<ureq::Response, ureq::Error>) -> Answer<T> {
         match result {
-            Ok(response) => response
-                .into_json::<T>()
-                .map_err(|e| Trouble::Unreadable(e.to_string())),
+            Ok(response) => response.into_json::<T>().map_err(|e| {
+                // Reading the body can fail because the connection died
+                // halfway, which is a different thing from the server sending
+                // nonsense, and the person reading the message can act on one
+                // and not the other.
+                if e.kind() == std::io::ErrorKind::UnexpectedEof || e.raw_os_error().is_some() {
+                    Trouble::Unreachable(
+                        "the connection to the server dropped partway through the answer. \
+                         Try that again."
+                            .into(),
+                    )
+                } else {
+                    Trouble::Unreadable(e.to_string())
+                }
+            }),
             Err(ureq::Error::Status(code, response)) => {
                 // A server of ours explains itself. Anything else gets a
                 // sentence built from what little it gave us.
@@ -128,7 +246,7 @@ impl Client {
                 });
                 Err(Trouble::Refused(problem))
             }
-            Err(e) => Err(Trouble::Unreachable(e.to_string())),
+            Err(e) => Err(Trouble::Unreachable(in_words(&e))),
         }
     }
 
