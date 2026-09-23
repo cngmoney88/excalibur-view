@@ -75,11 +75,6 @@ rust_xlsxwriter = { version = "0.90", default-features = false }
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["dx12", "vulkan"] }
 
-# Metal is the only backend that matters on a Mac: every Mac that runs a
-# current macOS has it, and it is what the system itself draws with.
-[target.'cfg(target_os = "macos")'.dependencies]
-wgpu = { version = "25", default-features = false, features = ["metal"] }
-
 # Windows has a text recogniser built into it. Using that rather than shipping
 # one means a scanned drawing set can be made searchable on a shop machine with
 # nothing installed and nothing downloaded — which is the difference between a
@@ -103,10 +98,18 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+# Metal is the only backend that matters on a Mac: every Mac that runs a
+# current macOS has it, and it is what the system itself draws with.
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["metal"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }
 
 [dev-dependencies]
+# For the test that checks each platform's dependencies are declared against
+# that platform, after `windows` once drifted into the wrong section.
+toml = "0.8"
 # Hand-written plugins for the sandbox's tests, in WebAssembly's text form.
 wat = "1"
 ed25519-dalek = "2"
