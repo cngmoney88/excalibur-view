@@ -57,3 +57,32 @@ pub const HOME_FEED: &str = "https://api.github.com/repos/cngmoney88/hyperview-r
 
 /// The channel a copy follows when nobody has said otherwise.
 pub const HOME_CHANNEL: &str = "stable";
+
+/// Where a renewed license is published, if anywhere.
+///
+/// A license is a signed file, and today a shop that buys three more seats
+/// waits for somebody to sign a new one and email it over. That is the whole
+/// of the friction, and it is why "buy six seats at once" is the only shape
+/// the thing can be sold in.
+///
+/// A server that knows its own license id can fetch its own renewal. The file
+/// is published under a name derived from the id by SHA-256, so the address
+/// cannot be guessed from a company's name and the list of customers is not
+/// something anybody can walk. The id is the capability: whoever has it can
+/// fetch that license and nothing else.
+///
+/// Three things this deliberately is not. It is **not an account**: no
+/// password, no session, nothing to reset, nothing to keep running. It is
+/// **not a check-in**: the server asks for a file and sends nothing about
+/// itself, not a seat count, not a company name, not a drawing. And it is
+/// **not how a license takes effect** — what arrives is checked against
+/// [`KEYS`] exactly like an update, and a file that is not signed, or is
+/// worse than the one already held, is ignored.
+///
+/// A sealed office never asks: the request goes through the same outbound
+/// gate as everything else, and its licenses arrive as files, by hand, the way
+/// that office wants everything to arrive.
+///
+/// Empty means no server ever looks, which is what a build does until
+/// somebody fills this in.
+pub const LICENSE_FEED: &str = "";

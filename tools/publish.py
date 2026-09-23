@@ -297,6 +297,40 @@ def write_license(lic, path):
     return path
 
 
+def license_filename_for(license_id):
+    """The name a license is published under, so a server can fetch its own.
+
+    The id put through SHA-256. The address cannot be worked out from a
+    company's name, and the list of customers is not something anybody can
+    walk. Must match `crate::license::name_for` in the server, which a test
+    in the Rust code checks.
+    """
+    return hashlib.sha256(license_id.strip().encode("utf-8")).hexdigest() + ".evlicense"
+
+
+def cmd_publish_license(a):
+    """Puts a signed license where the customer's server will find it.
+
+    This is the whole of "they bought three more seats": sign a new license
+    with the same id and the higher count, put it here, and their server picks
+    it up within the half hour. Nobody emails anybody a file.
+
+    The server refuses a renewal that gives fewer seats or ends sooner, so a
+    stale file cannot take seats off a shop in the middle of a bid.
+    """
+    lic = json.load(open(a.license, encoding="utf-8"))
+    name = license_filename_for(lic["id"])
+    out = os.path.join(a.into, name)
+    os.makedirs(a.into, exist_ok=True)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(lic, f, indent=2)
+    print(f"{lic['company']}: {lic['users'] or 'every'} seats, updates through {lic['updates_through']}")
+    print(f"  -> {out}")
+    print()
+    print("  Publish that folder, then the customer's server finds it by itself.")
+    print("  Nothing else has to reach them.")
+
+
 def cmd_sign_license(a):
     lic = make_license(
         a.key, a.company, product=a.product, edition=a.edition, users=a.users,
@@ -699,6 +733,10 @@ def main():
     l.add_argument("--id")
     l.add_argument("--issued")
     l.add_argument("--out")
+    pl = sub.add_parser("publish-license", help="put a signed license where a server can fetch it")
+    pl.add_argument("--license", required=True, help="the .evlicense file to publish")
+    pl.add_argument("--into", required=True, help="the folder that gets published")
+
     g = sub.add_parser("sign-plugin")
     g.add_argument("--key", required=True)
     g.add_argument("--id", required=True)
@@ -709,7 +747,7 @@ def main():
     a = p.parse_args()
     try:
         {"sign": cmd_sign, "upload": cmd_upload, "promote": cmd_promote,
-         "release": cmd_release,
+         "release": cmd_release, "publish-license": cmd_publish_license,
          "sign-plugin": cmd_sign_plugin, "sign-license": cmd_sign_license}[a.command](a)
     except GitHubRefused as e:
         raise SystemExit(str(e))

@@ -141,6 +141,15 @@ is signed out.",
                 "responses": ok("Changed")
             }
         },
+        "/signout": {
+            "post": {
+                "summary": "End this session on the server.",
+                "description": "Not just on this computer: the token stops working the moment \
+                                this returns. A key is not a session -- take one back with \
+                                /keys/{id}/revoke.",
+                "responses": ok("SignedOut")
+            }
+        },
         "/me/keys": {
             "get": {
                 "summary": "Keys for programs: your own, or every one for an administrator.",
@@ -382,6 +391,30 @@ sheet, marked `Carried forward — check`.",
                                 unrelated words beats a short one with symbols in it.",
                 "requestBody": body("NewPerson"),
                 "responses": ok("User")
+            }
+        },
+        "/people/{id}/role": {
+            "post": {
+                "summary": "Change what somebody may do. Administrators only.",
+                "description": "Takes effect on their very next request: the role is read out \
+                                of the account on every call rather than kept in the session. \
+                                Taking the badge off the only administrator is refused, because \
+                                there is no way back from a server nobody can administer.",
+                "parameters": [path_param("id", "The person.")],
+                "requestBody": body("NewRole"),
+                "responses": ok("User")
+            }
+        },
+        "/people/{id}/remove": {
+            "post": {
+                "summary": "Take somebody's account away. Administrators only.",
+                "description": "Their sessions and their keys go with them, at once. What they \
+                                made stays: a markup carries its author's name and a drawing set \
+                                carries who uploaded it, as text, so a takeoff does not lose its \
+                                history because somebody left. You cannot remove your own \
+                                account, and the last administrator cannot be removed.",
+                "parameters": [path_param("id", "The person.")],
+                "responses": ok("Removed")
             }
         },
         "/chests": {
@@ -648,6 +681,9 @@ fn schemas() -> Value {
             ("new", "string", "Twelve characters at the very least."),
         ]),
         "Changed": object(&[("changed", "boolean", "")]),
+        "NewRole": object(&[("role", "string", "viewer, estimator or admin.")]),
+        "Removed": object(&[("removed", "string", "The person who is no longer on this server.")]),
+        "SignedOut": object(&[("signed_out", "boolean", "")]),
         "ApiKey": object(&[
             ("id", "string", ""),
             ("name", "string", "What it was called when it was made."),

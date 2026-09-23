@@ -1469,3 +1469,241 @@ fn a_copy_can_be_named_and_a_viewer_cannot_make_one() {
     let refused = looker.copy_set(&issued.id, "").expect_err("a viewer may not");
     assert!(refused.to_string().contains("not allowed"), "{refused}");
 }
+
+// ---- people who leave ---------------------------------------------------------
+//
+// A shop that cannot take somebody's access away does not have access control,
+// it has a suggestion. These check the two things that matter: that it works
+// at once, and that it cannot be used to lock the shop out of its own server.
+
+fn call(server: &Running, method: &str, path: &str, token: &str, body: serde_json::Value)
+    -> Result<serde_json::Value, u16>
+{
+    let url = format!("{}/api/v1{path}", server.base);
+    let request = match method {
+        "POST" => ureq::post(&url),
+        _ => ureq::get(&url),
+    }
+    .set("Authorization", &format!("Bearer {token}"));
+    let outcome = if method == "POST" { request.send_json(body) } else { request.call() };
+    match outcome {
+        Ok(response) => Ok(response.into_json().unwrap_or(serde_json::Value::Null)),
+        Err(ureq::Error::Status(code, _)) => Err(code),
+        Err(e) => panic!("{e}"),
+    }
+}
+
+fn person_called(server: &Running, token: &str, email: &str) -> Option<serde_json::Value> {
+    let people = call(server, "GET", "/people", token, serde_json::Value::Null).expect("the list");
+    people
+        .as_array()?
+        .iter()
+        .find(|p| p["email"] == email)
+        .cloned()
+}
+
+#[test]
+fn removing_somebody_ends_their_session_there_and_then() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let leaver = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let boss_token = boss.token().expect("a token").to_string();
+    let leaver_token = leaver.token().expect("a token").to_string();
+
+    // They can read the shop's work, as they could all week.
+    assert!(call(&server, "GET", "/projects", &leaver_token, serde_json::Value::Null).is_ok());
+
+    let id = person_called(&server, &boss_token, "est@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&server, "POST", &format!("/people/{id}/remove"), &boss_token, serde_json::json!({}))
+        .expect("removed");
+
+    // Not at the next sign-in. Now.
+    assert_eq!(
+        call(&server, "GET", "/projects", &leaver_token, serde_json::Value::Null),
+        Err(401),
+        "a removed person's token still worked"
+    );
+    assert!(person_called(&server, &boss_token, "est@mesafab.com").is_none());
+}
+
+#[test]
+fn changing_what_somebody_may_do_takes_effect_on_their_next_request() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let boss_token = boss.token().expect("a token").to_string();
+    let hand_token = hand.token().expect("a token").to_string();
+
+    // An estimator may start a job.
+    let made = call(&server, "POST", "/projects", &hand_token,
+                    serde_json::json!({"number": "2559", "name": "Range Tower"}));
+    assert!(made.is_ok(), "an estimator should be able to make a project: {made:?}");
+
+    let id = person_called(&server, &boss_token, "est@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&server, "POST", &format!("/people/{id}/role"), &boss_token,
+         serde_json::json!({"role": "viewer"})).expect("changed");
+
+    // Same token, same second, and they may no longer write.
+    assert_eq!(
+        call(&server, "POST", "/projects", &hand_token,
+             serde_json::json!({"number": "2560", "name": "Nope"})),
+        Err(403),
+        "they were demoted and could still write"
+    );
+    // And can still read, because that is what a viewer is.
+    assert!(call(&server, "GET", "/projects", &hand_token, serde_json::Value::Null).is_ok());
+}
+
+#[test]
+fn the_last_administrator_cannot_be_removed_or_demoted() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let token = boss.token().expect("a token").to_string();
+    let me = person_called(&server, &token, "creede@mesafab.com").expect("me")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Not by removing yourself, which is the way somebody actually does it.
+    assert_eq!(
+        call(&server, "POST", &format!("/people/{me}/remove"), &token, serde_json::json!({})),
+        Err(400)
+    );
+
+    // Nor by a second administrator taking the badge off the only other one,
+    // once they have made themselves one and then changed their mind.
+    let other = person_called(&server, &token, "est@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&server, "POST", &format!("/people/{other}/role"), &token,
+         serde_json::json!({"role": "admin"})).expect("promoted");
+    let second = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let second_token = second.token().expect("a token").to_string();
+    call(&server, "POST", &format!("/people/{me}/remove"), &second_token, serde_json::json!({}))
+        .expect("the first one can go now there are two");
+    assert_eq!(
+        call(&server, "POST", &format!("/people/{other}/role"), &second_token,
+             serde_json::json!({"role": "estimator"})),
+        Err(400),
+        "the last administrator demoted themselves and locked the shop out"
+    );
+
+    // And they are still an administrator afterwards, not half-changed.
+    assert!(call(&server, "GET", "/people", &second_token, serde_json::Value::Null).is_ok());
+}
+
+#[test]
+fn signing_out_actually_ends_the_session() {
+    let server = start();
+    let client = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let token = client.token().expect("a token").to_string();
+    assert!(call(&server, "GET", "/projects", &token, serde_json::Value::Null).is_ok());
+
+    call(&server, "POST", "/signout", &token, serde_json::json!({})).expect("signed out");
+
+    assert_eq!(
+        call(&server, "GET", "/projects", &token, serde_json::Value::Null),
+        Err(401),
+        "the token still worked after signing out"
+    );
+}
+
+#[test]
+fn an_ordinary_seat_cannot_remove_anybody() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let boss_token = boss.token().expect("a token").to_string();
+    let hand_token = hand.token().expect("a token").to_string();
+    let looker = person_called(&server, &boss_token, "look@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert_eq!(
+        call(&server, "POST", &format!("/people/{looker}/remove"), &hand_token, serde_json::json!({})),
+        Err(403)
+    );
+    assert_eq!(
+        call(&server, "POST", &format!("/people/{looker}/role"), &hand_token,
+             serde_json::json!({"role": "admin"})),
+        Err(403)
+    );
+    // And the list itself was never theirs to read.
+    assert_eq!(
+        call(&server, "GET", "/people", &hand_token, serde_json::Value::Null),
+        Err(403)
+    );
+}
+
+#[test]
+fn what_a_person_made_outlives_them() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    let boss_token = boss.token().expect("a token").to_string();
+    let hand_token = hand.token().expect("a token").to_string();
+
+    let project = call(&server, "POST", "/projects", &hand_token,
+                       serde_json::json!({"number": "2559", "name": "Range Tower"}))
+        .expect("a project");
+    let set = upload(&server, &hand_token, project["id"].as_str().unwrap(), &a_drawing());
+
+    let id = person_called(&server, &boss_token, "est@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&server, "POST", &format!("/people/{id}/remove"), &boss_token, serde_json::json!({}))
+        .expect("removed");
+
+    // The drawing set is still there and still says who put it up. A takeoff
+    // does not lose its history because somebody left the company.
+    let still = call(&server, "GET", &format!("/sets/{}", set.id), &boss_token, serde_json::Value::Null)
+        .expect("the set is still there");
+    assert_eq!(still["uploaded_by"], "Estimator", "{still}");
+}
+
+#[test]
+fn what_happens_to_an_account_is_in_the_log() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let token = boss.token().expect("a token").to_string();
+
+    let looker = person_called(&server, &token, "look@mesafab.com").expect("them")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call(&server, "POST", &format!("/people/{looker}/role"), &token,
+         serde_json::json!({"role": "estimator"})).expect("changed");
+    call(&server, "POST", &format!("/people/{looker}/remove"), &token, serde_json::json!({}))
+        .expect("removed");
+
+    let log = call(&server, "GET", "/audit", &token, serde_json::Value::Null).expect("the log");
+    let text = log.to_string();
+    for expected in ["changed what a person may do", "removed a person", "signed in"] {
+        assert!(text.contains(expected), "the log does not mention {expected}: {text}");
+    }
+}
+
+#[test]
+fn a_refused_sign_in_is_recorded_even_when_the_address_is_unknown() {
+    let server = start();
+    // Somebody guessing addresses, which is the case an administrator most
+    // wants to see and the one that used to go unrecorded entirely.
+    let mut stranger = Client::new(&server.base);
+    assert!(stranger.sign_in("nobody@example.com", "not-even-close-to-right").is_err());
+
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let token = boss.token().expect("a token").to_string();
+    let log = call(&server, "GET", "/audit", &token, serde_json::Value::Null).expect("the log");
+    let text = log.to_string();
+    assert!(text.contains("no account with that address"), "{text}");
+    assert!(text.contains("nobody@example.com"), "{text}");
+}
