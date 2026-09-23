@@ -230,6 +230,22 @@ mod tests {
         dir
     }
 
+    /// A path that is absolute on the machine this test is running on.
+    ///
+    /// `/jobs/S-101.pdf` looks absolute and on Windows is not: a path with no
+    /// drive letter is relative to the current drive, `is_absolute` says so,
+    /// and `hand_over` correctly joins it onto the working directory -- which
+    /// is the right behaviour and made the test wrong. Second time today a
+    /// test has claimed a bug that only existed in the test, so it is written
+    /// down here rather than fixed quietly.
+    fn absolute(rest: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:\\jobs\\{rest}"))
+        } else {
+            PathBuf::from(format!("/jobs/{rest}"))
+        }
+    }
+
     #[test]
     fn a_second_start_hands_its_drawings_to_the_window_already_open() {
         let root = scratch();
@@ -243,19 +259,12 @@ mod tests {
         std::fs::create_dir_all(inbox(&root)).unwrap();
         lock.try_lock().unwrap();
 
-        let started = start_in(
-            &root,
-            &[PathBuf::from("/jobs/Fox Theater/S-101.pdf"), PathBuf::from("/jobs/Quote.pdf")],
-        );
+        let sheet = absolute("Fox Theater/S-101.pdf");
+        let quote = absolute("Quote.pdf");
+        let started = start_in(&root, &[sheet.clone(), quote.clone()]);
         assert_eq!(started, Start::HandedOver);
         let heard = take(&root);
-        assert_eq!(
-            heard,
-            vec![vec![
-                PathBuf::from("/jobs/Fox Theater/S-101.pdf"),
-                PathBuf::from("/jobs/Quote.pdf")
-            ]]
-        );
+        assert_eq!(heard, vec![vec![sheet, quote]]);
         // Taken once, not twice.
         assert!(take(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
