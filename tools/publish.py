@@ -539,7 +539,17 @@ def run(command, where=None):
     """Runs a command and lets it print as it goes, so a long build is not
     silence. Stops everything if it fails."""
     print("  " + " ".join(command))
-    code = subprocess.call(command, cwd=where)
+    try:
+        code = subprocess.call(command, cwd=where)
+    except FileNotFoundError:
+        # The commonest case by far: cargo, on a computer that has no Rust on
+        # it. A stack trace is a poor way to say "that program is not here",
+        # and this one cost a release its Windows half.
+        raise SystemExit(
+            f"{command[0]} is not on this computer's PATH, so this cannot run:\n"
+            f"    {' '.join(command)}\n"
+            f"If that is cargo: GitHub builds both programs now. Run the "
+            f"Windows build workflow and pass --app and --server instead.")
     if code != 0:
         raise SystemExit(f"that failed ({code}) - nothing has been published.")
 
@@ -597,20 +607,43 @@ def cmd_release(a):
             "update installs and the disk image is what a person downloads; a "
             "release with one and not the other is broken for somebody.")
 
-    # 1. Does it pass its own tests? A release that does not is not a release.
-    if a.skip_tests:
-        print("\n== skipping the tests, because you asked ==")
+    # 1 and 2. The two Windows programs.
+    #
+    # Handed in, normally. GitHub builds and tests both halves of a release --
+    # the Mac on a Mac, the Windows on Windows -- and this computer's job is
+    # the one thing only it can do, which is sign them with the key that lives
+    # here. That key is the reason releases happen on one machine; a compiler
+    # is not, and requiring one meant a release could only be cut from a
+    # machine with six gigabytes of build tools on it.
+    #
+    # Building here still works for anybody who has the toolchain, which is
+    # how a developer cuts a test release without waiting on CI.
+    handed_in = bool(a.app or a.server)
+    if handed_in:
+        for what, path in (("--app", a.app), ("--server", a.server)):
+            if not path:
+                raise SystemExit(
+                    f"{what} is missing. Give both programs or neither: a release "
+                    "with one built here and one built somewhere else is two "
+                    "different builds wearing one version number.")
+            if not os.path.exists(path):
+                raise SystemExit(f"{what} is not there: {path}")
+        app, server = a.app, a.server
+        print("\n== the programs GitHub built ==")
+        for path in (app, server):
+            print(f"  {os.path.basename(path)}  {os.path.getsize(path) / 1048576:.1f} MB")
     else:
-        print("\n== tests ==")
-        run(["cargo", "test", "--workspace", "--quiet"], root)
-
-    # 2. Build the Windows programs.
-    if a.skip_build:
-        print("\n== using the programs already in target/release ==")
-    else:
-        print("\n== building ==")
-        run(["cargo", "build", "--release", "-p", "hyperview", "-p", "hyperview-server"], root)
-    app, server = built("hyperview"), built("hyperview-server")
+        if a.skip_tests:
+            print("\n== skipping the tests, because you asked ==")
+        else:
+            print("\n== tests ==")
+            run(["cargo", "test", "--workspace", "--quiet"], root)
+        if a.skip_build:
+            print("\n== using the programs already in target/release ==")
+        else:
+            print("\n== building ==")
+            run(["cargo", "build", "--release", "-p", "hyperview", "-p", "hyperview-server"], root)
+        app, server = built("hyperview"), built("hyperview-server")
 
     # 3. Sign every program, here, with the key on this computer.
     print("\n== signing ==")
@@ -712,6 +745,8 @@ def main():
     rel.add_argument("--version", help="defaults to the version in Cargo.toml")
     rel.add_argument("--channel", choices=["preview", "stable"], default="preview")
     rel.add_argument("--notes-file")
+    rel.add_argument("--app", help="ExcaliburView.exe, already built (GitHub builds it)")
+    rel.add_argument("--server", help="ExcaliburView-Server.exe, already built")
     rel.add_argument("--mac-zip", help="ExcaliburView-mac.zip from deploy/macos/build.sh")
     rel.add_argument("--mac-dmg", help="the .dmg from the same build")
     rel.add_argument("--min-api", type=int, default=1)

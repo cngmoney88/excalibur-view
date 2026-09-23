@@ -1,8 +1,10 @@
-# Releasing Hyperview
+# Releasing Excalibur View
 
 ## The short version
 
-1. **github.com/cngmoney88/excalibur-view** → Actions → **Mac build** → Run workflow.
+1. **github.com/cngmoney88/excalibur-view** → Actions. Run **Windows build**
+   and **Mac build**, both on the commit you are releasing. About twenty
+   minutes, most of the Mac's share being Apple.
 2. On the PC, double-click **Release Excalibur View**.
 3. Try it on one seat.
 4. Double-click **Give it to everyone**.
@@ -10,13 +12,45 @@
 That is the whole job. The rest of this file is what those four steps are
 doing and why, for whoever has to change one of them later.
 
-The shape of it: **GitHub builds and notarizes the Mac, because Apple's
-credentials can be revoked and reissued. The PC signs and publishes, because
-`hyperview-signing.key` cannot.** That key says "this update is safe to
-install" to every copy of Excalibur View in the world, and every seat installs
-what it vouches for by itself. It lives on one computer and it is used there.
+**The shape of it: GitHub builds both halves. The PC signs and publishes.**
+
+GitHub builds because building is not the thing that has to happen on one
+machine. It compiles and tests Windows on Windows and the Mac on a Mac, which
+no single computer can do, and it needs nothing installed on anybody's desk.
+Apple's credentials live there too, because if one leaked Apple revokes it and
+issues another.
+
+The PC signs because `hyperview-signing.key` cannot be revoked. That key says
+"this update is safe to install" to every copy of Excalibur View in the world,
+and every seat installs what it vouches for by itself. It lives on one
+computer and it is used there. **That key, and nothing else, is the reason a
+release happens on a particular machine.** It is emphatically not a compiler:
+there is no Rust on that PC, there never was, and for most of a day the
+release script assumed otherwise and stopped a release with a stack trace.
+
+Building on the PC still works for anybody who does have the toolchain --
+leave `--app` and `--server` off and it compiles. That is how a developer cuts
+a test release without waiting on CI.
 
 Setting the Mac half up for the first time: `docs/SETUP-THE-MAC-BUILD.md`.
+
+## What each half produces
+
+| Workflow | Runner | Artifact | Holds |
+|---|---|---|---|
+| Windows build | `windows-latest` | `windows-<version>` | `ExcaliburView.exe`, `ExcaliburView-Server.exe` |
+| Mac build | `macos-14` | `mac-<version>` | `ExcaliburView-<version>.dmg`, `ExcaliburView-mac.zip` |
+
+Both run the whole test suite first. A release that does not pass its own
+tests is not a release, and the build somebody is about to sign and hand to
+every seat in a shop is the one worth testing twice.
+
+**Both are checked against the commit being released.** Not by commit id --
+that is the easy question and the wrong one, because it refuses a release
+whose only change since the build was a line in the release notes. The check
+asks whether the two commits build the same thing, comparing `crates`,
+`Cargo.toml`, `Cargo.lock` and `third_party`. A change anywhere else cannot
+make two different programs.
 
 
 
