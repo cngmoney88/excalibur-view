@@ -313,6 +313,7 @@ impl App {
                     markups,
                     sent,
                 } => self.take_sync(set, revision, markups, sent),
+                Told::Pushed { set, sent } => self.take_push(set, sent),
                 Told::Chests(list) => {
                     // What the office shares, every seat has: a shared chest
                     // this seat has not got is fetched now, once. Nobody has
@@ -545,6 +546,25 @@ impl App {
 
         if let Some(said) = merged.says() {
             self.status = said;
+        }
+    }
+
+    /// Records markups that reached the server when reading the set back
+    /// afterwards did not.
+    ///
+    /// The revision is deliberately left alone: this machine has not seen
+    /// anything new, so the next sync still asks from where it was. Only the
+    /// names move, and only so they are not sent twice.
+    pub fn take_push(&mut self, set: String, sent: Vec<String>) {
+        let Some(at) = self
+            .docs
+            .iter()
+            .position(|d| d.attached.as_ref().map(|a| a.set.as_str()) == Some(set.as_str()))
+        else {
+            return;
+        };
+        if let Some(attached) = self.docs[at].attached.as_mut() {
+            attached.sent.extend(sent);
         }
     }
 

@@ -188,6 +188,14 @@ pub enum Told {
         company: String,
         join_code: String,
     },
+    /// Markups reached the server, but reading the set back afterwards did
+    /// not. The push happened, so the window has to be told which names went
+    /// -- otherwise the next sync sends them a second time and the server
+    /// ends up holding two of each.
+    Pushed {
+        set: String,
+        sent: Vec<String>,
+    },
     SignedIn(Box<Session>),
     SignedOut,
     Projects(Vec<Project>),
@@ -559,7 +567,23 @@ pub fn start(repaint: egui::Context) -> Link {
                                         sent,
                                     },
                                 ),
-                                Err(e) => say(&told, sync_failed(&set, quiet, e.to_string())),
+                                Err(e) => {
+                                    // The signal went between the push and the
+                                    // read-back -- the trailer case. What was
+                                    // sent is on the server whether or not we
+                                    // got to read it, so record it before
+                                    // saying anything went wrong.
+                                    if !sent.is_empty() {
+                                        say(
+                                            &told,
+                                            Told::Pushed {
+                                                set: set.clone(),
+                                                sent,
+                                            },
+                                        );
+                                    }
+                                    say(&told, sync_failed(&set, quiet, e.to_string()));
+                                }
                             }
                         }
                     },
