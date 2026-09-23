@@ -39,8 +39,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # The PDF engine is a third-party binary kept out of this repository. The
-      # build script says so and carries on, and every test that does not open
-      # a drawing still runs — which is all of them.
+      # The PDF engine is a third-party binary kept out of this repository, and
+      # the tests that open a drawing genuinely need it. Leaving it out made
+      # this workflow fail on both platforms while the Mac build, which does
+      # fetch it, passed on the very same commit.
+      - name: The PDF engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"
+          case "${{ runner.os }}" in
+            Windows) want="pdfium-win-x64";  file="pdfium.dll" ;;
+            macOS)   want="pdfium-mac-univ"; file="libpdfium.dylib" ;;
+            *)       want="pdfium-linux-x64"; file="libpdfium.so" ;;
+          esac
+          api="https://api.github.com/repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F$build"
+          url="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api" \
+                 | grep -o "https://[^\"]*$want[^\"]*" | head -1)"
+          test -n "$url" || { echo "no $want build of PDFium $build" >&2; exit 1; }
+          curl -fsSL "$url" -o pdfium.tgz
+          mkdir -p unpacked
+          tar -xzf pdfium.tgz -C unpacked
+          found="$(find unpacked -name "$file" | head -1)"
+          test -n "$found" || { echo "no $file in that archive" >&2; exit 1; }
+          cp "$found" "third_party/pdfium/embedded/$file"
+          ls -l "third_party/pdfium/embedded/$file"
+
       - name: The whole test suite
         run: cargo test --workspace
