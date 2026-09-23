@@ -48,11 +48,16 @@ pub struct Entry {
 
 /// What can be recorded. Kept as a short fixed list so a log can be read and
 /// filtered by somebody who has never seen this program before.
+///
+/// Every one of these is written somewhere. A constant defined and never
+/// recorded is worse than no constant: it reads, to anybody auditing the
+/// program, like coverage that is not there. `OPENED_SET` used to be one --
+/// it came out rather than being wired up, because a seat asks about a set
+/// every eight seconds and a log of that is a log nobody reads.
 pub mod action {
     pub const SIGNED_IN: &str = "signed in";
     pub const SIGN_IN_REFUSED: &str = "sign-in refused";
     pub const SIGNED_OUT: &str = "signed out";
-    pub const OPENED_SET: &str = "opened a drawing set";
     pub const DOWNLOADED_SET: &str = "downloaded a drawing set";
     pub const EXPORTED_TAKEOFF: &str = "exported a takeoff";
     pub const UPLOADED_SET: &str = "uploaded a drawing set";

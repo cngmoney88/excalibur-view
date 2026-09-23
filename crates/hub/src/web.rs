@@ -46,6 +46,36 @@ pub fn outbound(what: &str, url: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Fetches a small signed file: a license renewal, and nothing larger.
+///
+/// Goes through [`outbound`] like everything else, so a sealed office never
+/// makes the request at all. Nothing about the company goes out with it: the
+/// address is the whole of the message, and the file that comes back is
+/// checked against the program's own keys before it is believed.
+pub fn fetch_small(what: &str, url: &str) -> Result<String, String> {
+    use std::io::Read;
+    /// Larger than any license will ever be, and small enough that a server
+    /// pointed at something enormous does not fill its disk finding out.
+    const LARGEST: u64 = 64 * 1024;
+
+    outbound(what, url)?;
+    let response = agent()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout_read(std::time::Duration::from_secs(30))
+        .user_agent(concat!("excalibur-hyperview/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .get(url)
+        .call()
+        .map_err(|e| format!("{url} did not answer: {e}"))?;
+    let mut text = String::new();
+    response
+        .into_reader()
+        .take(LARGEST)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("could not read {url}: {e}"))?;
+    Ok(text)
+}
+
 fn tls() -> Arc<rustls::ClientConfig> {
     static TLS: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
     TLS.get_or_init(|| {

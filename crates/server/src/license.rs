@@ -134,6 +134,89 @@ fn install_with(server: &Server, text: &str, trusted: &Trusted) -> Result<Licens
     Ok(license)
 }
 
+// ---- a license that renews itself -------------------------------------------
+//
+// A shop that buys three more seats should not wait for somebody to sign a
+// file and email it. The license already carries an id; a server that knows
+// its own can go and fetch its own renewal.
+//
+// What makes this safe is that nothing here decides a license is good. The
+// file that comes back is checked against the keys compiled into this server,
+// exactly as an update is, and then checked again against the one already
+// held: a renewal that gives fewer seats or ends sooner is ignored rather
+// than installed. So a feed that was taken over, or an old file served by
+// mistake, can only ever hand a shop something it was already entitled to.
+
+/// Where this server would look for its own renewal, or `None` when it
+/// should not look at all.
+///
+/// Nothing is sent: the address is derived from the license id this server
+/// already holds, so the request says only "the file at this name", and the
+/// name means nothing to anybody who does not have the id.
+pub fn renewal_url(server: &Server) -> Option<String> {
+    let base = crate::LICENSE_FEED.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    if hub::sealed::is_sealed() {
+        return None;
+    }
+    let held = held(server, &crate::trusted())?;
+    Some(format!("{base}/{}.evlicense", name_for(&held.id)))
+}
+
+/// The name a license is published under: the id put through SHA-256, so the
+/// address cannot be worked out from a company's name and the list of
+/// customers is not something anybody can walk.
+pub fn name_for(id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(id.trim().as_bytes());
+    hasher.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether `fresh` is worth installing over `held`.
+///
+/// The same license, and better than the one in hand, or it is not a renewal.
+/// An automatic change that took seats away, or brought the end of updates
+/// forward, would cut a shop off in the middle of a bid because a file was
+/// stale — so it is refused, and a genuine reduction is installed by hand
+/// like everything else that ought to be somebody's decision.
+pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
+    if fresh.id != held.id || fresh.company != held.company {
+        return false;
+    }
+    let seats_kept = fresh.users == 0 || (held.users != 0 && fresh.users >= held.users);
+    let updates_kept = match (held.updates_through.as_str(), fresh.updates_through.as_str()) {
+        (_, "forever") => true,
+        ("forever", _) => false,
+        (was, now) => now >= was,
+    };
+    let changed = fresh.users != held.users
+        || fresh.updates_through != held.updates_through
+        || fresh.edition != held.edition;
+    seats_kept && updates_kept && changed
+}
+
+/// Fetches the renewal, if there is one, and keeps it. Returns what changed,
+/// for the log. Any trouble is `None`: a shop whose licence could not be
+/// checked today is a shop that carries on with the one it has.
+pub fn look_for_renewal(server: &Server) -> Option<String> {
+    let url = renewal_url(server)?;
+    let held = held(server, &crate::trusted())?;
+    let text = hub::web::fetch_small("Checking for a renewed license", &url).ok()?;
+    let fresh = License::read(&text, &crate::trusted()).ok()?;
+    if !is_a_renewal(&held, &fresh) {
+        return None;
+    }
+    install(server, &text).ok()?;
+    Some(format!(
+        "{} seats, updates through {}",
+        if fresh.users == 0 { "every".to_string() } else { fresh.users.to_string() },
+        fresh.updates_through
+    ))
+}
+
 /// The license this server holds, if it still checks out.
 fn held(server: &Server, trusted: &Trusted) -> Option<License> {
     let text = server.store.setting(LICENSE).ok().flatten()?;
@@ -621,5 +704,101 @@ mod tests {
         begin(&server);
         assert!(server.store.setting(LICENSE).unwrap().is_none());
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod renewal_tests {
+    use super::*;
+
+    fn a_license(users: u32, through: &str) -> License {
+        License {
+            id: "evl_abc123".into(),
+            company: "Acme Steel, Inc.".into(),
+            edition: hub::license::Edition::Office,
+            users,
+            updates_through: through.into(),
+            issued: "2026-09-01".into(),
+            note: String::new(),
+            key: "mesafab-2026".into(),
+            signature: "00".repeat(64),
+        }
+    }
+
+    #[test]
+    fn three_more_seats_is_a_renewal() {
+        assert!(is_a_renewal(&a_license(6, "2027-09-01"), &a_license(9, "2027-09-01")));
+    }
+
+    #[test]
+    fn another_year_of_updates_is_a_renewal() {
+        assert!(is_a_renewal(&a_license(6, "2027-09-01"), &a_license(6, "2028-09-01")));
+    }
+
+    /// The case this exists to refuse. A stale file, or a feed somebody took
+    /// over, must never be able to take seats off a shop in the middle of a
+    /// bid. A genuine reduction is installed by hand, like anything else that
+    /// ought to be somebody's decision.
+    #[test]
+    fn fewer_seats_is_never_installed_by_itself() {
+        assert!(!is_a_renewal(&a_license(9, "2027-09-01"), &a_license(6, "2027-09-01")));
+    }
+
+    #[test]
+    fn an_earlier_end_to_updates_is_never_installed_by_itself() {
+        assert!(!is_a_renewal(&a_license(6, "2028-09-01"), &a_license(6, "2027-09-01")));
+    }
+
+    #[test]
+    fn forever_is_better_than_any_date_and_never_worse() {
+        assert!(is_a_renewal(&a_license(6, "2027-09-01"), &a_license(6, "forever")));
+        assert!(!is_a_renewal(&a_license(6, "forever"), &a_license(6, "2030-09-01")));
+    }
+
+    /// Nought means no limit, so it is the most seats there are.
+    #[test]
+    fn unlimited_seats_are_more_than_any_number_and_a_number_is_fewer() {
+        assert!(is_a_renewal(&a_license(6, "2027-09-01"), &a_license(0, "2027-09-01")));
+        assert!(!is_a_renewal(&a_license(0, "2027-09-01"), &a_license(25, "2027-09-01")));
+    }
+
+    #[test]
+    fn somebody_elses_license_is_not_a_renewal_of_this_one() {
+        let mine = a_license(6, "2027-09-01");
+        let mut theirs = a_license(25, "2030-01-01");
+        theirs.id = "evl_someoneelse".into();
+        assert!(!is_a_renewal(&mine, &theirs));
+
+        let mut renamed = a_license(25, "2030-01-01");
+        renamed.company = "Acme Steel LLC".into();
+        assert!(!is_a_renewal(&mine, &renamed), "a company rename is not automatic");
+    }
+
+    #[test]
+    fn the_same_license_again_is_not_worth_installing() {
+        assert!(!is_a_renewal(&a_license(6, "2027-09-01"), &a_license(6, "2027-09-01")));
+    }
+
+    /// The published name gives nothing away about the customer, and the same
+    /// id always lands on the same name.
+    #[test]
+    fn the_name_a_license_is_published_under_says_nothing_about_who_it_is_for() {
+        let name = name_for("evl_abc123");
+        assert_eq!(name.len(), 64);
+        assert_eq!(name, name_for(" evl_abc123 "), "trimmed, so a stray space is not a lost license");
+        assert!(!name.contains("evl"));
+        assert_ne!(name, name_for("evl_abc124"));
+    }
+
+    /// The publishing script works this name out too. If the two ever drift
+    /// apart, every server quietly stops finding its own renewal and nobody
+    /// gets an error to read — so the answer is pinned here rather than
+    /// described in a comment.
+    #[test]
+    fn the_publishing_script_and_the_server_agree_on_that_name() {
+        assert_eq!(
+            name_for("evl_abc123"),
+            "19431c5846060c7cb52d58f6af8352ed35243c827a01b2703ca4c850160aaebd"
+        );
     }
 }

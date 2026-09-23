@@ -136,14 +136,26 @@ pub enum Outcome {
 
 /// Asks the feed every [`EVERY`], for as long as the server runs.
 pub async fn keep_up_to_date(server: Arc<Server>) {
-    if feed_url(&server).is_none() {
+    // An office that has told this server not to look for new versions may
+    // still have bought three more seats this morning. Two reasons to make
+    // the trip, and either one is enough.
+    if feed_url(&server).is_none() && crate::license::renewal_url(&server).is_none() {
         return;
     }
     // Not the moment it starts: a server that has just been installed is busy
     // being found by the office, and a few seconds make no difference.
     tokio::time::sleep(Duration::from_secs(20)).await;
     loop {
-        look(Arc::clone(&server)).await;
+        if feed_url(&server).is_some() {
+            look(Arc::clone(&server)).await;
+        }
+        // On the same trip out, because a shop that has just bought three more
+        // seats should have them before somebody notices they are missing --
+        // and because two schedules for the same half hour is one more thing
+        // to keep in step than there needs to be.
+        if let Some(what) = crate::license::look_for_renewal(&server) {
+            tracing::info!("the license renewed itself: {what}");
+        }
         tokio::time::sleep(EVERY).await;
     }
 }

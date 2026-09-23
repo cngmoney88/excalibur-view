@@ -203,6 +203,7 @@ pub fn router(server: Shared) -> Router {
         .route("/admin/joining", get(read_joining).post(change_joining))
         .route("/me", get(me))
         .route("/me/password", post(change_password))
+        .route("/signout", post(sign_out))
         .route("/me/keys", get(list_keys).post(make_key))
         .route("/keys/:id/revoke", post(revoke_key))
         .route("/sets/:id/markuplist", get(set_markuplist))
@@ -223,6 +224,8 @@ pub fn router(server: Shared) -> Router {
         .route("/sets/:id/takeoff", get(takeoff_of))
         .route("/sets/:id/takeoff.csv", get(takeoff_csv))
         .route("/people", get(people).post(add_person))
+        .route("/people/:id/role", post(change_role))
+        .route("/people/:id/remove", post(remove_person))
         .route("/chests", get(chests).post(upload_chest))
         .route("/chests/:id/file", get(chest_file))
         .route("/plugins", get(plugins).post(add_plugin))
@@ -270,6 +273,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/admin/joining"),
     ("GET", "/me"),
     ("POST", "/me/password"),
+    ("POST", "/signout"),
     ("GET", "/me/keys"),
     ("POST", "/me/keys"),
     ("POST", "/keys/{id}/revoke"),
@@ -296,6 +300,8 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/sets/{id}/takeoff.csv"),
     ("GET", "/people"),
     ("POST", "/people"),
+    ("POST", "/people/{id}/role"),
+    ("POST", "/people/{id}/remove"),
     ("GET", "/chests"),
     ("POST", "/chests"),
     ("GET", "/license"),
@@ -398,7 +404,11 @@ fn how_joining(server: &Server) -> (String, String, String) {
 
 // ---- signing in -----------------------------------------------------------
 
-async fn sign_in(State(server): State<Shared>, Json(body): Json<SignIn>) -> Answer<Json<Session>> {
+async fn sign_in(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<SignIn>,
+) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
     let session = server
         .store
@@ -417,6 +427,14 @@ async fn sign_in(State(server): State<Shared>, Json(body): Json<SignIn>) -> Answ
     // The same answer whether the address is unknown or the password is wrong.
     // Telling somebody which one they got right is telling them half of it.
     let Some((id, name, stored, role)) = session else {
+        // Somebody trying addresses is exactly what an administrator wants to
+        // see in the log, and it was the one refusal that went unrecorded.
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                .saying("no account with that address")
+                .from(seen_from(&headers)),
+        );
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
@@ -427,7 +445,8 @@ async fn sign_in(State(server): State<Shared>, Json(body): Json<SignIn>) -> Answ
             &server,
             crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &body.email)
                 .by(&id)
-                .saying("the password did not match"),
+                .saying("the password did not match")
+                .from(seen_from(&headers)),
         );
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
@@ -456,7 +475,9 @@ async fn sign_in(State(server): State<Shared>, Json(body): Json<SignIn>) -> Answ
 
     record(
         &server,
-        crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email).by(&id),
+        crate::audit::Entry::new(crate::audit::action::SIGNED_IN, &body.email)
+            .by(&id)
+            .from(seen_from(&headers)),
     );
 
     Ok(Json(Session {
@@ -1243,8 +1264,18 @@ async fn takeoff_csv(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Response> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
     let (_, markups, sheets) = gather(&server, &id)?;
+    // A takeoff leaving the server is the thing an estimator takes to another
+    // job, and it was the one export nobody could see had happened.
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::EXPORTED_TAKEOFF, &who.email)
+            .by(&who.id)
+            .about(&id)
+            .saying("as a spreadsheet")
+            .from(seen_from(&headers)),
+    );
     let columns = [
         takeoff::Column::Page,
         takeoff::Column::Subject,
@@ -1375,6 +1406,12 @@ async fn revoke_key(
     if gone == 0 {
         return Err(Denied::missing("key"));
     }
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::REVOKED_KEY, &who.email)
+            .by(&who.id)
+            .about(&id),
+    );
     Ok(Json(serde_json::json!({ "revoked": id })))
 }
 
@@ -2007,7 +2044,7 @@ async fn add_person(
     headers: HeaderMap,
     Json(body): Json<NewPerson>,
 ) -> Answer<Json<User>> {
-    administrator(&server, &headers)?;
+    let who = administrator(&server, &headers)?;
     crate::license::room_for_another(&server).map_err(Denied::license_users)?;
     let email = body.email.trim().to_lowercase();
     if !email.contains('@') {
@@ -2048,7 +2085,190 @@ async fn add_person(
             Ok(())
         })
         .map_err(|e| Denied::broke("add that person", e))?;
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::ADDED_PERSON, &who.email)
+            .by(&who.id)
+            .about(&user.email)
+            .saying(auth::role_name(user.role)),
+    );
     Ok(Json(user))
+}
+
+// ---- people who leave --------------------------------------------------------
+//
+// A shop that cannot take somebody's access away has no access control, only
+// a suggestion. Both of these end the person's sessions the instant they are
+// written, because every request reads the role and the account fresh out of
+// `people` rather than trusting what was true when they signed in.
+//
+// One rule guards both: a server must never be left without an administrator.
+// There is no way back from that except editing the database by hand, and the
+// person it happens to is always somebody who was trying to tidy up.
+
+#[derive(Deserialize)]
+struct NewRole {
+    /// viewer, estimator or admin.
+    role: String,
+}
+
+/// How many administrators there would be if `excluding` were not one.
+fn other_admins(db: &rusqlite::Connection, excluding: &str) -> rusqlite::Result<i64> {
+    db.query_row(
+        "SELECT count(*) FROM people WHERE role = 'admin' AND id != ?1",
+        params![excluding],
+        |r| r.get(0),
+    )
+}
+
+async fn change_role(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<NewRole>,
+) -> Answer<Json<User>> {
+    let who = administrator(&server, &headers)?;
+    let role = auth::role_from(body.role.trim());
+
+    let changed = server
+        .store
+        .with(|db| {
+            let found: Option<(String, String, String)> = db
+                .query_row(
+                    "SELECT name, email, role FROM people WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .optional()?;
+            let Some((name, email, was)) = found else {
+                return Ok(None);
+            };
+            // Taking the last administrator's badge off is how a shop locks
+            // itself out of its own server.
+            if was == "admin" && !role.may_administer() && other_admins(db, &id)? == 0 {
+                return Ok(Some(Err(())));
+            }
+            db.execute(
+                "UPDATE people SET role = ?1 WHERE id = ?2",
+                params![auth::role_name(role), id],
+            )?;
+            Ok(Some(Ok((name, email, was))))
+        })
+        .map_err(|e| Denied::broke("change what that person may do", e))?;
+
+    let Some(outcome) = changed else {
+        return Err(Denied::missing("person"));
+    };
+    let Ok((name, email, was)) = outcome else {
+        return Err(Denied::wrong(
+            "That is the only administrator on this server. Make somebody else an \
+             administrator first, or nobody will be able to administer it at all.",
+        ));
+    };
+
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::CHANGED_ROLE, &who.email)
+            .by(&who.id)
+            .about(&email)
+            .saying(format!("{was} to {}", auth::role_name(role))),
+    );
+    Ok(Json(User { id, name, email, role }))
+}
+
+/// Takes somebody's account away, and with it every session and key they had.
+///
+/// What they made stays. Markups carry an author's name and drawing sets carry
+/// who uploaded them, as text rather than as a link to this row, so a takeoff
+/// does not lose its history because somebody left the company.
+async fn remove_person(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<serde_json::Value>> {
+    let who = administrator(&server, &headers)?;
+    if id == who.id {
+        return Err(Denied::wrong(
+            "You cannot remove your own account. Another administrator can.",
+        ));
+    }
+
+    let removed = server
+        .store
+        .with(|db| {
+            let found: Option<(String, String)> = db
+                .query_row(
+                    "SELECT email, role FROM people WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((email, role)) = found else {
+                return Ok(None);
+            };
+            if role == "admin" && other_admins(db, &id)? == 0 {
+                return Ok(Some(Err(())));
+            }
+            // Sessions go with the person by the schema's own cascade; the
+            // keys they made are taken back here.
+            db.execute("DELETE FROM keys WHERE person = ?1", params![id])?;
+            db.execute("DELETE FROM people WHERE id = ?1", params![id])?;
+            Ok(Some(Ok(email)))
+        })
+        .map_err(|e| Denied::broke("remove that person", e))?;
+
+    let Some(outcome) = removed else {
+        return Err(Denied::missing("person"));
+    };
+    let Ok(email) = outcome else {
+        return Err(Denied::wrong(
+            "That is the only administrator on this server. Make somebody else an \
+             administrator first.",
+        ));
+    };
+
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::REMOVED_PERSON, &who.email)
+            .by(&who.id)
+            .about(&email)
+            .saying("their sessions and keys went with them"),
+    );
+    Ok(Json(serde_json::json!({ "removed": id })))
+}
+
+/// Ends this session on the server, rather than only forgetting it here.
+///
+/// Before this, signing out dropped the connection in the program and left the
+/// token working for another thirty days. Anybody who had it — a shared
+/// machine, a stolen laptop — still had the shop's drawings.
+async fn sign_out(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<serde_json::Value>> {
+    let who = caller(&server, &headers)?;
+    let Some(token) = bearer(&headers) else {
+        return Err(Denied::unauthorised());
+    };
+    // A key is not a session. Taking one back is `/keys/{id}/revoke`, which
+    // says so, rather than something that happens because a program quit.
+    if token.starts_with(auth::KEY_PREFIX) {
+        return Err(Denied::wrong(
+            "That is a key, not a sign-in. Take a key back with /keys/{id}/revoke.",
+        ));
+    }
+    server
+        .store
+        .with(|db| {
+            db.execute(
+                "DELETE FROM sessions WHERE token = ?1",
+                params![auth::token_hash(&token)],
+            )?;
+            Ok(())
+        })
+        .map_err(|e| Denied::broke("sign you out", e))?;
+    record(
+        &server,
+        crate::audit::Entry::new(crate::audit::action::SIGNED_OUT, &who.email).by(&who.id),
+    );
+    Ok(Json(serde_json::json!({ "signed_out": true })))
 }
 
 // ---- the license ------------------------------------------------------------
@@ -2189,6 +2409,29 @@ async fn copy_set(
 /// Records one thing that happened. Deliberately swallows its own failure: a
 /// log that can stop somebody opening a drawing is a log that gets switched
 /// off, and a server whose disk has filled should still let the shop work.
+/// Where a request came from, for the log's `address` column.
+///
+/// The column has existed since the log did and was never filled in, which
+/// made "signed in" and "sign-in refused" half a record: an administrator
+/// looking at a string of refusals wants to know whether they came from one
+/// machine or forty.
+pub(crate) fn seen_from(headers: &HeaderMap) -> String {
+    // Behind a tunnel or a reverse proxy the socket is the proxy, so the
+    // forwarded address is the one worth keeping when there is one. First
+    // entry only: the rest is whatever the client claimed on the way in.
+    for name in ["x-forwarded-for", "x-real-ip"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            if let Some(first) = value.split(',').next() {
+                let first = first.trim();
+                if !first.is_empty() {
+                    return first.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
 fn record(server: &Server, entry: crate::audit::Entry) {
     if let Err(e) = server.store.audit(&entry) {
         tracing::warn!("the audit log could not be written: {e}");

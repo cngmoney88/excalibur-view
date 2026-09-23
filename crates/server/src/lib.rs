@@ -61,4 +61,4 @@ mod pinned {
     include!("../../hyperview/src/trust.rs");
 }
 
-pub use pinned::{HOME_CHANNEL, HOME_FEED, KEYS};
+pub use pinned::{HOME_CHANNEL, HOME_FEED, KEYS, LICENSE_FEED};
