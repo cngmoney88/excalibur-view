@@ -1,0 +1,46 @@
+# Every push is built and tested on both platforms this program ships for.
+#
+# It holds no secrets and needs none: nothing here signs anything and nothing
+# here publishes anything. It answers one question — does this still work on a
+# clean machine that has never seen the code before? — and puts a green tick or
+# a red cross on the commit, so a break is something you find out about rather
+# than something a customer tells you.
+
+name: Check
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: Windows
+          - os: macos-14
+            name: macOS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # The PDF engine is a third-party binary kept out of this repository. The
+      # build script says so and carries on, and every test that does not open
+      # a drawing still runs — which is all of them.
+      - name: The whole test suite
+        run: cargo test --workspace

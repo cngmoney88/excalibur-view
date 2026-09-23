@@ -1,0 +1,154 @@
+# Builds, signs and notarizes the Mac release, so that a Mac is not something
+# anybody has to sit in front of to put a version out.
+#
+# What this holds, and what it deliberately does not:
+#
+#   It has Apple's credentials — the Developer ID certificate and a notary
+#   key. Those say "this program came from Excalibur Construction
+#   Technologies" to macOS. If one ever leaked, Apple revokes it and issues
+#   another, and the damage is a few bad days.
+#
+#   It does NOT have the Excalibur signing key. That one says "this update is
+#   safe to install" to every copy of Excalibur View in the world, and every
+#   seat installs what it vouches for by itself. It cannot be revoked and it
+#   cannot be taken back. It lives on one computer and it is used there.
+#
+# So this produces an unsigned-by-us Mac build. The release is signed and
+# published from the machine that holds the key. See docs/RELEASING.md.
+
+name: Mac build
+
+on:
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: "Send it to Apple to be notarized"
+        type: boolean
+        default: true
+  push:
+    tags: ["v*"]
+
+# Never on a pull request. A pull request can come from anybody's fork and
+# would run their code with these credentials in reach.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mac-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust, for both kinds of Mac
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The PDF engine is a third-party binary and is not in this repository.
+      # The version is pinned by third_party/pdfium/embedded/VERSION, so this
+      # fetches exactly the build a release was tested against rather than
+      # whatever is newest today.
+      - name: The PDF engine
+        run: |
+          set -euo pipefail
+          build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"
+          echo "PDFium build $build"
+          api="https://api.github.com/repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F$build"
+          url="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api" \
+                 | grep -o 'https://[^"]*pdfium-mac-univ[^"]*' | head -1)"
+          if [ -z "$url" ]; then
+            echo "No universal macOS build of PDFium $build was found." >&2
+            exit 1
+          fi
+          echo "$url"
+          curl -fsSL "$url" -o pdfium.tgz
+          mkdir -p pdfium-unpacked
+          tar -xzf pdfium.tgz -C pdfium-unpacked
+          lib="$(find pdfium-unpacked -name 'libpdfium.dylib' | head -1)"
+          test -n "$lib" || { echo "no libpdfium.dylib in that archive" >&2; exit 1; }
+          cp "$lib" third_party/pdfium/embedded/libpdfium.dylib
+          lipo -info third_party/pdfium/embedded/libpdfium.dylib
+
+      - name: The whole test suite
+        run: cargo test --workspace
+
+      # Apple's certificate goes into a keychain made for this job and thrown
+      # away with the machine. Never the default keychain, and never a file
+      # left behind on disk.
+      - name: Apple's certificate
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/build.keychain"
+          password="$(openssl rand -base64 24)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/cert.p12"
+          # Lets codesign use the key without stopping to ask, which it cannot
+          # do on a machine with nobody in front of it.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "Identities in it:"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: The notary credentials
+        if: ${{ github.event_name == 'push' || inputs.notarize }}
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/notary.p8"
+          xcrun notarytool store-credentials excalibur-notary \
+            --key "$RUNNER_TEMP/notary.p8" \
+            --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER" \
+            --keychain "$RUNNER_TEMP/build.keychain"
+          rm -f "$RUNNER_TEMP/notary.p8"
+
+      - name: Build, sign, notarize
+        env:
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_PROFILE: excalibur-notary
+          NOTARY_KEYCHAIN: ${{ runner.temp }}/build.keychain
+        run: deploy/macos/build.sh
+
+      - name: What came out
+        id: files
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -lh target/macos/*.dmg target/macos/*.zip
+          shasum -a 256 target/macos/*.dmg target/macos/*.zip
+
+      # The two files the PC picks up. Named for the version, so there is never
+      # a question about which build somebody is publishing.
+      - name: Hand them over
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ steps.files.outputs.version }}
+          path: |
+            target/macos/*.dmg
+            target/macos/ExcaliburView-mac.zip
+          if-no-files-found: error
+          retention-days: 30
