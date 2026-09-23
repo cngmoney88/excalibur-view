@@ -81,6 +81,29 @@ def find_file(names, extra_dirs=()):
     return None
 
 
+def age_of(path):
+    """How old a file is, in words, so a stale one is obvious.
+
+    A Mac build carries no version inside it and keeps its name forever. The
+    one in Downloads might be the one made ten minutes ago or the one made
+    last Tuesday, and the difference is a release where Mac seats and Windows
+    seats run different programs under the same number.
+    """
+    import datetime
+    try:
+        when = datetime.datetime.fromtimestamp(os.path.getmtime(path))
+    except OSError:
+        return "Built: not known"
+    old = datetime.datetime.now() - when
+    if old < datetime.timedelta(hours=1):
+        how = f"{int(old.total_seconds() // 60)} minutes ago"
+    elif old < datetime.timedelta(days=1):
+        how = f"{int(old.total_seconds() // 3600)} hours ago"
+    else:
+        how = f"{old.days} days ago -- check this is the one you meant"
+    return f"Built {when:%d %b %H:%M}, {how}."
+
+
 def find_by_suffix(suffix, contains=""):
     """The newest file ending in `suffix`, searched one level deep so a folder
     dropped on the Desktop by the Mac is found without being unpacked."""
@@ -272,12 +295,19 @@ def main():
     mac_zip, mac_dmg = (None, None)
     if token:
         mac_zip, mac_dmg = mac_build_from_github(version, open(token).read().strip(), any_commit)
-    # Failing that, anything a Mac left lying about on this computer.
+    # Failing that, anything a Mac left lying about on this computer. This is
+    # the path when GitHub cannot build -- no minutes, no network, no account
+    # -- and somebody has sat in front of the Mac and run deploy/macos/build.sh
+    # themselves. It is also the path where a file from last week is easiest to
+    # ship by accident, so how old it is gets said out loud.
+    from_disk = False
     if not mac_zip:
         mac_zip = find_by_suffix("ExcaliburView-mac.zip")
         mac_dmg = find_by_suffix(".dmg", contains=version)
         if mac_zip:
+            from_disk = True
             say("  Using the Mac files found on this computer instead.")
+            say(f"  {age_of(mac_zip)}")
 
     say()
     say(bold(f"Excalibur View {version}"))
@@ -285,7 +315,7 @@ def main():
     say(f"  signing key    {shorten(key)}")
     say(f"  GitHub token   {shorten(token)}")
     say(f"  release notes  {shorten(notes)}")
-    say(f"  Mac update     {shorten(mac_zip)}")
+    say(f"  Mac update     {shorten(mac_zip)}{'  (from this computer)' if from_disk else ''}")
     say(f"  Mac download   {shorten(mac_dmg)}")
     say()
 
