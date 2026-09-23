@@ -762,6 +762,28 @@ fn an_office_holds_both_builds_and_hands_each_seat_its_own() {
     );
 }
 
+/// A release with the Windows build in it and nothing else, whatever kind of
+/// machine this test is running on.
+///
+/// `a_release` signs for `APP_PLATFORM`, and on a Mac that IS the Mac
+/// platform — so an "office with no Mac build" built that way quietly has
+/// one. The test below then passes on Linux and fails on a Mac, which is
+/// exactly what happened the first time these tests ran on one.
+fn a_windows_only_release(key: &SigningKey, version: &str) -> Listed {
+    let windows = format!("MZ pretend viewer {version}").into_bytes();
+    Listed {
+        tag: format!("v{version}"),
+        prerelease: false,
+        published: Published {
+            app: sign(key, version, Channel::Stable, WINDOWS, "ExcaliburView.exe", &windows),
+            apps: Vec::new(),
+            server: None,
+            servers: Vec::new(),
+        },
+        files: vec![("ExcaliburView.exe".to_string(), windows)],
+    }
+}
+
 /// A Mac that turns up in an office which has only ever held Windows builds
 /// is told there is nothing for it — not handed the Windows one, and not told
 /// it is up to date when it has never had a version at all.
@@ -769,7 +791,7 @@ fn an_office_holds_both_builds_and_hands_each_seat_its_own() {
 fn a_mac_in_an_office_with_no_mac_build_is_offered_nothing_rather_than_the_wrong_thing() {
     let office = an_office();
     let (key, trusted) = publisher();
-    let feed = a_feed(&office.runtime, vec![a_release(&key, "9.4.0", false)]);
+    let feed = a_feed(&office.runtime, vec![a_windows_only_release(&key, "9.4.0")]);
     assert_eq!(
         check_with(&office.server, &Feed::new(&feed), &trusted),
         Outcome::Offered("9.4.0".into())
@@ -778,6 +800,10 @@ fn a_mac_in_an_office_with_no_mac_build_is_offered_nothing_rather_than_the_wrong
     let seat = signed_in(&office, "est@mesafab.com", "camber-weld-joist-plate-19");
     let offer = seat.update_offer("0.6.3", Channel::Stable, MAC).unwrap();
     assert!(offer.release.is_none(), "a Mac was offered {:?}", offer.release);
+
+    // And the Windows seats in that same office are served as they always were.
+    let windows = seat.update_offer("0.6.3", Channel::Stable, WINDOWS).unwrap();
+    assert_eq!(windows.release.expect("the Windows seat").version, "9.4.0");
 }
 
 /// The release before the Mac existed, read by a server that knows about
