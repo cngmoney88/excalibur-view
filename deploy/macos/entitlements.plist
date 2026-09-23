@@ -10,8 +10,8 @@
     disable-library-validation: the program carries PDFium inside itself,
     writes it into Application Support the first time it is needed, and loads
     it from there. That library is not signed by us, and without this the
-    hardened runtime refuses to load it at all -- which looks, from the
-    outside, like a program that opens but cannot show a drawing.
+    hardened runtime refuses to load it at all, which looks from the outside
+    like a program that opens and cannot show a drawing.
 
     Deliberately NOT here: no camera, no microphone, no address book, no
     automation, no sandbox exceptions for arbitrary files. A notarized app

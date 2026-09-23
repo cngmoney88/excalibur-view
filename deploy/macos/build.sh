@@ -91,6 +91,17 @@ lipo -info "$app/Contents/MacOS/$name"
 
 # ---- 3. the bundle ----------------------------------------------------------
 say "Making the app bundle"
+# Checked before anything is signed, because codesign reads the entitlements
+# last and reports a bad one as "AMFIUnserializeXML: syntax error near line N"
+# after five minutes of building. Two hyphens in a row inside an XML comment
+# is enough to do it, and that is exactly how this was found.
+for plist in deploy/macos/Info.plist deploy/macos/entitlements.plist; do
+  plutil -lint "$plist" >/dev/null || {
+    echo "   $plist is not valid; nothing was signed." >&2
+    plutil -lint "$plist"
+    exit 1
+  }
+done
 sed "s/__VERSION__/$version/g" deploy/macos/Info.plist > "$app/Contents/Info.plist"
 printf 'APPL????' > "$app/Contents/PkgInfo"
 if [ -f deploy/macos/AppIcon.icns ]; then
