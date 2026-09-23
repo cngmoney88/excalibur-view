@@ -2,7 +2,7 @@
 
 ## The short version
 
-1. **github.com/cngmoney88/excalibur** → Actions → **Mac build** → Run workflow.
+1. **github.com/cngmoney88/excalibur-view** → Actions → **Mac build** → Run workflow.
 2. On the PC, double-click **Release Excalibur View**.
 3. Try it on one seat.
 4. Double-click **Give it to everyone**.
