@@ -116,13 +116,39 @@ def github(url, token, accept="application/vnd.github+json"):
     return urllib.request.urlopen(request, timeout=120)
 
 
-def mac_build_from_github(version, token):
+def commit_here():
+    """The commit this release is being cut from, or None if git will not say."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
+                             capture_output=True, text=True, timeout=30)
+        return out.stdout.strip() or None if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def commits_between(older, newer):
+    """The one-line log between two commits, for showing somebody what differs."""
+    try:
+        out = subprocess.run(["git", "log", "--oneline", f"{older}..{newer}"],
+                             cwd=ROOT, capture_output=True, text=True, timeout=30)
+        return [l for l in out.stdout.splitlines() if l.strip()] if out.returncode == 0 else []
+    except Exception:
+        return []
+
+
+def mac_build_from_github(version, token, any_commit=False):
     """Fetches the Mac build GitHub made for this version.
 
     A Mac is the only machine that can sign and notarize a Mac program, so
     GitHub keeps one for exactly that. What comes back is the same two files a
     Mac would have produced, and they are checked against the signing key here
     like anything else.
+
+    It must have been built from the commit being released. The Mac half and
+    the Windows half of a release are one program, and the only thing stopping
+    them being two different programs is this check: an artifact keeps its name
+    after the code has moved on, and "newest one called mac-0.6.4" will happily
+    hand over a build of last week's source.
 
     Returns (zip, dmg) as paths, or (None, None) with a reason printed.
     """
@@ -145,6 +171,26 @@ def mac_build_from_github(version, token):
         if names:
             say(f"  It has: {', '.join(names[:6])}")
         return None, None
+
+    here = commit_here()
+    if here and not any_commit:
+        matching = [a for a in mine
+                    if (a.get("workflow_run") or {}).get("head_sha") == here]
+        if not matching:
+            newest = max(mine, key=lambda a: a.get("created_at", ""))
+            made_from = (newest.get("workflow_run") or {}).get("head_sha") or "?"
+            say(f"  GitHub's Mac build for {version} was made from {made_from[:7]},")
+            say(f"  and this release is {here[:7]}. That is a different program.")
+            ahead = commits_between(made_from, here) if made_from != "?" else []
+            if ahead:
+                say(f"  {len(ahead)} commit(s) the Mac build has not got:")
+                for line in ahead[:8]:
+                    say(f"    {line}")
+                if len(ahead) > 8:
+                    say(f"    ...and {len(ahead) - 8} more")
+            say("  Run the Mac build workflow on this commit and then run this again.")
+            return None, None
+        mine = matching
 
     newest = max(mine, key=lambda a: a.get("created_at", ""))
     into = os.path.join(ROOT, "target", "mac-from-github")
@@ -190,6 +236,11 @@ def run(args):
 
 def main():
     promote = "--promote" in sys.argv[1:]
+    # For the case where the Mac build is a commit or two behind and every
+    # one of them is a note or a workflow. It has to be typed out, because
+    # the point of the check is that nobody talks themselves past it by
+    # accident.
+    any_commit = "--mac-from-any-commit" in sys.argv[1:]
 
     say()
     say(bold("   Excalibur View — publishing a release"))
@@ -220,7 +271,7 @@ def main():
     say(bold("Getting the Mac build"))
     mac_zip, mac_dmg = (None, None)
     if token:
-        mac_zip, mac_dmg = mac_build_from_github(version, open(token).read().strip())
+        mac_zip, mac_dmg = mac_build_from_github(version, open(token).read().strip(), any_commit)
     # Failing that, anything a Mac left lying about on this computer.
     if not mac_zip:
         mac_zip = find_by_suffix("ExcaliburView-mac.zip")
