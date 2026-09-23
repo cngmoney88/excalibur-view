@@ -1,8 +1,25 @@
 # Releasing Hyperview
 
-**Distribution is on hold.** Updates will be handled by a fleet management app
-rather than by a public release feed, so nothing here builds or publishes
-anything yet.
+## The short version
+
+1. **github.com/cngmoney88/excalibur** → Actions → **Mac build** → Run workflow.
+2. On the PC, double-click **Release Excalibur View**.
+3. Try it on one seat.
+4. Double-click **Give it to everyone**.
+
+That is the whole job. The rest of this file is what those four steps are
+doing and why, for whoever has to change one of them later.
+
+The shape of it: **GitHub builds and notarizes the Mac, because Apple's
+credentials can be revoked and reissued. The PC signs and publishes, because
+`hyperview-signing.key` cannot.** That key says "this update is safe to
+install" to every copy of Excalibur View in the world, and every seat installs
+what it vouches for by itself. It lives on one computer and it is used there.
+
+Setting the Mac half up for the first time: `docs/SETUP-THE-MAC-BUILD.md`.
+
+
+
 
 What is built, and stays built whatever ships the bytes, is the part that makes
 an update safe to install: a signed manifest, and a seat that checks it against

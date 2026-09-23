@@ -1,0 +1,39 @@
+The Mac version — and the first public release since 0.6.1, so this carries
+0.6.2 and 0.6.3 with it.
+
+## It runs on a Mac
+
+One download, signed and notarized by Apple, running natively on Apple Silicon
+and Intel. Not a viewer, not a browser tab, not a cut-down edition: the same
+program as the Windows one, built from the same source. Open the disk image,
+drag Excalibur View into Applications, and open it from there.
+
+Macs keep themselves up to date the same way Windows machines do. An office
+server holds both builds and hands each seat its own, so a shop with Macs and
+PCs in it is still one server and one set of drawings.
+
+Needs macOS 11 Big Sur or later.
+
+## Excalibur View Sealed
+
+For offices that are not allowed to let a program reach the internet at all.
+A Sealed copy talks to its own office server and nothing else — every outward
+connection is refused, not merely switched off, and no setting inside the
+program can turn it back on. Administrators set it through Group Policy on
+Windows or a managed preference on a Mac, and policy outranks the licence:
+a computer sealed by its administrator stays sealed.
+
+Sealed offices keep an append-only record of who did what, exportable as CSV
+for an auditor.
+
+## Also in this release
+
+- Claude works in the free app, not only in Office (0.6.2).
+- The website's download links and checksums come off the release itself, so
+  they are never out of date (0.6.2).
+- Licence rules finished: seats, expiry and what happens when a licence runs
+  out are all settled the same way everywhere (0.6.2).
+- Markup text no longer sits over the sheet by default (0.6.3).
+- Staying signed in to Studio, with the signed-in account shown in the top bar.
+- Updates now carry more than one platform in a single release, and a signature
+  over one platform's build can never be passed off as another's.

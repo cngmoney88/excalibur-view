@@ -26,6 +26,10 @@
 # Set these two, or pass them in the environment:
 : "${SIGN_IDENTITY:=Developer ID Application: Creede Guardamondo (C27WQYHJXB)}"
 : "${NOTARY_PROFILE:=excalibur-notary}"
+# Where the notary profile is stored. Empty means the login keychain, which is
+# right on a Mac somebody is sitting at. A build on a machine with nobody in
+# front of it makes a keychain of its own and points this at it.
+: "${NOTARY_KEYCHAIN:=}"
 
 set -euo pipefail
 
@@ -121,7 +125,9 @@ codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
 
 # ---- 6. notarize ------------------------------------------------------------
 say "Sending it to Apple to be notarized (this takes a few minutes)"
-xcrun notarytool submit "$dmg" --keychain-profile "$NOTARY_PROFILE" --wait
+notary_args=(--keychain-profile "$NOTARY_PROFILE")
+[ -n "$NOTARY_KEYCHAIN" ] && notary_args+=(--keychain "$NOTARY_KEYCHAIN")
+xcrun notarytool submit "$dmg" "${notary_args[@]}" --wait
 
 say "Stapling, so it opens even on a Mac that is offline"
 # The disk image, for whoever downloads it. And the program inside it
