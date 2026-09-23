@@ -79,6 +79,12 @@ SERVER_FILE = "ExcaliburView-Server.exe"
 # and it is the one the manifest names, because the manifest is read by the
 # updater and not by a person.
 MAC_FILE = "ExcaliburView-mac.zip"
+# The disk image is not in the manifest -- nothing updates to it, a person
+# downloads it -- so it is the one file whose name nothing else decides. It
+# gets a fixed one anyway, for the same reason the programs have fixed ones:
+# the website looks every asset up by name, and a name with a version in it
+# is a name that has to be edited every release or the download disappears.
+MAC_DMG_FILE = "ExcaliburView-mac.dmg"
 MAC_DISK_IMAGE = "ExcaliburView-mac.dmg"
 FILES = {APP_PLATFORM: APP_FILE, SERVER_PLATFORM: SERVER_FILE, MAC_PLATFORM: MAC_FILE}
 MANIFEST = "release.json"
@@ -504,7 +510,12 @@ def cmd_upload(a):
     # program into Applications, while the updater takes the zip that the
     # manifest names. It is on the release because the website links to it.
     for path in getattr(a, "extra", None) or []:
-        uploads.append((path, os.path.basename(path)))
+        # Under a fixed name, not the one it happens to have on disk. The Mac
+        # build writes ExcaliburView-<version>.dmg, and 0.6.4 went up under
+        # that name and the website's Mac card stayed hidden, because it looks
+        # for an exact name and every other asset has a version-free one.
+        name = MAC_DMG_FILE if path.lower().endswith(".dmg") else os.path.basename(path)
+        uploads.append((path, name))
 
     release = gh.release(tag)
     if release is None:
