@@ -34,6 +34,8 @@ pub struct Properties {
     pub bytes: u64,
     pub version: String,
     pub encrypted: bool,
+    /// Which lock, when it has one and it is open.
+    pub lock: Option<pdf::opening::Lock>,
     /// Every sheet size in the set, largest first, with how many there are.
     pub sizes: Vec<(String, usize)>,
     pub markups: usize,
@@ -163,6 +165,7 @@ impl App {
             bytes: std::fs::metadata(&doc.path).map(|m| m.len()).unwrap_or(0),
             version: file.version(),
             encrypted: file.encrypted,
+            lock: doc.locked,
             sizes,
             markups: doc.live().count(),
             error: None,
@@ -302,14 +305,28 @@ impl App {
                                 showing.about.changed.clone()
                             },
                         );
+                        // The whole truth about the lock, because the
+                        // difference between AES-256 and RC4 is the difference
+                        // between a set that is safe to send and one that only
+                        // looks it — and nobody can tell by looking.
                         row(
                             "Security",
-                            if showing.encrypted {
-                                "This file is encrypted.".into()
-                            } else {
-                                "None — anybody can open it.".into()
+                            match showing.lock {
+                                Some(lock) => lock.in_words().to_string(),
+                                None if showing.encrypted => {
+                                    "Locked, and not opened.".to_string()
+                                }
+                                None => "None — anybody can open it.".to_string(),
                             },
                         );
+                        if matches!(showing.lock, Some(lock) if lock.weak()) {
+                            row(
+                                "",
+                                "Anybody determined can get into this file. Lock a \
+                                 copy with Document → Security to put a real one on it."
+                                    .to_string(),
+                            );
+                        }
                     });
 
                 if let Some(why) = &showing.error {

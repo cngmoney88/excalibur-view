@@ -13,9 +13,19 @@ use crate::xref::{self, Slot, XRef};
 pub struct Document {
     pub bytes: Vec<u8>,
     pub xref: XRef,
-    /// True when the file declares an /Encrypt dictionary. Strings and streams
-    /// in such a file are scrambled; Hyperview says so rather than showing rubbish.
+    /// True when the file declares an /Encrypt dictionary. Until [`unlock`]
+    /// has been given the right password, every string and stream in it is
+    /// ciphertext, and Hyperview says so rather than showing rubbish.
+    ///
+    /// [`unlock`]: Document::unlock
     pub encrypted: bool,
+    /// Set once a password has opened the file. From then on every object is
+    /// put back the way it was written as it is read.
+    crypt: Option<crate::opening::Opened>,
+    /// Which object holds `/Encrypt`. That one is never itself encrypted --
+    /// it is what tells a reader how to decrypt everything else -- so it is
+    /// the one object that has to be left alone.
+    encrypt_object: Option<u32>,
     objects: RefCell<HashMap<u32, Rc<Object>>>,
     bundles: RefCell<HashMap<u32, Rc<Bundle>>>,
     pages: RefCell<Option<Rc<Vec<Ref>>>>,
@@ -36,14 +46,83 @@ impl Document {
     pub fn from_bytes(bytes: Vec<u8>) -> Document {
         let xref = xref::load(&bytes);
         let encrypted = xref.trailer.has("Encrypt");
+        let encrypt_object = xref.trailer.get("Encrypt").and_then(|o| o.as_ref()).map(|r| r.number);
         Document {
             bytes,
             xref,
             encrypted,
+            crypt: None,
+            encrypt_object,
             objects: RefCell::new(HashMap::new()),
             bundles: RefCell::new(HashMap::new()),
             pages: RefCell::new(None),
         }
+    }
+
+    /// Opens a locked file with a password, or says it is the wrong one.
+    ///
+    /// Both the user's password and the owner's are tried. Either opens the
+    /// file; the difference between them is only what the file *asks* a reader
+    /// to allow, and that was never enforcement -- see [`crate::crypt`].
+    ///
+    /// Anything already read was read as ciphertext, so it is all thrown away
+    /// and read again.
+    pub fn unlock(&mut self, password: &str) -> bool {
+        if !self.encrypted {
+            // Nothing to open. Saying yes is right: the caller asked for a
+            // readable document and has one.
+            return true;
+        }
+        if self.crypt.is_some() {
+            return true;
+        }
+        let Some(encrypt) = self.xref.trailer.get("Encrypt").cloned() else {
+            return false;
+        };
+        let encrypt = match self.follow(&encrypt).as_dict() {
+            Some(dict) => dict.clone(),
+            None => return false,
+        };
+        // The first half of the trailer's /ID goes into the key for every
+        // handler before revision 5. It is not encrypted and never was.
+        let id = self
+            .xref
+            .trailer
+            .get("ID")
+            .and_then(|o| o.as_array())
+            .and_then(|a| a.first())
+            .and_then(|o| o.as_bytes())
+            .map(|b| b.to_vec())
+            .unwrap_or_default();
+        let Some(opened) = crate::opening::open(&encrypt, &id, password) else {
+            return false;
+        };
+        self.crypt = Some(opened);
+        self.objects.borrow_mut().clear();
+        self.bundles.borrow_mut().clear();
+        *self.pages.borrow_mut() = None;
+        true
+    }
+
+    /// Which lock the file uses, once a password has opened it.
+    ///
+    /// [`crate::opening::Lock::weak`] is the part worth putting on screen: most
+    /// locked drawings in circulation are held shut with something that has
+    /// not been real protection since the nineties.
+    pub fn lock(&self) -> Option<crate::opening::Lock> {
+        self.crypt.as_ref().map(|c| c.lock)
+    }
+
+    /// True when the file is locked and no password has opened it yet. Every
+    /// string and stream read in this state is ciphertext.
+    pub fn still_locked(&self) -> bool {
+        self.encrypted && self.crypt.is_none()
+    }
+
+    /// What the file asks a reader to allow, once opened. A request, not a
+    /// lock.
+    pub fn allowed(&self) -> Option<crate::crypt::Allowed> {
+        self.crypt.as_ref().map(|c| c.allowed)
     }
 
     /// The version from the header, and from the catalog if it overrides it.
@@ -76,16 +155,32 @@ impl Document {
     fn load(&self, reference: Ref) -> Object {
         match self.xref.slots.get(&reference.number).copied() {
             Some(Slot::InFile { offset, .. }) => {
-                match Reader::at(&self.bytes, offset).indirect() {
+                let object = match Reader::at(&self.bytes, offset).indirect() {
                     // The object at that offset must be the one asked for;
                     // a file with shifted offsets otherwise returns a stranger.
                     Ok((found, object)) if found.number == reference.number => object,
                     _ => self.hunt(reference),
-                }
+                };
+                self.unscramble(reference, object)
             }
+            // Objects packed into an object stream are *not* decrypted here.
+            // The stream that holds them was decrypted as a whole when it was
+            // read, so what comes out of it is already plain; running it
+            // through again would turn readable text into rubbish.
             Some(Slot::InStream { stream, index }) => self.from_bundle(stream, index, reference),
             _ => Object::Null,
         }
+    }
+
+    /// One object as it was before the file was locked, when a password has
+    /// opened it, and untouched otherwise.
+    fn unscramble(&self, reference: Ref, mut object: Object) -> Object {
+        let Some(crypt) = &self.crypt else { return object };
+        if Some(reference.number) == self.encrypt_object {
+            return object;
+        }
+        crypt.object(reference.number, reference.generation, &mut object);
+        object
     }
 
     /// Last resort for one object whose offset is wrong: scan for its header.
@@ -138,7 +233,10 @@ impl Document {
         let Some(Slot::InFile { offset, .. }) = self.xref.slots.get(&number).copied() else {
             return None;
         };
-        let (_, object) = Reader::at(&self.bytes, offset).indirect().ok()?;
+        let (found, object) = Reader::at(&self.bytes, offset).indirect().ok()?;
+        // Read from the bytes rather than through `get`, so nothing has
+        // decrypted it yet -- and it has to be, before the filters see it.
+        let object = self.unscramble(found, object);
         let stream = object.as_stream()?;
         let data = filters::decode(stream).ok()?;
         let count = stream.dict.get("N").and_then(|o| o.as_i64()).unwrap_or(0).max(0) as usize;

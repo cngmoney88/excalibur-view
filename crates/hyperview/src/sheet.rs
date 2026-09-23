@@ -480,6 +480,14 @@ pub struct Doc {
     pub drawing: annot::appearance::Draw,
     /// The file cannot be written. Known at open time, not at save time.
     pub read_only: bool,
+    /// The lock on the file, when it has one and a password opened it.
+    ///
+    /// A locked set is read-only for now. Excalibur View can open one and can
+    /// write one, but it cannot yet write *into* one: new markups would go in
+    /// as plain text behind a file that says everything in it is encrypted,
+    /// and the result is a drawing set no reader can open. Refusing is the
+    /// only honest thing to do until saving locks the new objects too.
+    pub locked: Option<pdf::opening::Lock>,
     /// The file on disk as this copy last read or wrote it. Anything else at
     /// save time means somebody else saved it in the meantime.
     pub on_disk: Option<Stamp>,
@@ -525,16 +533,65 @@ pub struct Pane {
     pub view: View,
 }
 
+/// Why a drawing would not open.
+pub enum Shut {
+    /// It is locked, and the password typed was not the right one — or none
+    /// was typed yet. Carries the file's name, for the box that asks.
+    WantsPassword(String),
+    /// Anything else, in words somebody can act on.
+    Trouble(String),
+}
+
 impl Doc {
     /// Opens a drawing set at object level: the pages, their frames and every
     /// markup already in the file. No screen state, so this is the path a test
     /// or a batch job takes as well as the viewer.
+    /// Why this drawing cannot be written to, in a sentence somebody can act
+    /// on. Only meaningful when `read_only`.
+    pub fn why_read_only(&self) -> String {
+        match self.locked {
+            Some(lock) if lock.weak() => format!(
+                "This drawing set is locked ({}), and Excalibur View cannot yet save \
+                 into a locked file. Use File \u{2192} Save a Copy, and lock the copy \
+                 with Document \u{2192} Security.",
+                lock.in_words()
+            ),
+            Some(_) => "This drawing set is locked with a password, and Excalibur View \
+                        cannot yet save into a locked file. Use File \u{2192} Save a Copy, \
+                        and lock the copy with Document \u{2192} Security."
+                .into(),
+            None => "This file cannot be written to. Save a copy somewhere you can \
+                     write and change that."
+                .into(),
+        }
+    }
+
     pub fn open(path: PathBuf) -> Result<Doc, String> {
+        Doc::open_with(path, "").map_err(|shut| match shut {
+            Shut::WantsPassword(name) => format!("{name} is locked. It needs its password."),
+            Shut::Trouble(why) => why,
+        })
+    }
+
+    /// The same, with a password for a locked set. `""` for the ordinary case
+    /// — which also opens a file whose only password is the owner's, since
+    /// that is what an empty user password means.
+    pub fn open_with(path: PathBuf, password: &str) -> Result<Doc, Shut> {
         let on_disk = stamp(&path);
-        let file = pdf::Document::open(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let read_only = std::fs::metadata(&path)
-            .map(|m| m.permissions().readonly())
-            .unwrap_or(false);
+        let mut file = pdf::Document::open(&path)
+            .map_err(|e| Shut::Trouble(format!("{}: {e}", path.display())))?;
+        if file.encrypted && !file.unlock(password) {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            return Err(Shut::WantsPassword(name));
+        }
+        let locked = file.lock();
+        let read_only = locked.is_some()
+            || std::fs::metadata(&path)
+                .map(|m| m.permissions().readonly())
+                .unwrap_or(false);
         let count = file.page_count();
         let mut pages = Vec::with_capacity(count);
         let mut frames = Vec::with_capacity(count);
@@ -589,6 +646,7 @@ impl Doc {
             labelled: 0,
             drawing: annot::appearance::Draw::default(),
             read_only,
+            locked,
             on_disk,
             attached: None,
             split: Split::None,

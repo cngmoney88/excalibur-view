@@ -13,7 +13,7 @@ fn main() {
     );
     let ctx = egui::Context::default();
     let svc = Service::start(Some(lib), ctx);
-    svc.send(ToWorker::Open { doc: 1, path });
+    svc.send(ToWorker::Open { doc: 1, path, password: String::new() });
 
     let mut pages: Vec<PageSize> = Vec::new();
     let page: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);

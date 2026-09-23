@@ -12,6 +12,7 @@ pub mod crypt;
 pub mod filters;
 pub mod repair;
 pub mod object;
+pub mod opening;
 pub mod parse;
 pub mod text;
 pub mod write;

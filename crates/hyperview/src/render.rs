@@ -105,7 +105,13 @@ impl SheetLabel {
 pub enum ToWorker {
     /// Open a drawing under an id the window chose. Opening the same id again
     /// replaces what was there.
-    Open { doc: u64, path: PathBuf },
+    Open {
+        doc: u64,
+        path: PathBuf,
+        /// For a locked set. Empty for the ordinary case, which is also what
+        /// opens a file whose only password is the owner's.
+        password: String,
+    },
     /// Let go of one. Six sets open at once is a lot of mapped file.
     Close(u64),
     /// The complete set of tiles the view wants right now, most important first.
@@ -290,6 +296,9 @@ pub enum FromWorker {
     OpenFailed {
         doc: u64,
         why: String,
+        /// True when the only thing wrong is that nobody has typed the
+        /// password yet — the one failure the window can do something about.
+        wants_password: bool,
     },
     Tile {
         key: TileKey,
@@ -1071,7 +1080,7 @@ fn helper(library: PathBuf, board: Board, tx: Sender<FromWorker>, ctx: egui::Con
     let mut have: HashMap<u64, u64> = HashMap::new();
     while let Some((key, path, generation)) = board.wait_for_work() {
         if have.get(&key.doc) != Some(&generation) {
-            match engine.open(key.doc, &path) {
+            match engine.open(key.doc, &path, "") {
                 Ok(_) => {
                     have.insert(key.doc, generation);
                 }
@@ -1220,13 +1229,13 @@ impl Queue {
         ctx: &egui::Context,
     ) {
         match msg {
-            ToWorker::Open { doc, path } => {
+            ToWorker::Open { doc, path, password } => {
                 // Work queued for a drawing that is being replaced is dropped;
                 // work for the other open tabs is not, because switching tabs
                 // must not throw away what the last one was drawing.
                 self.forget(doc);
                 let started = Instant::now();
-                match engine.open(doc, &path) {
+                match engine.open(doc, &path, &password) {
                     Ok(pages) => {
                         self.board.opened(doc, &path);
                         let _ = tx.send(FromWorker::Opened {
@@ -1237,7 +1246,12 @@ impl Queue {
                         });
                     }
                     Err(why) => {
-                        let _ = tx.send(FromWorker::OpenFailed { doc, why });
+                        let wants_password = why.wants_password;
+                        let _ = tx.send(FromWorker::OpenFailed {
+                            doc,
+                            why: why.said,
+                            wants_password,
+                        });
                     }
                 }
                 ctx.request_repaint();
@@ -1264,7 +1278,7 @@ impl Queue {
                 let started = (|| {
                     let draw = crate::winprint::render_to_dc(BOUND.get().map(|p| p.as_path()))
                         .ok_or("this copy of the PDF engine cannot draw onto a printer")?;
-                    let sizes = engine.open(doc, &path)?;
+                    let sizes = engine.open(doc, &path, "")?;
                     let run = crate::winprint::Job::start(&printer, &settings, &title)?;
                     Ok::<_, String>((sizes.len() as u32, run, draw))
                 })();
@@ -2179,6 +2193,31 @@ struct Engine {
     forms: Vec<(FPDF_DOCUMENT, FPDF_FORMHANDLE, Box<FPDF_FORMFILLINFO>)>,
     /// The form environment for whatever is being drawn right now.
     drawing_form: Option<FPDF_FORMHANDLE>,
+    /// Passwords typed this session, by file. Held here and nowhere else: not
+    /// written to disk, not in the preferences, gone when the program closes.
+    /// Kept at all because a drawing dropped from the list above is opened
+    /// again behind the scenes, and asking somebody for the same password a
+    /// second time because the program forgot is not acceptable.
+    passwords: Vec<(PathBuf, String)>,
+}
+
+/// What went wrong opening a drawing.
+pub struct Trouble {
+    pub said: String,
+    /// True when a password is all that is missing.
+    pub wants_password: bool,
+}
+
+impl From<String> for Trouble {
+    fn from(said: String) -> Trouble {
+        Trouble { said, wants_password: false }
+    }
+}
+
+impl From<Trouble> for String {
+    fn from(trouble: Trouble) -> String {
+        trouble.said
+    }
 }
 
 impl Engine {
@@ -2189,6 +2228,7 @@ impl Engine {
             known: Vec::new(),
             forms: Vec::new(),
             drawing_form: None,
+            passwords: Vec::new(),
         }
     }
 
@@ -2500,7 +2540,7 @@ impl Engine {
         let draw = crate::winprint::render_to_dc(BOUND.get().map(|p| p.as_path()))
             .ok_or("This copy of the PDF engine cannot draw onto a printer.")?;
         let id = PRINT_DOC - 1;
-        let sizes = self.open(id, source)?;
+        let sizes = self.open(id, source, "")?;
         let title = nice(source);
         let printed = (|| {
             let mut run = crate::winprint::Job::start(&printer, &settings, &title)?;
@@ -2567,12 +2607,25 @@ impl Engine {
         drop(one);
     }
 
-    fn open(&mut self, id: u64, path: &std::path::Path) -> Result<Vec<PageSize>, String> {
+    fn open(&mut self, id: u64, path: &std::path::Path, password: &str) -> Result<Vec<PageSize>, Trouble> {
         // Opening the same id again replaces what was there, which is what
         // happens when a drawing is saved and reopened.
         self.close_one(id);
         self.known.push((id, path.to_path_buf()));
+        if !password.is_empty() {
+            self.passwords.retain(|(p, _)| p != path);
+            self.passwords.push((path.to_path_buf(), password.to_string()));
+        }
         self.load(id, path)
+    }
+
+    /// The password typed for this file, if one was.
+    fn password_for(&self, path: &std::path::Path) -> String {
+        self.passwords
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, w)| w.clone())
+            .unwrap_or_default()
     }
 
     /// Pulls chosen sheets out into a file of their own.
@@ -5593,24 +5646,41 @@ impl Engine {
         Ok(out)
     }
 
-    fn load(&mut self, id: u64, path: &std::path::Path) -> Result<Vec<PageSize>, String> {
+    fn load(&mut self, id: u64, path: &std::path::Path) -> Result<Vec<PageSize>, Trouble> {
         while self.open.len() >= OPEN_DOCUMENTS {
             let oldest = self.open.remove(0);
             self.let_go(oldest);
         }
-        let map = held::bytes(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let password = self.password_for(path);
+        let map = held::bytes(path).map_err(|e| Trouble::from(format!("{}: {e}", path.display())))?;
         // Pdfium keeps this pointer for the life of the document; the bytes
         // are held in `self.map` and only dropped in `close`. An Arc'd Vec
         // does not move its buffer, so the pointer stays good.
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(map.as_ptr(), map.len()) };
-        let doc = unsafe { self.bindings.FPDF_LoadMemDocument64(bytes, None) };
+        let doc = unsafe {
+            self.bindings.FPDF_LoadMemDocument64(
+                bytes,
+                if password.is_empty() { None } else { Some(&password) },
+            )
+        };
         if doc.is_null() {
             let code = unsafe { self.bindings.FPDF_GetLastError() };
             return Err(match code {
-                1 => "this file is not a PDF".to_string(),
-                2 => "the file is damaged and pdfium could not repair it".to_string(),
-                3 | 4 => "the file is password protected".to_string(),
-                _ => format!("pdfium could not open the file (error {code})"),
+                1 => Trouble::from("this file is not a PDF".to_string()),
+                2 => Trouble::from(
+                    "the file is damaged and pdfium could not repair it".to_string(),
+                ),
+                // 3 and 4 are both "no" to a password: 3 when none was given,
+                // 4 when the one given was wrong. Either way the window asks.
+                3 | 4 => Trouble {
+                    said: if password.is_empty() {
+                        "this drawing set is locked".to_string()
+                    } else {
+                        "that password was not accepted".to_string()
+                    },
+                    wants_password: true,
+                },
+                _ => Trouble::from(format!("pdfium could not open the file (error {code})")),
             });
         }
         let count = unsafe { self.bindings.FPDF_GetPageCount(doc) }.max(0) as u32;
