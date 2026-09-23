@@ -29,7 +29,7 @@ fn main() {
         [at[0], at[1], at[0] + cell[0], at[1] + cell[1]]
     };
 
-    let mut put = |placer: &mut annot::place::Placer, mut m: annot::Markup, label: &str, area: [f64; 4]| {
+    let put = |placer: &mut annot::place::Placer, mut m: annot::Markup, label: &str, area: [f64; 4]| {
         placer.add(0, &mut m);
         let mut tag = annot::Markup::new(annot::Subtype::FreeText);
         tag.set_box([area[0], area[1] - 26.0, area[2], area[1] - 4.0]);

@@ -419,7 +419,7 @@ fn a_sheet_with(to: &Path, extra: &str) {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n");
     let mut offsets: Vec<usize> = Vec::new();
-    let mut add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
+    let add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
         offsets.push(out.len());
         out.extend_from_slice(body.as_bytes());
     };
@@ -527,7 +527,7 @@ fn a_different_sheet(to: &Path) {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n");
     let mut offsets: Vec<usize> = Vec::new();
-    let mut add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
+    let add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
         offsets.push(out.len());
         out.extend_from_slice(body.as_bytes());
     };
@@ -769,7 +769,7 @@ fn a_scanned_sheet(to: &Path, word: &str) {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n");
     let mut offsets: Vec<usize> = Vec::new();
-    let mut add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
+    let add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: &str| {
         offsets.push(out.len());
         out.extend_from_slice(body.as_bytes());
     };
@@ -1090,7 +1090,7 @@ fn a_set_with(to: &Path, extras: &[&str]) {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(b"%PDF-1.7\n");
     let mut offsets: Vec<usize> = Vec::new();
-    let mut add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: String| {
+    let add = |out: &mut Vec<u8>, offsets: &mut Vec<usize>, body: String| {
         offsets.push(out.len());
         out.extend_from_slice(body.as_bytes());
     };

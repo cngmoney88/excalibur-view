@@ -236,6 +236,12 @@ fn policy_seals_this_machine() -> bool {
 
 /// Whether a preferences file sets `Sealed` to something true.
 ///
+/// Only a Mac has managed preferences, so this is only compiled there. What
+/// it does with the bytes once it has them is `sealed_in_plist`, which is
+/// compiled and tested everywhere -- the part worth checking does not need a
+/// Mac to check it on.
+#[cfg(target_os = "macos")]
+///
 /// Reads both shapes a plist comes in: the XML one, and the binary one the
 /// system writes. The binary reader is deliberately simple — it looks for the
 /// key and the boolean beside it rather than parsing the whole format —
@@ -251,6 +257,7 @@ fn plist_says_sealed(path: &str) -> bool {
 
 /// The same question, asked of bytes rather than a path, so it can be tested
 /// without a Mac.
+#[cfg(any(target_os = "macos", test))]
 fn sealed_in_plist(bytes: &[u8]) -> bool {
     if bytes.starts_with(b"bplist00") {
         // In a binary plist a boolean is a one-byte marker: 0x08 false,
@@ -273,6 +280,7 @@ fn sealed_in_plist(bytes: &[u8]) -> bool {
             .unwrap_or(false)
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
