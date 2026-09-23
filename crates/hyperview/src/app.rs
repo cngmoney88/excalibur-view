@@ -1381,6 +1381,102 @@ pub fn whoami() -> String {
 }
 
 /// Turns a shortcut's key name into the key egui reports.
+/// Whether the keys belong to a text field rather than to the drawing.
+///
+/// This used to ask `wants_keyboard_input`, which is a different and much
+/// wider question: it is true whenever *anything* holds keyboard focus, and
+/// a button keeps focus after it is clicked. So pressing a tool in the
+/// toolbar, or any button in any panel, switched off every shortcut in the
+/// program until somebody happened to click the sheet again -- copy, paste,
+/// save, delete, the arrow keys, page up and down, find, every tool letter.
+/// Nothing said so, which is why it read as shortcuts that were never wired
+/// up rather than as shortcuts that had been turned off.
+///
+/// The narrow question is the right one: is the thing with focus a text
+/// field? Only a text field keeps `TextEditState` under its id, so this asks
+/// for it and believes the answer. While somebody is typing, Ctrl+C copies
+/// their text and Delete deletes a character, which is what they mean; the
+/// moment they leave the field the drawing has the keys back.
+fn somebody_is_typing(ctx: &egui::Context) -> bool {
+    let Some(focused) = ctx.memory(|m| m.focused()) else {
+        return false;
+    };
+    egui::TextEdit::load_state(ctx, focused).is_some()
+}
+
+#[cfg(test)]
+mod the_keys_belong_to_the_drawing {
+    //! A button that has been clicked must not take the keyboard with it.
+    //!
+    //! This is the whole of a bug that made the program look like it had no
+    //! shortcuts at all. It is checked against a real egui context rather
+    //! than reasoned about, because the thing that was wrong was an
+    //! assumption about what egui means by "wants keyboard input".
+
+    use super::somebody_is_typing;
+
+    /// Runs one pass over a context, laying out whatever `build` puts in it.
+    ///
+    /// `run` takes an `FnMut` because a pass can be repeated, so the closure
+    /// inside it cannot consume anything. `build` is therefore an `FnMut`
+    /// too, and the id it reports comes back through a cell rather than a
+    /// return value.
+    fn a_pass(ctx: &egui::Context, mut build: impl FnMut(&mut egui::Ui)) {
+        ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, &mut build);
+        });
+    }
+
+    #[test]
+    fn a_button_holding_focus_does_not_take_the_keyboard() {
+        let ctx = egui::Context::default();
+        let mut id = None;
+        a_pass(&ctx, |ui| {
+            let button = ui.button("Length");
+            button.request_focus();
+            id = Some(button.id);
+        });
+        // Focus is settled on the next pass, the way it is in the program.
+        a_pass(&ctx, |ui| {
+            ui.button("Length");
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), id, "the button should have focus");
+        assert!(
+            !somebody_is_typing(&ctx),
+            "a focused button means somebody clicked a tool, not that they are typing"
+        );
+    }
+
+    #[test]
+    fn a_text_field_holding_focus_does_take_the_keyboard() {
+        let ctx = egui::Context::default();
+        let mut typed = String::new();
+        let mut id = None;
+        a_pass(&ctx, |ui| {
+            let field = ui.text_edit_singleline(&mut typed);
+            field.request_focus();
+            id = Some(field.id);
+        });
+        a_pass(&ctx, |ui| {
+            ui.text_edit_singleline(&mut typed);
+        });
+        assert_eq!(ctx.memory(|m| m.focused()), id, "the field should have focus");
+        assert!(
+            somebody_is_typing(&ctx),
+            "Ctrl+C in a field somebody is typing in belongs to the field"
+        );
+    }
+
+    #[test]
+    fn with_nothing_focused_the_drawing_has_the_keys() {
+        let ctx = egui::Context::default();
+        a_pass(&ctx, |ui| {
+            ui.label("a sheet");
+        });
+        assert!(!somebody_is_typing(&ctx));
+    }
+}
+
 fn key_named(name: &str) -> Option<egui::Key> {
     use egui::Key;
     Some(match name {
@@ -1848,7 +1944,7 @@ impl App {
     }
 
     fn keyboard(&mut self, ctx: &egui::Context) {
-        if ctx.wants_keyboard_input() {
+        if somebody_is_typing(ctx) {
             return;
         }
         let (keys, ctrl, shift, alt) = ctx.input(|i| {
