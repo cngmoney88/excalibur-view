@@ -8,6 +8,10 @@ and Intel. Not a viewer, not a browser tab, not a cut-down edition: the same
 program as the Windows one, built from the same source. Open the disk image,
 drag Excalibur View into Applications, and open it from there.
 
+Bluebeam stopped making Revu for Mac in 2019 and ended it in 2023. As far as we
+know this is the only full desktop takeoff and markup program that runs
+natively on both Windows and Mac.
+
 Macs keep themselves up to date the same way Windows machines do. An office
 server holds both builds and hands each seat its own, so a shop with Macs and
 PCs in it is still one server and one set of drawings.
@@ -25,6 +29,45 @@ a computer sealed by its administrator stays sealed.
 
 Sealed offices keep an append-only record of who did what, exportable as CSV
 for an auditor.
+
+## A shop can take somebody's access away
+
+Until now the only way to deal with somebody leaving was to change the join
+code, which does nothing to the account they already have or the session they
+are already in. An administrator can now change a person's role, remove them
+outright, and sign a seat out for real.
+
+All three take effect on the next thing that seat asks the server, not the
+next time it signs in — there is no window where a removed account still
+works. Removing somebody takes their keys with them.
+
+What they made stays. A markup carries its author's name and a set carries who
+uploaded it, written down as text rather than pointing at an account, so a
+takeoff does not lose its history because somebody left the company.
+
+Every one of these — adding a person, changing a role, removing one, signing a
+seat out, revoking a key, exporting a takeoff — goes into the record the
+server keeps, with who did it and when.
+
+## Licences that renew themselves
+
+Buying three more seats used to mean waiting on a file to be signed and
+emailed over. A server now fetches its own renewal on the same half-hourly
+trip it already makes to look for updates, so more seats, or another year, are
+in place inside the hour with nobody sending anybody anything.
+
+Nothing about that trip decides a licence is good. What comes back is checked
+against the keys built into the server, the same way an update is, and then
+checked against the licence already held: one that gives fewer seats, ends
+sooner, or belongs to somebody else is thrown away and the old one kept.
+
+## The trade chests
+
+Six chests — structural steel, concrete, general contractor, plumbing,
+electrical, mechanical — $149 each, or $499 for all six. Priced per company,
+not per seat: a chest is a file, and charging a shop twice because two
+estimators opened the same one is the kind of thing that makes people hate
+software.
 
 ## Also in this release
 

@@ -59,20 +59,18 @@ jobs:
       # The version is pinned by third_party/pdfium/embedded/VERSION, so this
       # fetches exactly the build a release was tested against rather than
       # whatever is newest today.
+      #
+      # Straight off the release, not through the API. The API costs an
+      # anonymous request that every runner on GitHub shares, and when that
+      # allowance runs out it answers 403 and a good build fails for a reason
+      # that has nothing to do with the code.
       - name: The PDF engine
         run: |
           set -euo pipefail
           build="$(grep '^BUILD=' third_party/pdfium/embedded/VERSION | cut -d= -f2)"
-          echo "PDFium build $build"
-          api="https://api.github.com/repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F$build"
-          url="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api" \
-                 | grep -o 'https://[^"]*pdfium-mac-univ[^"]*' | head -1)"
-          if [ -z "$url" ]; then
-            echo "No universal macOS build of PDFium $build was found." >&2
-            exit 1
-          fi
-          echo "$url"
-          curl -fsSL "$url" -o pdfium.tgz
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/pdfium-mac-univ.tgz"
+          echo "PDFium $build: $url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$url" -o pdfium.tgz
           mkdir -p pdfium-unpacked
           tar -xzf pdfium.tgz -C pdfium-unpacked
           lib="$(find pdfium-unpacked -name 'libpdfium.dylib' | head -1)"

@@ -43,6 +43,13 @@ jobs:
       # the tests that open a drawing genuinely need it. Leaving it out made
       # this workflow fail on both platforms while the Mac build, which does
       # fetch it, passed on the very same commit.
+      #
+      # Fetched straight off the release rather than through the API. Asking
+      # the API which file to take costs an anonymous request, every runner on
+      # GitHub shares that allowance, and when it runs out the answer is a 403
+      # and a red cross on work that is perfectly fine. The download address is
+      # made of the pinned build number and the file's name, so it can be
+      # written out here and needs nobody's permission.
       - name: The PDF engine
         shell: bash
         run: |
@@ -53,11 +60,9 @@ jobs:
             macOS)   want="pdfium-mac-univ"; file="libpdfium.dylib" ;;
             *)       want="pdfium-linux-x64"; file="libpdfium.so" ;;
           esac
-          api="https://api.github.com/repos/bblanchon/pdfium-binaries/releases/tags/chromium%2F$build"
-          url="$(curl -fsSL -H 'Accept: application/vnd.github+json' "$api" \
-                 | grep -o "https://[^\"]*$want[^\"]*" | head -1)"
-          test -n "$url" || { echo "no $want build of PDFium $build" >&2; exit 1; }
-          curl -fsSL "$url" -o pdfium.tgz
+          url="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F$build/$want.tgz"
+          echo "PDFium $build: $url"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "$url" -o pdfium.tgz
           mkdir -p unpacked
           tar -xzf pdfium.tgz -C unpacked
           found="$(find unpacked -name "$file" | head -1)"
