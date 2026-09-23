@@ -209,6 +209,20 @@ regardless.
 signed file; your server verifies the signature offline, every time, against
 keys built into it.
 
+**How do we add seats, or renew?** By hand, and that is the trade. An ordinary
+Office server fetches its own renewal: buy three more seats and the new licence
+is on the server within the hour, because the server asks for it. A sealed
+server never asks anything of anybody, so nothing arrives by itself. You buy
+the seats, we sign a licence at the new count, and it reaches you as a file —
+by email, on a stick, however your shop takes files in. An administrator drops
+it on the server the same way the first one was installed.
+
+This is not an oversight and it will not be fixed, because fixing it would mean
+a sealed server reaching out, which is the one thing the edition exists to
+refuse. Plan for it: if a renewal matters on a date, ask for the file before
+that date rather than on it. Nothing stops working while you wait — see the
+expiry answer above.
+
 **Where is the source of these claims?** Sealed is `crates/hub/src/sealed.rs`;
 every outbound call passes `web::outbound`; the audit log is
 `crates/server/src/audit.rs`. We will walk your assessor through them.

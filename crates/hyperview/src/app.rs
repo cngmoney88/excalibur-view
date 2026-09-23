@@ -1032,8 +1032,8 @@ impl App {
                 // about to mark up a locked set should know before they start.
                 ui.label(
                     egui::RichText::new(
-                        "A locked set opens for reading and marking up. Saving back into \
-                         it is not possible yet — use Save a Copy.",
+                        "It opens like any other drawing set once it is unlocked, and \
+                         anything you draw on it is locked the same way when you save.",
                     )
                     .weak()
                     .size(11.0),
@@ -1372,18 +1372,16 @@ impl App {
                     doc.open_millis = millis;
                     doc.drawing = self.prefs.drawing();
                     if doc.read_only {
-                        self.status = if doc.locked.is_some() {
-                            format!(
-                                "{} is locked. You can read it and mark it up, but saving \
-                                 needs Save a Copy.",
-                                name_of(&doc.path)
-                            )
-                        } else {
-                            format!(
-                                "{} is read-only. You can mark it up, but saving needs Save As.",
-                                name_of(&doc.path)
-                            )
-                        };
+                        self.status = format!(
+                            "{} is read-only. You can mark it up, but saving needs Save As.",
+                            name_of(&doc.path)
+                        );
+                    } else if let Some(lock) = doc.locked {
+                        self.status = format!(
+                            "{} is locked ({}). Markups saved into it are locked the same way.",
+                            name_of(&doc.path),
+                            if lock.weak() { "weakly" } else { "AES-256" }
+                        );
                     }
                     // The renderer's page sizes are authoritative for what is
                     // on screen, so take those where they agree in count.
