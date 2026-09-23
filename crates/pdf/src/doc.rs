@@ -104,6 +104,15 @@ impl Document {
         true
     }
 
+    /// The opened lock, for writing an update back into a locked file.
+    ///
+    /// `None` on a file that is not locked, and on one nobody has opened yet
+    /// -- in which case nothing should be written to it at all, because what
+    /// is being written was read as ciphertext.
+    pub fn sealing(&self) -> Option<&crate::opening::Opened> {
+        self.crypt.as_ref()
+    }
+
     /// Which lock the file uses, once a password has opened it.
     ///
     /// [`crate::opening::Lock::weak`] is the part worth putting on screen: most

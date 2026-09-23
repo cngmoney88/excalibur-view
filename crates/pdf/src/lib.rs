@@ -14,6 +14,7 @@ pub mod repair;
 pub mod object;
 pub mod opening;
 pub mod parse;
+pub mod random;
 pub mod text;
 pub mod write;
 pub mod xref;

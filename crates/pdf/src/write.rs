@@ -195,7 +195,19 @@ impl Update {
         let mut offsets: BTreeMap<u32, (u16, usize)> = BTreeMap::new();
         for (number, (generation, object)) in &self.changes {
             offsets.insert(*number, (*generation, out.len()));
-            write_indirect(Ref::new(*number, *generation), object, out);
+            // An update appended to a locked file has to be locked the same
+            // way, or the file says everything in it is encrypted and some of
+            // it is not -- which is a drawing set no reader opens. The object
+            // held here stays as it is; what goes into the file is a sealed
+            // copy of it.
+            match doc.sealing() {
+                Some(crypt) => {
+                    let mut sealed = object.clone();
+                    crypt.seal(*number, *generation, &mut sealed);
+                    write_indirect(Ref::new(*number, *generation), &sealed, out);
+                }
+                None => write_indirect(Ref::new(*number, *generation), object, out),
+            }
         }
 
         // A file whose cross reference had to be rebuilt cannot be chained to,

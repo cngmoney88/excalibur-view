@@ -161,6 +161,60 @@ impl Opened {
         }
     }
 
+    /// The other direction: puts an object back the way a locked file wants
+    /// it, so an update appended to one opens with the same password as the
+    /// rest of it.
+    ///
+    /// Without this, a markup added to a locked drawing set would be written
+    /// in plain behind a file declaring everything encrypted, and the result
+    /// is a set no reader opens.
+    pub fn seal(&self, number: u32, generation: u16, object: &mut Object) {
+        match object {
+            Object::String(bytes, _) => {
+                if let Some(hidden) = self.redo(self.strings, number, generation, bytes) {
+                    *bytes = hidden;
+                }
+            }
+            Object::Array(items) => {
+                for item in items {
+                    self.seal(number, generation, item);
+                }
+            }
+            Object::Dict(dict) => self.seal_dict(number, generation, dict),
+            Object::Stream(stream) => {
+                self.seal_dict(number, generation, &mut stream.dict);
+                if let Some(hidden) = self.redo(self.streams, number, generation, &stream.data) {
+                    stream.data = hidden;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn seal_dict(&self, number: u32, generation: u16, dict: &mut Dict) {
+        for (_, value) in dict.0.iter_mut() {
+            self.seal(number, generation, value);
+        }
+    }
+
+    fn redo(&self, how: How, number: u32, generation: u16, data: &[u8]) -> Option<Vec<u8>> {
+        match how {
+            How::Plain => None,
+            // RC4 undoes itself, so locking and unlocking are the same step.
+            How::Rc4 => Some(rc4(&self.key_for(number, generation, false), data)),
+            How::Aes => {
+                // A fresh one from the operating system for every single
+                // piece. CBC wants an initialisation vector nobody can
+                // predict, and anything worked out from the object's own
+                // number repeats the moment that object is saved twice --
+                // which is exactly what happens when somebody saves, draws
+                // another markup, and saves again.
+                let iv = crate::random::bytes::<16>();
+                crate::aes::encrypt_cbc(&self.key_for(number, generation, true), iv, data)
+            }
+        }
+    }
+
     fn dict(&self, number: u32, generation: u16, dict: &mut Dict) {
         for (_, value) in dict.0.iter_mut() {
             self.object(number, generation, value);

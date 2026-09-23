@@ -322,8 +322,10 @@ impl App {
                         if matches!(showing.lock, Some(lock) if lock.weak()) {
                             row(
                                 "",
-                                "Anybody determined can get into this file. Lock a \
-                                 copy with Document → Security to put a real one on it."
+                                "Anybody determined can get into this file. Markups \
+                                 saved into it keep this lock, because changing it \
+                                 would lock out whoever else has the password — use \
+                                 Document → Security on a copy to put a real one on it."
                                     .to_string(),
                             );
                         }

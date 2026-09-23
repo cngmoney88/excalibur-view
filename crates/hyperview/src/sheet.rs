@@ -482,11 +482,9 @@ pub struct Doc {
     pub read_only: bool,
     /// The lock on the file, when it has one and a password opened it.
     ///
-    /// A locked set is read-only for now. Excalibur View can open one and can
-    /// write one, but it cannot yet write *into* one: new markups would go in
-    /// as plain text behind a file that says everything in it is encrypted,
-    /// and the result is a drawing set no reader can open. Refusing is the
-    /// only honest thing to do until saving locks the new objects too.
+    /// A locked set is worked on like any other: markups saved into one are
+    /// locked on the way in with the same key, so the file stays openable by
+    /// the same password and by nothing else.
     pub locked: Option<pdf::opening::Lock>,
     /// The file on disk as this copy last read or wrote it. Anything else at
     /// save time means somebody else saved it in the meantime.
@@ -549,21 +547,9 @@ impl Doc {
     /// Why this drawing cannot be written to, in a sentence somebody can act
     /// on. Only meaningful when `read_only`.
     pub fn why_read_only(&self) -> String {
-        match self.locked {
-            Some(lock) if lock.weak() => format!(
-                "This drawing set is locked ({}), and Excalibur View cannot yet save \
-                 into a locked file. Use File \u{2192} Save a Copy, and lock the copy \
-                 with Document \u{2192} Security.",
-                lock.in_words()
-            ),
-            Some(_) => "This drawing set is locked with a password, and Excalibur View \
-                        cannot yet save into a locked file. Use File \u{2192} Save a Copy, \
-                        and lock the copy with Document \u{2192} Security."
-                .into(),
-            None => "This file cannot be written to. Save a copy somewhere you can \
-                     write and change that."
-                .into(),
-        }
+        "This file cannot be written to. Save a copy somewhere you can write \
+         and change that."
+            .into()
     }
 
     pub fn open(path: PathBuf) -> Result<Doc, String> {
@@ -588,10 +574,9 @@ impl Doc {
             return Err(Shut::WantsPassword(name));
         }
         let locked = file.lock();
-        let read_only = locked.is_some()
-            || std::fs::metadata(&path)
-                .map(|m| m.permissions().readonly())
-                .unwrap_or(false);
+        let read_only = std::fs::metadata(&path)
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(false);
         let count = file.page_count();
         let mut pages = Vec::with_capacity(count);
         let mut frames = Vec::with_capacity(count);

@@ -169,3 +169,99 @@ fn an_unlocked_file_is_already_open() {
     assert!(doc.unlock("anything at all"));
     assert_eq!(title(&doc), TITLE);
 }
+
+// ---- writing back into one --------------------------------------------
+
+/// Adds an object carrying a string and a stream, the way a markup does, and
+/// hands back the whole file.
+fn add_something(doc: &pdf::Document, says: &str) -> (Vec<u8>, pdf::Ref) {
+    let mut update = pdf::write::Update::new(doc);
+    let mut dict = pdf::Dict::new();
+    dict.set(pdf::Name::new("Type"), pdf::Object::Name(pdf::Name::new("Annot")));
+    dict.set(pdf::Name::new("Subj"), pdf::Object::String(says.as_bytes().to_vec(), pdf::StringKind::Literal));
+    let stream = pdf::Stream {
+        dict: {
+            let mut d = pdf::Dict::new();
+            d.set(pdf::Name::new("Length"), pdf::Object::Int(says.len() as i64));
+            d
+        },
+        data: says.as_bytes().to_vec(),
+    };
+    dict.set(pdf::Name::new("AP"), pdf::Object::Stream(Box::new(stream)));
+    let at = update.add(pdf::Object::Dict(dict));
+    (update.apply(doc), at)
+}
+
+#[test]
+fn a_markup_written_into_a_locked_set_is_locked_too() {
+    // The whole point. A markup added to a locked file used to go in as plain
+    // text behind a file declaring everything encrypted, which is a drawing
+    // set no reader opens.
+    for name in ["rc4-40.pdf", "rc4-128.pdf", "aes-128.pdf", "aes-256.pdf"] {
+        let mut doc = file(name);
+        assert!(doc.unlock("bolt"), "{name}");
+        let (bytes, at) = add_something(&doc, "W12x26 typical");
+
+        // Read it back the way anybody else would: from the bytes, with the
+        // password and nothing else.
+        let mut again = pdf::Document::from_bytes(bytes.clone());
+        assert!(again.encrypted, "{name}: it should still say it is locked");
+        assert!(again.unlock("bolt"), "{name}: it should still open");
+        let added = again.get(at);
+        let dict = added.as_dict().unwrap_or_else(|| panic!("{name}: the object went missing"));
+        assert_eq!(
+            dict.get("Subj").and_then(|o| o.as_text()).as_deref(),
+            Some("W12x26 typical"),
+            "{name}: the string did not survive"
+        );
+        let ap = dict.get("AP").and_then(|o| o.as_stream()).expect("the appearance");
+        assert_eq!(ap.data, b"W12x26 typical", "{name}: the stream did not survive");
+
+        // And the rest of the file still reads, which is what says the update
+        // did not disturb what was already there.
+        assert_eq!(title(&again), TITLE, "{name}: the original went wrong");
+        assert!(what_the_sheet_says(&again).contains(ON_THE_SHEET), "{name}");
+    }
+}
+
+#[test]
+fn what_was_written_is_not_sitting_there_in_plain_sight() {
+    // The failure this guards against is silent: the file opens, the markup
+    // reads back, and the words are also legible to anybody with a hex
+    // editor. Checked against the bytes rather than against the reader.
+    let mut doc = file("aes-256.pdf");
+    assert!(doc.unlock("bolt"));
+    let (bytes, _) = add_something(&doc, "MESA FAB CONFIDENTIAL");
+    let haystack = String::from_utf8_lossy(&bytes);
+    assert!(
+        !haystack.contains("MESA FAB CONFIDENTIAL"),
+        "the markup went into a locked file as plain text"
+    );
+}
+
+#[test]
+fn the_same_words_saved_twice_are_not_written_the_same_way_twice() {
+    // AES in CBC needs an initialisation vector nobody can predict. If two
+    // saves of the same markup produced the same bytes, that would say the
+    // vector was a counter or a constant.
+    let mut doc = file("aes-256.pdf");
+    assert!(doc.unlock("bolt"));
+    let (once, _) = add_something(&doc, "the same words");
+    let (twice, _) = add_something(&doc, "the same words");
+    assert_ne!(once, twice, "the same plaintext encrypted to the same bytes");
+}
+
+#[test]
+fn an_unlocked_file_is_written_exactly_as_it_was_before() {
+    // Nothing above may change what happens to an ordinary drawing set.
+    let doc = file("plain.pdf");
+    assert!(doc.sealing().is_none());
+    let (bytes, at) = add_something(&doc, "W12x26 typical");
+    let again = pdf::Document::from_bytes(bytes);
+    let added = again.get(at);
+    let dict = added.as_dict().expect("the object");
+    assert_eq!(
+        dict.get("Subj").and_then(|o| o.as_text()).as_deref(),
+        Some("W12x26 typical")
+    );
+}
