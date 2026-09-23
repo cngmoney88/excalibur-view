@@ -47,6 +47,22 @@ import publish
 # What the payment links sell. The name is what the buyer sees on the
 # checkout page and on their receipt, and what `issue` reads back to tell a
 # first purchase from a renewal.
+# The trade chests. Sold per company rather than per user: a chest is a file,
+# and charging a shop twice because two estimators open the same file is the
+# kind of thing that makes people hate software. So no ladder here - one link
+# each, quantity one, and the price is the price however many people use it.
+CHEST_PRICE = 14900
+CHEST_BUNDLE_PRICE = 49900
+CHESTS = [
+    ("steel", "Structural steel", "Shapes, plate, bolts, welds and connections, off the AISC Shapes Database."),
+    ("concrete", "Concrete", "Rebar, formwork, placement and finishing."),
+    ("gc", "General contractor", "Sitework, demolition, waste and the general conditions."),
+    ("plumbing", "Plumbing", "Pipe, fittings, fixtures and hangers."),
+    ("electrical", "Electrical", "Conduit, wire, devices and gear."),
+    ("mechanical", "Mechanical", "Duct, equipment, and the gauges that go with them."),
+]
+CHEST_BUNDLE = ("all", "All six trade chests", "Every trade, one price.")
+
 SEATS_ITEM = "Excalibur View Office - per user"
 RENEWAL_ITEM = "Excalibur View Office updates - per user, one year"
 SEATS_PRICE = 25000  # cents
@@ -293,6 +309,39 @@ def a_ladder(square, kind, name, price, most, site, note, location, had):
     return rungs, made, kept
 
 
+def one_link(square, kind, name, price, site, note, location):
+    """A single payment link for something sold once per company.
+
+    No ladder: a chest costs what it costs whether two people use it or
+    twenty, so there is one link and nothing for the website to choose
+    between.
+    """
+    body = link_body(kind, name, price, 1, site, note)
+    body["order"]["location_id"] = location["id"]
+    made = square.post("/v2/online-checkout/payment-links", body)
+    link = made["payment_link"]
+    return {"id": link["id"], "url": link["url"], "price": price}
+
+
+def chest_links(square, site, location, had):
+    """One link per trade chest, and one for all six."""
+    rungs, made, kept = {}, 0, 0
+    products = [(key, f"Excalibur View tool chest - {name}", CHEST_PRICE, note)
+                for key, name, note in CHESTS]
+    products.append((CHEST_BUNDLE[0], f"Excalibur View tool chests - {CHEST_BUNDLE[1]}",
+                     CHEST_BUNDLE_PRICE, CHEST_BUNDLE[2]))
+    for key, name, price, note in products:
+        already = had.get(key)
+        if already and already.get("price") == price:
+            rungs[key] = already
+            kept += 1
+            continue
+        rungs[key] = one_link(square, f"chest-{key}", name, price, site,
+                              f"{note} One price for the whole office.", location)
+        made += 1
+    return rungs, made, kept
+
+
 def cmd_setup(a):
     folder = Folder(a.folder)
     square = folder.square(a.sandbox)
@@ -308,6 +357,12 @@ def cmd_setup(a):
         links[kind] = {"item": name, "price": price, "most": most, "by_users": rungs}
         block[kind] = rungs
         print(f"  {made} made, {kept} already there. One user: {rungs['1']['url']}")
+    had_chests = (links.get("chests") or {}).get("by_trade") or {}
+    print(f"chests: {len(CHESTS) + 1} links ...", flush=True)
+    chests, made, kept = chest_links(square, a.site, location, had_chests)
+    links["chests"] = {"price": CHEST_PRICE, "bundle": CHEST_BUNDLE_PRICE, "by_trade": chests}
+    print(f"  {made} made, {kept} already there. Steel: {chests['steel']['url']}")
+
     links["location"] = {"id": location["id"], "name": location.get("name")}
     folder.save_links(links)
 
@@ -317,6 +372,9 @@ def cmd_setup(a):
         "buy_seats_max": most,
         "buy_office_links": {n: r["url"] for n, r in sorted(block["seats"].items(), key=lambda kv: int(kv[0]))},
         "buy_renewal_links": {n: r["url"] for n, r in sorted(block["renewal"].items(), key=lambda kv: int(kv[0]))},
+        "chest_price": f"${CHEST_PRICE // 100}",
+        "chest_bundle_price": f"${CHEST_BUNDLE_PRICE // 100}",
+        "buy_chest_links": {key: r["url"] for key, r in chests.items()},
     }
     out = os.path.join(a.folder, "square-site.json")
     write_json(out, lines)
@@ -327,6 +385,9 @@ def cmd_setup(a):
     print(f'  "buy_seats_max": {most},')
     print(f'  "buy_office_links": {{ ... {most} links ... }},')
     print(f'  "buy_renewal_links": {{ ... {most} links ... }}')
+    print(f'  "chest_price": "${CHEST_PRICE // 100}",')
+    print(f'  "chest_bundle_price": "${CHEST_BUNDLE_PRICE // 100}",')
+    print(f'  "buy_chest_links": {{ ... {len(chests)} links ... }}')
 
 
 # ---- reading what was bought -----------------------------------------------
@@ -342,11 +403,26 @@ def what_was_bought(order, links):
     for item in (order.get("line_items") or []):
         name = (item.get("name") or "").lower()
         count = int(float(item.get("quantity") or 1))
-        if "renewal" in name or "updates" in name:
+        # A chest is checked for first: "Excalibur View tool chest - ..." also
+        # contains the word that would otherwise read as a seat.
+        if "tool chest" in name:
+            kind, users = "chest", 1
+        elif "renewal" in name or "updates" in name:
             kind, users = "renewal", users + count
         elif "office" in name or "per user" in name or "seat" in name:
             kind, users = kind or "seats", users + count
     return kind, users
+
+
+def chest_ordered(order):
+    """Which chest somebody bought, by the name on the line item."""
+    for item in (order.get("line_items") or []):
+        name = (item.get("name") or "")
+        if "tool chest" not in name.lower():
+            continue
+        after = name.split("-", 1)[-1].strip()
+        return after or "a chest"
+    return None
 
 
 def answers_in(order):
@@ -597,6 +673,14 @@ def cmd_orders(a):
     for sale in sales:
         mark = "issued " if sale["issued"] else "WAITING"
         who = sale["company"] or "(no company name)"
+        if sale["kind"] == "chest":
+            # A chest is a file, not a license. Nothing signs it and nothing
+            # issues it; somebody sends it. So it says so rather than sitting
+            # in the list looking like work the computer forgot to do.
+            which = chest_ordered(sale.get("order") or {}) or "a chest"
+            print(f"SEND     {sale['when'][:10]}  {money(sale['paid']):>10}  chest    "
+                  f"{which}  {who}  {sale['email'] or ''}")
+            continue
         print(f"{mark}  {sale['when'][:10]}  {money(sale['paid']):>10}  {sale['kind']:<7} "
               f"{sale['users']:>3} user(s)  {who}  {sale['email'] or ''}")
         if not sale["issued"] and not sale["company"]:
@@ -618,6 +702,12 @@ def cmd_issue(a):
     folder.say(f"{len(sales)} order(s) to issue:", a.quiet)
     waiting = 0
     for sale in sales:
+        if sale["kind"] == "chest":
+            which = chest_ordered(sale.get("order") or {}) or "a chest"
+            folder.say(f"  {sale['payment']['id']}: {which} for "
+                       f"{sale['company'] or 'somebody'} - send them the file. "
+                       f"Nothing is signed for a chest.", a.quiet)
+            continue
         company = a.company or sale["company"]
         if not company:
             waiting += 1
