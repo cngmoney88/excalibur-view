@@ -86,6 +86,12 @@ hand, the way a sealed office wants everything to arrive.
 - Staying signed in to Studio, with the signed-in account shown in the top bar.
 - Updates now carry more than one platform in a single release, and a signature
   over one platform's build can never be passed off as another's.
+- Clicking a button no longer switched the keyboard off. Any button that had
+  been clicked kept the focus, and while it had it every shortcut in the
+  program was ignored — copy, paste, save, delete, the arrow keys, page up and
+  down, find, every tool letter. Nothing said so, so it read as shortcuts that
+  had never been wired up. The keys now belong to a text field only while
+  somebody is typing in one.
 - Studio's project list keeps itself current. It used to be asked for once, at
   sign-in, so a drawing set somebody else put on the server — or that FabWire
   pushed across from a bid — did not appear until the program was quit and
