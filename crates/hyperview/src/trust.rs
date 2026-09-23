@@ -83,6 +83,13 @@ pub const HOME_CHANNEL: &str = "stable";
 /// gate as everything else, and its licenses arrive as files, by hand, the way
 /// that office wants everything to arrive.
 ///
-/// Empty means no server ever looks, which is what a build does until
-/// somebody fills this in.
-pub const LICENSE_FEED: &str = "";
+/// Empty means no server ever looks. It was empty until 0.6.5, which meant
+/// every part of this worked and none of it ran.
+///
+/// A folder on our own site, because a licence renewal is a small signed file
+/// that has to be fetchable by name over HTTPS with no login, and that is all
+/// it has to be. Nothing here is trusted because of where it came from: what
+/// arrives is checked against [`KEYS`] and against the licence already held,
+/// so this address is a place to fetch from and not a thing the server
+/// believes.
+pub const LICENSE_FEED: &str = "https://excaliburct.com/f";
