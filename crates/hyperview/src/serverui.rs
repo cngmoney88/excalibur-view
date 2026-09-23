@@ -95,6 +95,15 @@ pub struct OfficePanel {
     /// Licenses found lying about — in Downloads, on the desktop, on the USB
     /// stick somebody carried one over on. Looked for once, not every frame.
     pub licenses_about: Option<Vec<FoundLicense>>,
+    /// When this panel last asked the server what is on it.
+    ///
+    /// The list used to be asked for once, at sign-in, and never again. That
+    /// is fine for the seat that made the project and wrong for everybody
+    /// else: FabWire pushes a bid's drawings straight onto the server, and a
+    /// seat with this panel open went on saying "Nothing on this server yet"
+    /// until somebody quit the program. What you are looking at should be
+    /// what is there.
+    pub last_looked: Option<std::time::Instant>,
 }
 
 /// A license file the program noticed, and who it is for.
@@ -125,6 +134,8 @@ struct PanelActions {
     paste_license: bool,
     send_license: Option<String>,
     use_found_license: Option<std::path::PathBuf>,
+    /// Ask the server what is on it again.
+    look_again: bool,
 }
 
 impl App {
@@ -943,6 +954,21 @@ impl App {
         let is_admin = role == Some(hub::Role::Admin);
         let may_write = matches!(role, Some(hub::Role::Admin) | Some(hub::Role::Estimator));
 
+        // While this panel is on screen it keeps itself current, because the
+        // thing somebody is looking at should be what is on the server rather
+        // than what was on it when they signed in. Ten seconds, and only
+        // while the panel is open and somebody is signed in: a list of
+        // projects is a few hundred bytes, and a seat already asks about an
+        // open drawing every eight.
+        const LOOK_AGAIN: std::time::Duration = std::time::Duration::from_secs(10);
+        if self.standing.who.is_some() && !self.standing.base.is_empty() {
+            let due = self.office.last_looked.is_none_or(|at| at.elapsed() >= LOOK_AGAIN);
+            if due {
+                actions.look_again = true;
+            }
+            ui.ctx().request_repaint_after(LOOK_AGAIN);
+        }
+
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -951,17 +977,31 @@ impl App {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Projects").color(theme.faint).size(11.0));
-                            if may_write && self.office.new_project.is_none() {
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if may_write && self.office.new_project.is_none() {
                                         if ui.small_button("New project").clicked() {
                                             self.office.new_project =
                                                 Some((String::new(), String::new()));
                                         }
-                                    },
-                                );
-                            }
+                                    }
+                                    // This list keeps itself current on its
+                                    // own. The button is for the moment
+                                    // somebody has just pushed a bid across
+                                    // from another program and does not want
+                                    // to wait even ten seconds to see it.
+                                    if ui
+                                        .small_button("Refresh")
+                                        .on_hover_text(
+                                            "Ask the server what is on it now.",
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.look_again = true;
+                                    }
+                                },
+                            );
                         });
                         let mut close_form = false;
                         if let Some((number, name)) = self.office.new_project.as_mut() {
@@ -1157,6 +1197,16 @@ impl App {
                 }
             });
 
+        if actions.look_again {
+            self.office.last_looked = Some(std::time::Instant::now());
+            self.ask(Ask::Projects);
+            self.ask(Ask::Chests);
+            // And, if a project is open, what is in it -- a set issued again
+            // from FabWire replaces the one on screen.
+            if let Some(project) = self.standing.looking_at.clone() {
+                self.ask(Ask::Sets(project));
+            }
+        }
         if back {
             self.standing.looking_at = None;
             self.standing.sets.clear();

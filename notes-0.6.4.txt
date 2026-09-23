@@ -86,3 +86,7 @@ hand, the way a sealed office wants everything to arrive.
 - Staying signed in to Studio, with the signed-in account shown in the top bar.
 - Updates now carry more than one platform in a single release, and a signature
   over one platform's build can never be passed off as another's.
+- Studio's project list keeps itself current. It used to be asked for once, at
+  sign-in, so a drawing set somebody else put on the server — or that FabWire
+  pushed across from a bid — did not appear until the program was quit and
+  started again.

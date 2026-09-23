@@ -1537,10 +1537,15 @@ impl eframe::App for App {
                 channel: self.prefs.channel,
                 asked: false,
             });
-            // And whether the office has shared a new tool chest or plugin since.
+            // And whether the office has shared a new tool chest or plugin
+            // since -- and what projects are on it. The panel keeps the list
+            // current while it is open; this is the backstop for the seat
+            // that had it closed, so a list can never be stale for longer
+            // than it takes to look at it.
             if !self.standing.base.is_empty() {
                 self.ask(crate::server::Ask::Chests);
                 self.ask(crate::server::Ask::Plugins);
+                self.ask(crate::server::Ask::Projects);
             }
         }
         self.take_dropped_files(ctx);
