@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 
@@ -129,14 +130,49 @@ def find_by_suffix(suffix, contains=""):
     return hits[0] if hits else None
 
 
-def github(url, token, accept="application/vnd.github+json"):
+class _DropAuthOnHop(urllib.request.HTTPRedirectHandler):
+    """Takes our credentials off a redirect that leaves GitHub.
+
+    An artifact download is answered with a redirect to storage, and that
+    address is already signed inside the URL. Sending our Authorization
+    header along behind it gives the storage host two credentials, and it
+    refuses the one it did not issue -- a 401 whose wording ("Server failed
+    to authenticate the request") reads like a bad token and is nothing of
+    the kind.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        fresh = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if fresh is None:
+            return None
+        here = urllib.parse.urlparse(req.full_url).netloc
+        there = urllib.parse.urlparse(newurl).netloc
+        if here != there:
+            for name in ("Authorization", "authorization",
+                         "X-GitHub-Api-Version", "X-github-api-version"):
+                fresh.headers.pop(name, None)
+                fresh.unredirected_hdrs.pop(name, None)
+        return fresh
+
+
+_OPENER = urllib.request.build_opener(_DropAuthOnHop)
+
+
+def github(url, token):
+    """Asks GitHub something, and follows it to storage if it points there.
+
+    The Accept header is always GitHub's own. Asking for application/zip on
+    the artifact endpoint is refused outright -- 415, Unsupported Media Type
+    -- which is a confusing answer to a request for a zip file, and cost a
+    release the Mac half of itself.
+    """
     request = urllib.request.Request(url, headers={
-        "Accept": accept,
+        "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "excalibur-release",
     })
-    return urllib.request.urlopen(request, timeout=120)
+    return _OPENER.open(request, timeout=180)
 
 
 def commit_here():
@@ -147,6 +183,31 @@ def commit_here():
         return out.stdout.strip() or None if out.returncode == 0 else None
     except Exception:
         return None
+
+
+# What actually ends up inside the two programs. A change anywhere else --
+# release notes, this script, a workflow, a document -- cannot make the Mac
+# build and the Windows build different programs, and refusing a release over
+# one is crying wolf.
+WHAT_SHIPS = ["crates", "Cargo.toml", "Cargo.lock", "third_party"]
+
+
+def same_program(older, newer):
+    """Whether two commits build the same thing.
+
+    Asked of the paths that get compiled, not of the commit id. The commit id
+    is the easy question and the wrong one: it says no to a release whose only
+    change since the Mac build was a line in the release notes.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--quiet", older, newer, "--"] + WHAT_SHIPS,
+            cwd=ROOT, capture_output=True, timeout=60,
+        )
+        return out.returncode == 0
+    except Exception:
+        # Git would not say, so fall back to the strict question.
+        return older == newer
 
 
 def commits_between(older, newer):
@@ -197,13 +258,16 @@ def mac_build_from_github(version, token, any_commit=False):
 
     here = commit_here()
     if here and not any_commit:
-        matching = [a for a in mine
-                    if (a.get("workflow_run") or {}).get("head_sha") == here]
+        matching = [
+            a for a in mine
+            if same_program((a.get("workflow_run") or {}).get("head_sha") or "", here)
+        ]
         if not matching:
             newest = max(mine, key=lambda a: a.get("created_at", ""))
             made_from = (newest.get("workflow_run") or {}).get("head_sha") or "?"
             say(f"  GitHub's Mac build for {version} was made from {made_from[:7]},")
-            say(f"  and this release is {here[:7]}. That is a different program.")
+            say(f"  and this release is {here[:7]}. The code that gets compiled")
+            say("  is not the same, so those would be two different programs.")
             ahead = commits_between(made_from, here) if made_from != "?" else []
             if ahead:
                 say(f"  {len(ahead)} commit(s) the Mac build has not got:")
@@ -220,7 +284,7 @@ def mac_build_from_github(version, token, any_commit=False):
     os.makedirs(into, exist_ok=True)
     say(f"  Downloading the Mac build GitHub made on {newest.get('created_at', '')[:10]}...")
     try:
-        with github(newest["archive_download_url"], token, accept="application/zip") as answer:
+        with github(newest["archive_download_url"], token) as answer:
             blob = answer.read()
     except Exception as e:
         say(f"  The download did not finish: {e}")
