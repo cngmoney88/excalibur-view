@@ -11,6 +11,21 @@ so every office that already has it keeps updating without anybody touching
 anything. What people see — window, menus, shortcuts, Settings → Apps — says
 Excalibur View.
 
+## What it looks like
+
+![Excalibur View with a second floor framing plan open: the tool chest down the left, every beam measured and labelled, and 52.020 tons on the status bar](https://excaliburct.com/assets/img/screens/view-main.webp)
+
+Takeoff on a real set. The tools carry the weights, so measuring a beam puts
+tonnage on the status bar as it is drawn.
+
+![The Shop List: a cut list by shape with pieces, total length and weight, footing up to 87 pieces and 104,040 lb](https://excaliburct.com/assets/img/screens/view-shoplist.webp)
+
+The same markups read as a cut list: stock length, saw kerf, what is worth
+keeping as a drop, and what to buy. Cutting lengths round up, never down.
+
+A thirty-five second demo of the same job runs at
+[excaliburct.com](https://excaliburct.com/), unnarrated and nothing sped up.
+
 ## What a company is given
 
 Two files. Nothing else — no installer, no DLLs, no readme, no scripts.
