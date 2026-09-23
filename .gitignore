@@ -28,7 +28,18 @@ hyperview-signing.key
 /stage
 /pdfium
 /hyperview-data
-/third_party
+
+# The PDF engine is a third-party binary, per platform, and is not carried in
+# this repository: it is fetched at the version pinned below. The two small
+# text files that say which version and under what licence ARE carried, because
+# a build on a machine that has never seen this code has to know both.
+/third_party/**
+!/third_party/
+!/third_party/pdfium/
+!/third_party/pdfium/embedded/
+!/third_party/pdfium/embedded/VERSION
+!/third_party/pdfium/embedded/LICENSE
+
 *.saving
 *.part
 
