@@ -2230,3 +2230,43 @@ fn a_save_that_cannot_happen_says_why_in_words() {
     assert!(why.contains("S-101.pdf"), "{why}");
     assert!(why.contains("Nothing has been lost"), "{why}");
 }
+
+/// Each platform's own dependencies are declared against that platform.
+///
+/// This is not a style check. `windows` once slipped from `cfg(windows)` into
+/// the macOS section when that section was added above it, and TOML being what
+/// it is, nothing said a word: Windows quietly lost the crate that half its
+/// code imports, and the Windows build stopped compiling. Nobody noticed,
+/// because everything else was being built on a Mac that week.
+#[test]
+fn every_platform_gets_the_crates_its_own_code_imports() {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("this crate's own manifest");
+    let value: toml::Value = toml::from_str(&manifest).expect("readable TOML");
+    let targets = value
+        .get("target")
+        .and_then(|t| t.as_table())
+        .expect("per-platform dependencies");
+
+    let named = |spec: &str, name: &str| -> bool {
+        targets
+            .get(spec)
+            .and_then(|t| t.get("dependencies"))
+            .and_then(|d| d.get(name))
+            .is_some()
+    };
+
+    assert!(
+        named("cfg(windows)", "windows"),
+        "the `windows` crate is not a Windows dependency; install.rs, instance.rs and ocr.rs \
+         all import it and the Windows build will not compile"
+    );
+    assert!(
+        !named("cfg(target_os = \"macos\")", "windows"),
+        "the `windows` crate is being pulled into Mac builds, which means it has drifted out \
+         of the Windows section again"
+    );
+    for platform in ["cfg(windows)", "cfg(target_os = \"macos\")", "cfg(target_os = \"linux\")"] {
+        assert!(named(platform, "wgpu"), "{platform} has no graphics backend");
+    }
+}
