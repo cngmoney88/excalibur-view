@@ -25,6 +25,7 @@ pub mod fleet;
 pub mod license;
 pub mod mcp;
 pub mod openapi;
+pub mod patience;
 pub mod presence;
 pub mod projects;
 pub mod quantities;

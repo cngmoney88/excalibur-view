@@ -28,6 +28,9 @@ pub struct Server {
     /// When the publisher's feed was last looked at, and the one look allowed
     /// at a time.
     pub updates: crate::updates::Watch,
+    /// How many wrong guesses this server has sat through, and from whom.
+    /// Empty on every start, which is deliberate -- see `patience`.
+    pub patience: crate::patience::Patience,
 }
 
 impl Server {
@@ -36,6 +39,7 @@ impl Server {
             store,
             config,
             updates: crate::updates::Watch::default(),
+            patience: crate::patience::Patience::default(),
         };
         crate::license::begin(&server);
         server
@@ -410,6 +414,29 @@ async fn sign_in(
     Json(body): Json<SignIn>,
 ) -> Answer<Json<Session>> {
     let email = body.email.trim().to_lowercase();
+    let from = seen_from(&headers);
+
+    // Asked before anything is looked up, so a refusal costs this server one
+    // lock and no database work. Counted against the account and against the
+    // address, because each catches what the other misses: one address
+    // working through a list of people, and one account guessed at from a
+    // hundred addresses.
+    if let Some(owed) = server
+        .patience
+        .wait_for_any(crate::patience::SIGNING_IN, &[email.as_str(), from.as_str()])
+    {
+        record(
+            &server,
+            crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
+                .saying("too many wrong tries")
+                .from(from.clone()),
+        );
+        return Err(Denied(
+            StatusCode::TOO_MANY_REQUESTS,
+            Problem::new("too_many", &crate::patience::refusal(owed)),
+        ));
+    }
+
     let session = server
         .store
         .with(|db| {
@@ -433,8 +460,14 @@ async fn sign_in(
             &server,
             crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &email)
                 .saying("no account with that address")
-                .from(seen_from(&headers)),
+                .from(from.clone()),
         );
+        // Counted even though there is no such account: somebody working
+        // through a list of addresses is the case this is for, and not
+        // counting it would leave the one door that answers instantly wide
+        // open.
+        server.patience.wrong(&email);
+        server.patience.wrong(&from);
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
@@ -446,13 +479,19 @@ async fn sign_in(
             crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &body.email)
                 .by(&id)
                 .saying("the password did not match")
-                .from(seen_from(&headers)),
+                .from(from.clone()),
         );
+        server.patience.wrong(&email);
+        server.patience.wrong(&from);
         return Err(Denied(
             StatusCode::UNAUTHORIZED,
             Problem::new("unauthorised", "That email address and password do not match."),
         ));
     }
+
+    // Right. Whatever was held against them goes.
+    server.patience.right(&email);
+    server.patience.right(&from);
 
     let (token, hashed) = auth::new_token();
     let issued = time::OffsetDateTime::now_utc();
@@ -2580,14 +2619,39 @@ async fn claim(State(server): State<Shared>, Json(body): Json<Setup>) -> Answer<
 
 // ---- and everybody after --------------------------------------------------
 
-async fn join(State(server): State<Shared>, Json(body): Json<Join>) -> Answer<Json<Session>> {
+async fn join(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Join>,
+) -> Answer<Json<Session>> {
     let (how, code, role) = how_joining(&server);
+    let from = seen_from(&headers);
+
+    // Harder than signing in, and on purpose. A join code has no username in
+    // front of it: a guess is a guess at the whole secret, and the secret is
+    // one string that names nobody, never expires and is not used up. Three
+    // tries free and then an hour is the difference between a shared code
+    // being a convenience and a shared code being the way in.
+    if let Some(owed) = server.patience.wait_for(crate::patience::JOINING, &from) {
+        return Err(Denied(
+            StatusCode::TOO_MANY_REQUESTS,
+            Problem::new("too_many", &crate::patience::refusal(owed)),
+        ));
+    }
+
     match how.as_str() {
         "open" => {}
         "code" => {
             // The same refusal whether the code is wrong or the server is not
             // taking anybody, so guessing tells nobody anything.
             if !auth::secret_matches(&body.code, &code) {
+                server.patience.wrong(&from);
+                record(
+                    &server,
+                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                        .saying("the join code did not match")
+                        .from(from.clone()),
+                );
                 return Err(Denied(
                     StatusCode::FORBIDDEN,
                     Problem::new(
@@ -2597,6 +2661,7 @@ async fn join(State(server): State<Shared>, Json(body): Json<Join>) -> Answer<Js
                     ),
                 ));
             }
+            server.patience.right(&from);
         }
         _ => {
             return Err(Denied(
