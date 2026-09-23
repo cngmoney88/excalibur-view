@@ -232,3 +232,129 @@ mod tests {
         assert_eq!(marks[0].markup.name(), sending[0].1.name());
     }
 }
+
+#[cfg(test)]
+mod losing_signal_in_a_trailer {
+    //! What happens to a seat that goes offline halfway through a takeoff.
+    //!
+    //! The file on disk is the file of record, so nothing is ever lost. What
+    //! these are about is the other half: getting back in step without
+    //! sending the same markup twice or missing one.
+
+    use super::*;
+    use annot::Subtype;
+
+    fn a_markup(name: &str) -> Markup {
+        let mut m = Markup::new(Subtype::Square);
+        m.set_box([0.0, 0.0, 10.0, 10.0]);
+        m.set_name(name);
+        m
+    }
+
+    fn a_mark(name: &str, page: u32) -> crate::sheet::Mark {
+        crate::sheet::Mark::new(page, a_markup(name))
+    }
+
+    #[test]
+    fn markups_drawn_offline_are_all_still_waiting_when_the_signal_comes_back() {
+        // Four drawn with no server. Nothing has been sent, so everything
+        // goes the moment there is somewhere to send it.
+        let mut marks: Vec<crate::sheet::Mark> = (0..4)
+            .map(|i| a_mark(&format!("xhv-offline-{i}"), 1))
+            .collect();
+        let attached = Attached::default();
+        let sending = to_send(marks.iter_mut(), &attached);
+        assert_eq!(sending.len(), 4, "everything drawn offline is still waiting");
+    }
+
+    #[test]
+    fn a_push_that_never_arrived_is_sent_again() {
+        // The failure case: the request did not reach the server, so nothing
+        // was recorded as sent, so it all goes again. This is what `sent` not
+        // being updated on an error buys.
+        let mut marks = vec![a_mark("xhv-a", 1), a_mark("xhv-b", 1)];
+        let attached = Attached::default();
+        let first = to_send(marks.iter_mut(), &attached);
+        assert_eq!(first.len(), 2);
+
+        // Nothing came back, so `sent` is untouched.
+        let after_failure = Attached::default();
+        let second = to_send(marks.iter_mut(), &after_failure);
+        assert_eq!(second.len(), 2, "a failed push leaves everything to send");
+    }
+
+    #[test]
+    fn a_push_that_arrived_is_not_sent_twice_even_if_the_answer_never_came() {
+        // The trailer case that was wrong: the markups reached the server and
+        // the read-back afterwards did not. They are on the server whether or
+        // not this machine got to see the answer, so they must be recorded as
+        // sent -- otherwise the next sync pushes them again and the server
+        // ends up holding two of each.
+        let mut marks = vec![a_mark("xhv-a", 1), a_mark("xhv-b", 1)];
+        let mut attached = Attached::default();
+
+        let sending = to_send(marks.iter_mut(), &attached);
+        assert_eq!(sending.len(), 2);
+
+        // What `Told::Pushed` does: the names are recorded, the revision is
+        // deliberately left where it was, because nothing new has been seen.
+        let was = attached.revision;
+        for (_, markup) in &sending {
+            attached.sent.insert(markup.name());
+        }
+        assert_eq!(attached.revision, was, "no new revision has been seen");
+
+        let again = to_send(marks.iter_mut(), &attached);
+        assert!(again.is_empty(), "what reached the server does not go twice");
+    }
+
+    #[test]
+    fn coming_back_takes_what_everybody_else_did_meanwhile() {
+        // Two other seats worked while this one was in a field trailer.
+        let ours: HashSet<String> = ["xhv-mine-1", "xhv-mine-2"]
+            .iter()
+            .map(|n| n.to_string())
+            .collect();
+        let theirs = vec![
+            ("xhv-mine-1".into(), 1u32, a_markup("xhv-mine-1"), false),
+            ("xhv-theirs-1".into(), 2u32, a_markup("xhv-theirs-1"), false),
+            ("xhv-theirs-2".into(), 2u32, a_markup("xhv-theirs-2"), false),
+        ];
+        let (add, remove, merged) = plan(&theirs, &ours);
+        assert_eq!(add.len(), 2, "both of theirs");
+        assert!(remove.is_empty());
+        assert_eq!(merged.taken, 2);
+        assert_eq!(merged.already_had, 1, "ours came back and was left alone");
+    }
+
+    #[test]
+    fn a_markup_removed_while_offline_is_removed_on_the_way_back() {
+        let ours: HashSet<String> = ["xhv-a", "xhv-b"].iter().map(|n| n.to_string()).collect();
+        let theirs = vec![
+            ("xhv-a".into(), 1u32, a_markup("xhv-a"), true),
+            ("xhv-b".into(), 1u32, a_markup("xhv-b"), false),
+        ];
+        let (add, remove, merged) = plan(&theirs, &ours);
+        assert!(add.is_empty());
+        assert_eq!(remove, vec!["xhv-a".to_string()]);
+        assert_eq!(merged.removed, 1);
+    }
+
+    #[test]
+    fn syncing_the_same_answer_twice_changes_nothing_the_second_time() {
+        // A reconnect can deliver the same page again -- a retry, or two
+        // sheets asking at once. Doing it twice has to be the same as doing
+        // it once, or a flaky signal duplicates somebody's takeoff.
+        let theirs = vec![("xhv-theirs".into(), 1u32, a_markup("xhv-theirs"), false)];
+        let (add, _, first) = plan(&theirs, &HashSet::new());
+        assert_eq!(add.len(), 1);
+        assert_eq!(first.taken, 1);
+
+        let now_ours: HashSet<String> = ["xhv-theirs"].iter().map(|n| n.to_string()).collect();
+        let (add, remove, second) = plan(&theirs, &now_ours);
+        assert!(add.is_empty(), "nothing is added a second time");
+        assert!(remove.is_empty());
+        assert_eq!(second.taken, 0);
+        assert!(second.nothing(), "and it says nothing happened, because nothing did");
+    }
+}
