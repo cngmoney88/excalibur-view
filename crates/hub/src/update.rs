@@ -298,6 +298,175 @@ pub fn tidy_after_update(program: &std::path::Path) {
     let _ = std::fs::remove_file(program.with_extension("new"));
 }
 
+// ---- the same thing on a Mac ------------------------------------------------
+//
+// Only a Mac calls any of this, but all of it is built everywhere, because
+// none of it needs macOS to compile -- `ditto`, `codesign` and `xattr` are
+// names of programs, not system calls. Built everywhere, it can be tested
+// everywhere, and the parts that decide whether a download is fit to install
+// are exactly the parts worth testing.
+//
+// A Mac program is not a file. It is a folder -- `Excalibur View.app` -- with
+// a signature over everything in it, symbolic links inside it that have to
+// survive being copied, and a quarantine mark macOS puts on anything that came
+// off the internet. Writing over the executable inside it, the way
+// [`swap_in`] does on Windows, breaks the signature and macOS then refuses to
+// open it at all. So the whole folder is replaced at once.
+//
+// Three of macOS's own tools do the parts that must be done exactly right:
+//
+// - `ditto` unpacks the zip. An ordinary unzip flattens the symbolic links a
+//   bundle keeps in `Contents/Frameworks` and strips extended attributes, and
+//   either one invalidates the signature.
+// - `codesign` says whether the unpacked bundle is really signed and whole.
+//   We have already checked it against our own key by this point; this is
+//   macOS's own opinion, asked separately, so a bundle that would not open
+//   is found here rather than after it has replaced the working one.
+// - `xattr` takes the quarantine mark off, which is what otherwise produces
+//   "downloaded from the internet, are you sure" on a version the person did
+//   not download and never saw arrive.
+
+/// Where a bundle's pieces are put while it is being unpacked and checked.
+fn beside(app: &std::path::Path, what: &str) -> std::path::PathBuf {
+    let name = app.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+    let folder = app.parent().unwrap_or(std::path::Path::new("."));
+    folder.join(format!(".{name}.{what}"))
+}
+
+/// Replaces an installed `.app` with the one in `zipped`, so the next start
+/// runs it.
+///
+/// `zipped` is a zip of the bundle as `ditto` makes one -- which is what the
+/// release carries for exactly this reason. The caller has already checked it
+/// against the publisher's key; nothing here is a substitute for that.
+///
+/// Everything happens in the folder the app is already in, so the final step
+/// is a rename within one filesystem rather than a copy that can half-finish.
+/// If that step fails the old bundle is put back.
+pub fn swap_bundle_in(app: &std::path::Path, zipped: &[u8]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    let folder = app
+        .parent()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "that is not an installed program"))?;
+
+    // The common reason an update cannot be put in place: the app is in
+    // /Applications and was put there by somebody else, or by an installer
+    // running as an administrator. Say so now, rather than after downloading.
+    if !writable(folder) {
+        return Err(Error::new(
+            ErrorKind::PermissionDenied,
+            format!(
+                "{} cannot be written to, so this copy cannot replace itself. \
+                 Download the new version and drag it in.",
+                folder.display()
+            ),
+        ));
+    }
+
+    let work = beside(app, "update");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work)?;
+
+    let result = (|| {
+        let archive = work.join("download.zip");
+        std::fs::write(&archive, zipped)?;
+
+        let unpacked = work.join("unpacked");
+        run("/usr/bin/ditto", &["-x", "-k", path(&archive)?, path(&unpacked)?])?;
+
+        let fresh = only_bundle(&unpacked)?;
+        run("/usr/bin/codesign", &["--verify", "--strict", "--deep", path(&fresh)?])?;
+        // Not being able to take the quarantine mark off is not a reason to
+        // stop: there may not be one.
+        let _ = run("/usr/bin/xattr", &["-dr", "com.apple.quarantine", path(&fresh)?]);
+
+        // Into the folder the app lives in, so the swap below is a rename.
+        let staged = beside(app, "staged");
+        let _ = std::fs::remove_dir_all(&staged);
+        std::fs::rename(&fresh, &staged)?;
+        exchange(app, &staged)
+    })();
+
+    let _ = std::fs::remove_dir_all(&work);
+    result
+}
+
+/// Puts `fresh` where `app` is, and the old `app` aside.
+///
+/// Both are in the same folder by this point, so each step is a rename within
+/// one filesystem: it either happens or it does not, and there is no state in
+/// between where the person has half a program. If the second rename fails
+/// anyway, what was working goes back before the error is returned — the one
+/// outcome that must never happen here is a computer left with no program at
+/// all because an update went wrong.
+fn exchange(app: &std::path::Path, fresh: &std::path::Path) -> std::io::Result<()> {
+    let previous = beside(app, "previous");
+    let _ = std::fs::remove_dir_all(&previous);
+    std::fs::rename(app, &previous)?;
+    if let Err(e) = std::fs::rename(fresh, app) {
+        let _ = std::fs::rename(&previous, app);
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Takes away what [`swap_bundle_in`] left behind, once the new version is
+/// the one running.
+pub fn tidy_after_bundle_update(app: &std::path::Path) {
+    for what in ["previous", "staged", "update"] {
+        let _ = std::fs::remove_dir_all(beside(app, what));
+    }
+}
+
+fn writable(folder: &std::path::Path) -> bool {
+    let probe = folder.join(".excalibur-write-test");
+    let ok = std::fs::write(&probe, b"x").is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
+}
+
+/// The one `.app` a freshly unpacked release holds. More than one, or none,
+/// means the archive is not what it claims to be, so nothing is replaced.
+fn only_bundle(folder: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::io::{Error, ErrorKind};
+    let mut found: Vec<std::path::PathBuf> = std::fs::read_dir(folder)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+        .collect();
+    match found.len() {
+        1 => Ok(found.remove(0)),
+        0 => Err(Error::new(ErrorKind::NotFound, "that download holds no program")),
+        n => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("that download holds {n} programs, so none of them was used"),
+        )),
+    }
+}
+
+fn path(p: &std::path::Path) -> std::io::Result<&str> {
+    p.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a usable name", p.display()))
+    })
+}
+
+/// Runs one of macOS's own tools, and turns "it said no" into an error that
+/// says which tool and what it said.
+fn run(tool: &str, args: &[&str]) -> std::io::Result<()> {
+    let out = std::process::Command::new(tool).args(args).output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let said = String::from_utf8_lossy(&out.stderr);
+    let said = said.trim();
+    let name = tool.rsplit('/').next().unwrap_or(tool);
+    Err(std::io::Error::other(if said.is_empty() {
+        format!("{name} would not do it")
+    } else {
+        format!("{name}: {said}")
+    }))
+}
+
 /// The version written into a program file, read without running it.
 ///
 /// Each program carries a line made by [`build_mark!`]. Reading it off the file
@@ -569,5 +738,137 @@ mod tests {
         // Said only when it is true, so an older seat reads the same answer
         // it always has.
         assert!(!text.contains("looking"), "{text}");
+    }
+
+
+    // ---- replacing a program that is a folder, not a file -------------------
+    //
+    // Only a Mac does this for real, because only a Mac needs `ditto` to
+    // unpack a bundle without breaking its signature. Everything that decides
+    // whether a download is fit to install, and everything that moves the
+    // person's working program out of the way, is plain filesystem work and is
+    // checked here on whatever this is running on.
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("excalibur-update-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bundle(at: &std::path::Path, says: &str) -> std::path::PathBuf {
+        let app = at.join("Excalibur View.app");
+        std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+        std::fs::write(app.join("Contents/MacOS/Excalibur View"), says).unwrap();
+        app
+    }
+
+    fn inside(app: &std::path::Path) -> String {
+        std::fs::read_to_string(app.join("Contents/MacOS/Excalibur View")).unwrap()
+    }
+
+    #[test]
+    fn the_new_program_takes_the_old_one_s_place() {
+        let dir = scratch("exchange");
+        let app = bundle(&dir, "the old one");
+        let fresh = beside(&app, "staged");
+        std::fs::create_dir_all(fresh.join("Contents/MacOS")).unwrap();
+        std::fs::write(fresh.join("Contents/MacOS/Excalibur View"), "the new one").unwrap();
+
+        exchange(&app, &fresh).unwrap();
+
+        assert_eq!(inside(&app), "the new one");
+        // The old one is kept until the new one has started once.
+        assert_eq!(inside(&beside(&app, "previous")), "the old one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_swap_puts_the_working_program_back() {
+        let dir = scratch("rollback");
+        let app = bundle(&dir, "the old one");
+        // Nothing staged, so the second rename cannot succeed. The person must
+        // still have the program they had before.
+        let missing = beside(&app, "staged");
+
+        assert!(exchange(&app, &missing).is_err());
+        assert!(app.exists(), "the program was left missing");
+        assert_eq!(inside(&app), "the old one");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn what_an_update_leaves_behind_is_cleared_away() {
+        let dir = scratch("tidy");
+        let app = bundle(&dir, "running");
+        for what in ["previous", "staged", "update"] {
+            std::fs::create_dir_all(beside(&app, what)).unwrap();
+        }
+
+        tidy_after_bundle_update(&app);
+
+        for what in ["previous", "staged", "update"] {
+            assert!(!beside(&app, what).exists(), "{what} was left behind");
+        }
+        assert!(app.exists(), "the program itself was taken away");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leftovers_are_hidden_and_sit_beside_the_program_not_inside_it() {
+        let app = std::path::Path::new("/Applications/Excalibur View.app");
+        let previous = beside(app, "previous");
+        assert_eq!(previous.parent().unwrap(), std::path::Path::new("/Applications"));
+        assert!(previous.file_name().unwrap().to_str().unwrap().starts_with('.'));
+        assert!(!previous.starts_with(app));
+    }
+
+    #[test]
+    fn a_download_holding_one_program_is_the_one_used() {
+        let dir = scratch("one");
+        let app = bundle(&dir, "just me");
+        assert_eq!(only_bundle(&dir).unwrap(), app);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_download_holding_no_program_is_refused() {
+        let dir = scratch("none");
+        std::fs::write(dir.join("readme.txt"), "nothing here").unwrap();
+        let refused = only_bundle(&dir).unwrap_err();
+        assert!(refused.to_string().contains("no program"), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two programs in one download is not a thing a release ever is, so it is
+    /// something else, and guessing which one to install is how the wrong one
+    /// gets installed.
+    #[test]
+    fn a_download_holding_two_programs_is_refused_rather_than_guessed_at() {
+        let dir = scratch("two");
+        std::fs::create_dir_all(dir.join("One.app")).unwrap();
+        std::fs::create_dir_all(dir.join("Two.app")).unwrap();
+        let refused = only_bundle(&dir).unwrap_err();
+        assert!(refused.to_string().contains("2 programs"), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_program_in_a_folder_it_cannot_write_to_says_so_before_anything_else() {
+        // The root directory is the one folder a test can rely on not being
+        // writable, and it is exactly the case this guards: an app somebody
+        // else installed, in a place this person does not own.
+        if unsafe { libc_geteuid() } == 0 {
+            return; // running as root, where everything is writable
+        }
+        let app = std::path::Path::new("/Excalibur View.app");
+        let refused = swap_bundle_in(app, b"not even read").unwrap_err();
+        assert_eq!(refused.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(refused.to_string().contains("drag it in"), "{refused}");
+    }
+
+    extern "C" {
+        #[link_name = "geteuid"]
+        fn libc_geteuid() -> u32;
     }
 }

@@ -534,9 +534,11 @@ fn update_settings(server: &Server) -> hub::UpdateSettings {
     let offering = server
         .store
         .with(|db| {
-            let mut statement = db.prepare(
-                "SELECT version FROM releases WHERE platform = 'windows-x64' AND ready = 1",
-            )?;
+            // Every platform, not just this server's own: what the office is
+            // offering is a version, and the Mac seats in it are offered the
+            // same one as the Windows seats.
+            let mut statement =
+                db.prepare("SELECT DISTINCT version FROM releases WHERE ready = 1")?;
             let all = statement
                 .query_map([], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1821,7 +1823,7 @@ async fn update_latest(
         _ => Channel::Stable,
     };
     let platform = if asking.platform.trim().is_empty() {
-        "windows-x64".to_string()
+        hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
         asking.platform.clone()
     };
@@ -1925,7 +1927,7 @@ async fn update_download(
 ) -> Answer<Response> {
     caller(&server, &headers)?;
     let platform = if asking.platform.trim().is_empty() {
-        "windows-x64".to_string()
+        hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
         asking.platform
     };
@@ -2704,7 +2706,7 @@ async fn release_ready(
 ) -> Answer<Json<serde_json::Value>> {
     administrator(&server, &headers)?;
     let platform = if body.platform.trim().is_empty() {
-        "windows-x64".to_string()
+        hub::feed::ASSUMED_PLATFORM.to_string()
     } else {
         body.platform.clone()
     };

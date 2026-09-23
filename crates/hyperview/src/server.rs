@@ -1009,9 +1009,18 @@ fn check_for_update(
             }
             let feed = hub::feed::Feed::new(url);
             match feed.newest(channel) {
-                Ok(Some(found)) if hub::update::newer(&found.published.app.version, running) => {
+                // Its own platform's build, not whichever one the manifest
+                // happens to name first. A release with nothing for this Mac
+                // is "nothing new", the same as no release at all.
+                Ok(Some(found))
+                    if found
+                        .published
+                        .app_for(platform())
+                        .is_some_and(|r| hub::update::newer(&r.version, running)) =>
+                {
+                    let release = found.published.app_for(platform()).cloned();
                     let offer = UpdateOffer {
-                        release: Some(found.published.app.clone()),
+                        release,
                         pinned_to: None,
                         required: false,
                         looking: false,
@@ -1155,14 +1164,12 @@ fn fetch(
 }
 
 /// What this build is, for asking the server about updates.
+///
+/// The same string the feed publishes under and the same string that goes
+/// into the signature, because a seat asking for one name and a release
+/// carrying another is a seat that never updates and never says why.
 pub fn platform() -> &'static str {
-    if cfg!(windows) {
-        "windows-x64"
-    } else if cfg!(target_os = "macos") {
-        "macos"
-    } else {
-        "linux-x64"
-    }
+    hub::feed::APP_PLATFORM
 }
 
 /// Makes a name safe to be part of a filename.

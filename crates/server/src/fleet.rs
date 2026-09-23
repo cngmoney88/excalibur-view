@@ -414,35 +414,80 @@ async fn update(
     }))
 }
 
-async fn rollback(State(server): State<Shared>, headers: HeaderMap) -> Result<Json<Landed>, No> {
+/// What a rollback may be narrowed to. The Fleet sends no body at all, which
+/// means "whatever is newest, on every platform" — so this is read leniently
+/// and an unreadable body is treated as an absent one rather than an error.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct Withdraw {
+    /// Just the Mac build, say, when the Windows one is fine.
+    platform: String,
+}
+
+async fn rollback(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    body: String,
+) -> Result<Json<Landed>, No> {
     maintainer(&server, &headers)?;
+    let only: Option<String> = serde_json::from_str::<Withdraw>(&body)
+        .ok()
+        .map(|w| w.platform.trim().to_string())
+        .filter(|p| !p.is_empty());
+
     // Withdrawing the newest, not deleting it: the office goes back to what it
     // was on, and the release is still there to look at.
     let undone = server.store.with(|db| {
-        let newest: Option<String> = db
-            .query_row(
-                "SELECT version FROM releases WHERE ready = 1 ORDER BY published DESC LIMIT 1",
-                [],
-                |r| r.get(0),
-            )
-            .ok();
+        // Newest by version, the way the seats read it — not by the day it was
+        // published. Those two disagree the moment a fix for an old version
+        // goes out after a new one, and then the wrong release is withdrawn
+        // while the one actually on offer stays on offer.
+        let mut statement = db.prepare("SELECT DISTINCT version FROM releases WHERE ready = 1")?;
+        let newest = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .max_by(|a, b| hub::update::compare(a, b));
+
+        let mut platforms = Vec::new();
         if let Some(version) = newest.as_deref() {
-            db.execute(
-                "UPDATE releases SET ready = 0 WHERE version = ?1",
-                params![version],
-            )?;
+            // Every platform of that version unless one was named, because a
+            // release is one thing that happened to be built twice, and an
+            // office left offering half of it is an office where the Macs and
+            // the Windows machines are on different versions of the program.
+            match only.as_deref() {
+                Some(platform) => {
+                    db.execute(
+                        "UPDATE releases SET ready = 0 WHERE version = ?1 AND platform = ?2",
+                        params![version, platform],
+                    )?;
+                    platforms.push(platform.to_string());
+                }
+                None => {
+                    let mut listing = db
+                        .prepare("SELECT platform FROM releases WHERE version = ?1 AND ready = 1")?;
+                    platforms = listing
+                        .query_map(params![version], |r| r.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?;
+                    db.execute(
+                        "UPDATE releases SET ready = 0 WHERE version = ?1",
+                        params![version],
+                    )?;
+                }
+            }
         }
-        Ok(newest)
+        Ok(newest.filter(|_| !platforms.is_empty()).map(|v| (v, platforms)))
     });
 
     match undone {
-        Ok(Some(version)) => Ok(Json(Landed {
-            written: vec![format!("withdrew {version}")],
+        Ok(Some((version, platforms))) => Ok(Json(Landed {
+            written: platforms.iter().map(|p| format!("withdrew {version} ({p})")).collect(),
             skipped: Vec::new(),
             restarting: false,
             message: format!(
-                "{version} is no longer offered. Seats already on it stay on it — nothing \
-                 uninstalls itself — and every other seat is offered what it was offered before."
+                "{version} is no longer offered for {}. Seats already on it stay on it — nothing \
+                 uninstalls itself — and every other seat is offered what it was offered before.",
+                platforms.join(", ")
             ),
         })),
         Ok(None) => Ok(Json(Landed {
@@ -704,5 +749,130 @@ mod tests {
         std::fs::write(&path, "one\ntwo\nthree\n").expect("a log");
         assert_eq!(last_lines(&path, 200), vec!["one", "two", "three"]);
         let _ = std::fs::remove_file(&path);
+    }
+
+
+    // ---- withdrawing a release ----------------------------------------------
+
+    fn a_maintained_server(name: &str) -> (Arc<Server>, HeaderMap) {
+        let config = crate::Config {
+            maintenance_key: Some("brace-gusset-purlin-shim-42".into()),
+            ..crate::Config::default()
+        };
+        let store = crate::Store::temporary(&std::env::temp_dir().join(name)).expect("a store");
+        let server = Arc::new(Server::new(store, config));
+        let mut headers = HeaderMap::new();
+        headers.insert(KEY_HEADER, "brace-gusset-purlin-shim-42".parse().unwrap());
+        (server, headers)
+    }
+
+    /// Puts a release in the table the way a successful push leaves one.
+    fn on_offer(server: &Server, version: &str, platform: &str, published: &str) {
+        server
+            .store
+            .with(|db| {
+                db.execute(
+                    "INSERT INTO releases (version, channel, platform, published, notes, bytes,
+                                           digest, signature, signing_key, minimum_api, ready)
+                     VALUES (?1, 'stable', ?2, ?3, '', 1, '00', '11', 'test', 1, 1)",
+                    params![version, platform, published],
+                )?;
+                Ok(())
+            })
+            .expect("a release");
+    }
+
+    fn offered(server: &Server) -> Vec<(String, String)> {
+        server
+            .store
+            .with(|db| {
+                let mut statement = db.prepare(
+                    "SELECT version, platform FROM releases WHERE ready = 1 ORDER BY version, platform",
+                )?;
+                let all = statement
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(all)
+            })
+            .unwrap_or_default()
+    }
+
+    fn withdraw(server: &Arc<Server>, headers: &HeaderMap, body: &str) -> Landed {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(rollback(State(Arc::clone(server)), headers.clone(), body.to_string()))
+            .map(|Json(landed)| landed)
+            .unwrap_or_else(|_| panic!("the channel should have answered"))
+    }
+
+    /// The seats pick what to install by version number. If a withdrawal
+    /// picked by publication date instead, a fix for an old version published
+    /// after a new one would be the one withdrawn — while the release actually
+    /// on offer stayed on offer, and the Fleet's board went green.
+    #[test]
+    fn the_newest_by_version_is_withdrawn_not_the_one_published_last() {
+        let (server, headers) = a_maintained_server("hyperview-fleet-rollback1");
+        on_offer(&server, "9.10.0", "windows-x64", "2026-01-01T00:00:00Z");
+        on_offer(&server, "9.9.0", "windows-x64", "2026-06-01T00:00:00Z");
+
+        let landed = withdraw(&server, &headers, "");
+
+        assert!(landed.message.contains("9.10.0"), "{}", landed.message);
+        assert_eq!(offered(&server), vec![("9.9.0".into(), "windows-x64".into())]);
+    }
+
+    /// A release is one thing that happened to be built twice. Withdrawing it
+    /// takes back both builds, or the Macs in an office end up on a different
+    /// version from the Windows machines beside them.
+    #[test]
+    fn withdrawing_a_release_takes_back_every_platform_of_it() {
+        let (server, headers) = a_maintained_server("hyperview-fleet-rollback2");
+        on_offer(&server, "9.4.0", "windows-x64", "2026-09-01T00:00:00Z");
+        on_offer(&server, "9.4.0", "macos-universal", "2026-09-01T00:00:00Z");
+        on_offer(&server, "9.3.0", "windows-x64", "2026-08-01T00:00:00Z");
+
+        let landed = withdraw(&server, &headers, "");
+
+        assert_eq!(landed.written.len(), 2, "{:?}", landed.written);
+        assert_eq!(offered(&server), vec![("9.3.0".into(), "windows-x64".into())]);
+    }
+
+    /// Unless the Fleet says which one, for the case the whole thing exists
+    /// for: the Mac build is bad and the Windows one is fine.
+    #[test]
+    fn one_platform_can_be_withdrawn_on_its_own() {
+        let (server, headers) = a_maintained_server("hyperview-fleet-rollback3");
+        on_offer(&server, "9.4.0", "windows-x64", "2026-09-01T00:00:00Z");
+        on_offer(&server, "9.4.0", "macos-universal", "2026-09-01T00:00:00Z");
+
+        let landed = withdraw(&server, &headers, r#"{"platform":"macos-universal"}"#);
+
+        assert_eq!(landed.written, vec!["withdrew 9.4.0 (macos-universal)"]);
+        assert_eq!(offered(&server), vec![("9.4.0".into(), "windows-x64".into())]);
+    }
+
+    /// The Fleet sends no body at all today, and a body it cannot read must
+    /// mean the same as no body rather than an error — the one thing a
+    /// withdrawal must never do is quietly not happen.
+    #[test]
+    fn a_body_that_makes_no_sense_withdraws_everything_rather_than_nothing() {
+        let (server, headers) = a_maintained_server("hyperview-fleet-rollback4");
+        on_offer(&server, "9.4.0", "windows-x64", "2026-09-01T00:00:00Z");
+        on_offer(&server, "9.4.0", "macos-universal", "2026-09-01T00:00:00Z");
+
+        let landed = withdraw(&server, &headers, "not json at all");
+
+        assert_eq!(landed.written.len(), 2, "{:?}", landed.written);
+        assert!(offered(&server).is_empty());
+    }
+
+    #[test]
+    fn withdrawing_when_nothing_is_on_offer_says_so_and_is_not_a_failure() {
+        let (server, headers) = a_maintained_server("hyperview-fleet-rollback5");
+        let landed = withdraw(&server, &headers, "");
+        assert!(landed.written.is_empty());
+        assert!(landed.skipped.is_empty(), "not a failure: {:?}", landed.skipped);
+        assert!(landed.message.contains("nothing to withdraw"), "{}", landed.message);
     }
 }

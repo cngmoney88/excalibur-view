@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    For a Mac App Store build only. The Developer ID build uses
+    entitlements.plist instead and does not sandbox.
+
+    The App Store requires the sandbox, and the sandbox is why this file is
+    long: every ordinary thing the program does has to be asked for.
+  -->
+
+  <key>com.apple.security.app-sandbox</key>                       <true/>
+
+  <!-- Opening and saving the drawings somebody chooses. -->
+  <key>com.apple.security.files.user-selected.read-write</key>    <true/>
+  <!-- So a set opened yesterday opens again today without asking again. -->
+  <key>com.apple.security.files.bookmarks.app-scope</key>         <true/>
+
+  <!-- Finding and reaching the office server on the company's own network. -->
+  <key>com.apple.security.network.client</key>                    <true/>
+  <!-- Hosting one, for "host the drawings here". -->
+  <key>com.apple.security.network.server</key>                    <true/>
+
+  <!-- Printing a set. -->
+  <key>com.apple.security.print</key>                             <true/>
+
+  <!-- Metal shader compilation. -->
+  <key>com.apple.security.cs.allow-jit</key>                      <true/>
+
+  <key>com.apple.application-identifier</key>   <string>C27WQYHJXB.com.excaliburct.view</string>
+  <key>com.apple.developer.team-identifier</key><string>C27WQYHJXB</string>
+</dict>
+</plist>

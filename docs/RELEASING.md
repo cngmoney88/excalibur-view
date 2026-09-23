@@ -115,3 +115,105 @@ it or replace it:
 pdfium library and a `profiles` folder on a machine, and registers Hyperview as
 *a* program that opens PDFs rather than taking the association away from
 whatever the person already uses.
+
+## Two platforms in one release
+
+A release is one version built twice. `release.json` says so in two shapes at
+once, and both have to stay:
+
+```json
+{
+  "app":  { "platform": "windows-x64", ... },
+  "apps": [ { "platform": "windows-x64", ... },
+            { "platform": "macos-universal", ... } ],
+  "server": { "platform": "windows-x64-server", ... }
+}
+```
+
+`app` is the Windows build and is exactly where it always was. Every copy of
+Excalibur View installed before there was a Mac build reads that one field and
+knows nothing about the list beside it. Move it and each of those copies is
+stranded on the version it has, with no way of being told about another —
+there is no mechanism to reach them except the field they already read. So
+`app` is repeated inside `apps` rather than replaced by it, and
+`hub::feed::Published::app_for` is what code asks instead of reading a field.
+
+A seat that asks for an update without naming a platform is taken to be a
+Windows one (`hub::feed::ASSUMED_PLATFORM`). It was built when there was only
+one platform to be, so that is the only thing its silence can mean.
+
+An office server holds **every** platform in a release, not just its own. A
+Windows server keeps the Mac build for the Macs in the same office, so a Mac
+that turns up next month finds its version already there rather than waiting
+on the next look at the feed. It costs one extra download per release in a
+shop with no Macs in it.
+
+### Making a Mac release
+
+```
+deploy/macos/build.sh
+```
+
+on the Mac, which produces two files in `target/macos`:
+
+- `ExcaliburView-<version>.dmg` — what a person downloads and drags into
+  Applications.
+- `ExcaliburView-mac.zip` — the same program in the form an update unpacks.
+  Made with `ditto`, which is the only thing that preserves the symbolic links
+  and extended attributes an Apple signature is taken over. A zip made any
+  other way unpacks into a program macOS refuses to open.
+
+The manifest names the **zip**, because the manifest is read by the updater.
+The disk image goes on the release as well, for the website.
+
+Then, on the computer with the key:
+
+```
+python3 tools/publish.py sign --key hyperview-signing.key --version 0.7.0 \
+    --app ExcaliburView.exe --server ExcaliburView-Server.exe \
+    --mac ExcaliburView-mac.zip --out release.json
+python3 tools/publish.py upload --token-file github-token.txt --repo owner/name \
+    --version 0.7.0 release.json ExcaliburView.exe ExcaliburView-Server.exe \
+    ExcaliburView-mac.zip
+```
+
+**Apple has to notarize every Mac build before anyone can install it**, and
+`build.sh` waits for that. A Windows release is instant; a Mac one is a few
+minutes behind. Nothing in the release path has a "signed but waiting" state,
+so the two builds are simply signed together once the Mac one exists.
+
+### Replacing a program that is a folder
+
+Windows replaces one file. macOS replaces `Excalibur View.app` whole —
+overwriting the executable inside a signed bundle breaks the signature and
+macOS then refuses to open it at all. `hub::update::swap_bundle_in` unpacks the
+zip with `ditto`, asks `codesign` whether what came out is really signed,
+takes the quarantine mark off with `xattr`, and swaps the two folders with a
+rename inside the folder the app already lives in. If the swap fails, what was
+working goes back.
+
+An app the person cannot write to — one installed by somebody else, or by an
+administrator — cannot replace itself, and says so before downloading anything
+rather than after.
+
+### On the Fleet
+
+`(version, platform)` is the identity of a release row, so both builds of one
+version sit side by side and the push endpoint carries either. Two things to
+know:
+
+- A `.avpkg` is named `hyperview-<version>-<platform>-<wave>.avpkg` and carries
+  `platform` on its envelope. Before that, two builds of one version wrote the
+  same filename and the second quietly replaced the first on the shelf.
+- `POST /api/admin/update/rollback` withdraws **every** platform of the newest
+  version, chosen by version number rather than publication date. Send
+  `{"platform": "macos-universal"}` to withdraw one build on its own — for the
+  case this exists for, where the Mac build is bad and the Windows one is fine.
+
+### What the App Store copy cannot do
+
+Apple does not allow an App Store app to download and run new code, so a copy
+from the Mac App Store cannot update itself at all — it updates through the
+App Store. That is a second Mac channel, not a variant of this one, and the
+App Store build has to hide "Check for Updates" rather than offer something it
+cannot do.

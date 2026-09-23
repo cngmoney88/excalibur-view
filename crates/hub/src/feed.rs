@@ -25,25 +25,107 @@ use crate::update::{compare, Channel, Release};
 
 /// The file on every release that describes it.
 pub const MANIFEST: &str = "release.json";
-/// What the viewer is published as.
-pub const APP_PLATFORM: &str = "windows-x64";
+
+/// What the viewer is published as, on the platform this copy was built for.
+///
+/// The platform is part of what is signed, so this is not a label. A
+/// signature over the Windows build cannot be passed off as a signature over
+/// the Mac one, whatever a feed claims about it.
+pub const APP_PLATFORM: &str = if cfg!(target_os = "windows") {
+    "windows-x64"
+} else if cfg!(target_os = "macos") {
+    // One string for both processors, because one download holds both. A Mac
+    // never has to know which kind of Mac it is.
+    "macos-universal"
+} else {
+    "linux-x64"
+};
+
 /// What the server is published as. A different platform string, so a
 /// signature over one program can never be passed off as a signature over the
 /// other: the platform is part of what is signed.
-pub const SERVER_PLATFORM: &str = "windows-x64-server";
+pub const SERVER_PLATFORM: &str = if cfg!(target_os = "windows") {
+    "windows-x64-server"
+} else if cfg!(target_os = "macos") {
+    "macos-universal-server"
+} else {
+    "linux-x64-server"
+};
+
+/// Every platform a viewer is published for. The publisher's tools walk this;
+/// a running program only ever cares about its own, which is [`APP_PLATFORM`].
+pub const PLATFORMS: [&str; 3] = ["windows-x64", "macos-universal", "linux-x64"];
+
+/// What a seat that does not name a platform is taken to be.
+///
+/// Every copy that asks without saying was built when there was only one
+/// platform to be, so it is a Windows one. This is not a default in the sense
+/// of a preference; it is the only thing silence can mean, and it has to keep
+/// meaning that for as long as any of those copies is still running.
+pub const ASSUMED_PLATFORM: &str = "windows-x64";
 
 /// Larger than any build will be, and small enough that a feed serving
 /// something enormous cannot fill a server's disk.
 const LARGEST: u64 = 400 * 1024 * 1024;
 
 /// What one release says about itself.
+///
+/// There are two shapes of this, and both have to be read. Every copy
+/// installed before there was a Mac build reads `app` and `server` and knows
+/// nothing else, so those two stay exactly where they were: take them away
+/// and every one of those copies is stranded on the version it has, with no
+/// way to be told otherwise. `apps` and `servers` are what a copy that knows
+/// about more than one platform reads, and they hold *every* build in the
+/// release, the Windows one included.
+///
+/// So a release written today says the same thing twice, deliberately. Use
+/// [`Published::app_for`] and [`Published::server_for`] rather than reaching
+/// for a field, and the two shapes stay one problem instead of two.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Published {
-    /// The viewer. Its `download` is the name of the file on the release.
+    /// The viewer, for an older copy that reads nothing else.
     pub app: Release,
+    /// Every viewer in this release, for a copy that knows to look.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apps: Vec<Release>,
     /// The server, when this release includes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server: Option<Release>,
+    /// Every server in this release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<Release>,
+}
+
+impl Published {
+    /// Every viewer in this release, whichever shape it was written in.
+    pub fn viewers(&self) -> Vec<&Release> {
+        if self.apps.is_empty() {
+            vec![&self.app]
+        } else {
+            self.apps.iter().collect()
+        }
+    }
+
+    /// Every server in this release, whichever shape it was written in.
+    pub fn services(&self) -> Vec<&Release> {
+        if self.servers.is_empty() {
+            self.server.iter().collect()
+        } else {
+            self.servers.iter().collect()
+        }
+    }
+
+    /// The viewer for one platform, or `None` when this release has none for
+    /// it — which is the ordinary answer on the day a platform is added, and
+    /// means "nothing new for you", not "something is wrong".
+    pub fn app_for(&self, platform: &str) -> Option<&Release> {
+        self.viewers().into_iter().find(|r| r.platform == platform)
+    }
+
+    /// The server for one platform.
+    pub fn server_for(&self, platform: &str) -> Option<&Release> {
+        self.services().into_iter().find(|r| r.platform == platform)
+    }
 }
 
 /// The newest release a feed has for a channel, and where its files are.
@@ -191,10 +273,14 @@ mod tests {
     use super::*;
 
     fn release(version: &str, channel: Channel) -> Release {
+        for_platform(version, channel, APP_PLATFORM)
+    }
+
+    fn for_platform(version: &str, channel: Channel, platform: &str) -> Release {
         Release {
             version: version.into(),
             channel,
-            platform: APP_PLATFORM.into(),
+            platform: platform.into(),
             published: "2026-09-21T12:00:00Z".into(),
             notes: String::new(),
             download: "Hyperview.exe".into(),
@@ -234,7 +320,9 @@ mod tests {
         };
         Ok(serde_json::to_string(&Published {
             app: release(version, channel),
+            apps: Vec::new(),
             server: None,
+            servers: Vec::new(),
         })
         .unwrap())
     }
@@ -309,5 +397,86 @@ mod tests {
     #[test]
     fn an_empty_feed_is_nothing_new_not_an_error() {
         assert!(choose(Vec::new(), Channel::Stable, reader).unwrap().is_none());
+    }
+
+    // ---- the two shapes a manifest comes in ---------------------------------
+
+    /// The shape every copy shipped before there was a Mac build writes and
+    /// reads: one `app`, no list. It has to keep working exactly as it did,
+    /// because those copies cannot be told otherwise.
+    #[test]
+    fn a_manifest_from_before_there_were_two_platforms_still_reads() {
+        let text = r#"{"app":{"version":"0.6.3","channel":"stable","platform":"windows-x64",
+            "published":"2026-09-21T12:00:00Z","notes":"","download":"Hyperview.exe",
+            "bytes":1,"digest":"00","signature":"00","key":"mesafab-2026",
+            "minimum_api_version":1}}"#;
+        let published: Published = serde_json::from_str(text).unwrap();
+        assert!(published.apps.is_empty());
+        assert_eq!(published.viewers().len(), 1);
+        assert_eq!(published.app_for("windows-x64").unwrap().version, "0.6.3");
+        assert!(published.app_for("macos-universal").is_none());
+    }
+
+    #[test]
+    fn a_release_carrying_two_platforms_hands_each_one_its_own() {
+        let published = Published {
+            app: for_platform("0.7.0", Channel::Stable, "windows-x64"),
+            apps: vec![
+                for_platform("0.7.0", Channel::Stable, "windows-x64"),
+                for_platform("0.7.0", Channel::Stable, "macos-universal"),
+            ],
+            server: None,
+            servers: Vec::new(),
+        };
+        assert_eq!(published.app_for("windows-x64").unwrap().platform, "windows-x64");
+        assert_eq!(published.app_for("macos-universal").unwrap().platform, "macos-universal");
+        assert!(published.app_for("linux-x64").is_none());
+        assert_eq!(published.viewers().len(), 2);
+    }
+
+    /// Written by today's publisher, read by a copy that only knows `app`.
+    #[test]
+    fn an_old_copy_reading_a_new_manifest_finds_the_windows_build() {
+        let published = Published {
+            app: for_platform("0.7.0", Channel::Stable, "windows-x64"),
+            apps: vec![
+                for_platform("0.7.0", Channel::Stable, "windows-x64"),
+                for_platform("0.7.0", Channel::Stable, "macos-universal"),
+            ],
+            server: None,
+            servers: Vec::new(),
+        };
+        let text = serde_json::to_string(&published).unwrap();
+
+        // What an older copy's narrower struct sees.
+        #[derive(serde::Deserialize)]
+        struct AsItWasRead {
+            app: Release,
+        }
+        let old: AsItWasRead = serde_json::from_str(&text).unwrap();
+        assert_eq!(old.app.platform, "windows-x64");
+        assert_eq!(old.app.version, "0.7.0");
+    }
+
+    /// The empty list is left out rather than written as `[]`, so a manifest
+    /// for one platform is byte-for-byte what it always was.
+    #[test]
+    fn a_one_platform_manifest_is_written_the_way_it_always_was() {
+        let published = Published {
+            app: for_platform("0.6.3", Channel::Stable, "windows-x64"),
+            apps: Vec::new(),
+            server: None,
+            servers: Vec::new(),
+        };
+        let text = serde_json::to_string(&published).unwrap();
+        assert!(!text.contains("apps"), "{text}");
+        assert!(!text.contains("servers"), "{text}");
+    }
+
+    #[test]
+    fn this_build_asks_for_its_own_platform_and_no_other() {
+        assert!(PLATFORMS.contains(&APP_PLATFORM));
+        assert!(SERVER_PLATFORM.starts_with(APP_PLATFORM));
+        assert_ne!(APP_PLATFORM, SERVER_PLATFORM);
     }
 }

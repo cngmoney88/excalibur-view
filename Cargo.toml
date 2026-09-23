@@ -10,7 +10,7 @@ exclude = ["plugins", "private"]
 [workspace.package]
 version = "0.6.3"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.88"
 
 [profile.release]
 opt-level = 3
