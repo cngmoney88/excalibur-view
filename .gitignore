@@ -43,3 +43,6 @@ __pycache__/
 # published source. The chest FORMAT is open, and so is reading and writing one:
 # anybody can build their own.
 private/
+
+# Written by the publishing script on the computer that holds the key.
+/release.json
