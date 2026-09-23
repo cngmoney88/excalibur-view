@@ -853,6 +853,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // Unix only, and not because the code is. `swap_bundle_in` builds on every
+    // platform and is tested on every platform above; this one test needs a
+    // folder it is guaranteed not to be allowed to write to, and the only
+    // portable way to know that is to ask whether this process is root --
+    // which is a question Windows has no `geteuid` to answer. Asking it there
+    // cost a green Windows build a linker error, on a test that was never
+    // about Windows.
+    #[cfg(unix)]
     #[test]
     fn a_program_in_a_folder_it_cannot_write_to_says_so_before_anything_else() {
         // The root directory is the one folder a test can rely on not being
@@ -867,6 +875,7 @@ mod tests {
         assert!(refused.to_string().contains("drag it in"), "{refused}");
     }
 
+    #[cfg(unix)]
     extern "C" {
         #[link_name = "geteuid"]
         fn libc_geteuid() -> u32;
