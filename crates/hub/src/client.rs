@@ -204,6 +204,40 @@ impl Client {
         Self::read(self.get("/people").call())
     }
 
+    /// Gives somebody an account. Administrators only.
+    ///
+    /// The other way in is the join code, which names nobody and lets
+    /// everybody in as the same role. This one is for the shop that would
+    /// rather hand out accounts than a shared secret.
+    pub fn add_person(&self, name: &str, email: &str, password: &str, role: Role) -> Answer<User> {
+        Self::read(self.post("/people").send_json(serde_json::json!({
+            "name": name,
+            "email": email,
+            "password": password,
+            "role": role.word(),
+        })))
+    }
+
+    /// Changes what somebody is allowed to do. Administrators only.
+    ///
+    /// It takes effect on the next thing that seat asks the server, because
+    /// the role is read out of `people` on every call and never carried in
+    /// the session.
+    pub fn change_role(&self, id: &str, role: Role) -> Answer<User> {
+        Self::read(
+            self.post(&format!("/people/{id}/role"))
+                .send_json(serde_json::json!({ "role": role.word() })),
+        )
+    }
+
+    /// Takes somebody's account away, and their keys and sessions with it.
+    /// What they made stays. Administrators only.
+    pub fn remove_person(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(
+            self.post(&format!("/people/{id}/remove")).send_json(serde_json::json!({})),
+        )
+    }
+
     /// How people are getting accounts. Administrators only.
     pub fn joining(&self) -> Answer<Joining> {
         Self::read(self.get("/admin/joining").call())
