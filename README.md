@@ -1,8 +1,8 @@
 # Excalibur View
 
-A native Windows drawing viewer, markup and takeoff program, by Excalibur
-Construction Technologies. Free for one person; offices add Excalibur View
-Office for the server that lets their people work together.
+A native Windows and macOS drawing viewer, markup and takeoff program, by
+Excalibur Construction Technologies. Free for one person; offices add
+Excalibur View Office for the server that lets their people work together.
 
 *Hyperview* is the name it was built under, and it is still the name inside
 it: the program files (`Hyperview.exe`, `Hyperview-Server.exe`), their
