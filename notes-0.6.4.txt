@@ -34,40 +34,46 @@ for an auditor.
 
 Until now the only way to deal with somebody leaving was to change the join
 code, which does nothing to the account they already have or the session they
-are already in. An administrator can now change a person's role, remove them
-outright, and sign a seat out for real.
+are already in.
 
-All three take effect on the next thing that seat asks the server, not the
-next time it signs in — there is no window where a removed account still
-works. Removing somebody takes their keys with them.
+Sign Out now signs a seat out for real. The session is destroyed on the
+server, so the token stops working the moment it is pressed rather than thirty
+days later.
 
-What they made stays. A markup carries its author's name and a set carries who
-uploaded it, written down as text rather than pointing at an account, so a
-takeoff does not lose its history because somebody left the company.
+The server can also change a person's role and remove them outright. Both take
+effect on the next thing that seat asks it, not the next time it signs in, so
+there is no window where a removed account still works, and removing somebody
+takes their keys with them. These two are on the server before they are on a
+screen: today an administrator makes the request to the server directly, and
+the People screen that puts it in front of you is the next thing being built.
+
+What somebody made stays behind them. A markup carries its author's name and a
+set carries who uploaded it, written down as text rather than pointing at an
+account, so a takeoff does not lose its history because somebody left the
+company.
 
 Every one of these — adding a person, changing a role, removing one, signing a
 seat out, revoking a key, exporting a takeoff — goes into the record the
-server keeps, with who did it and when.
+server keeps, with who did it and when. So does a sign-in refused for an
+address nobody has, which is the one an administrator most wants to see.
 
 ## Licences that renew themselves
 
-Buying three more seats used to mean waiting on a file to be signed and
-emailed over. A server now fetches its own renewal on the same half-hourly
-trip it already makes to look for updates, so more seats, or another year, are
-in place inside the hour with nobody sending anybody anything.
+Buying three more seats means waiting on a file to be signed and emailed over.
+A server can now fetch its own renewal instead, on the same half-hourly trip
+it already makes to look for updates, so more seats or another year are in
+place inside the hour with nobody sending anybody anything.
 
 Nothing about that trip decides a licence is good. What comes back is checked
 against the keys built into the server, the same way an update is, and then
 checked against the licence already held: one that gives fewer seats, ends
-sooner, or belongs to somebody else is thrown away and the old one kept.
+sooner, or belongs to somebody else is thrown away and the old one kept. It is
+not an account — no password, no session, nothing to reset — and the server
+sends nothing about itself, not a seat count, not a company name.
 
-## The trade chests
-
-Six chests — structural steel, concrete, general contractor, plumbing,
-electrical, mechanical — $149 each, or $499 for all six. Priced per company,
-not per seat: a chest is a file, and charging a shop twice because two
-estimators opened the same one is the kind of thing that makes people hate
-software.
+This ships switched off, and switches on the day we publish the first renewal.
+A sealed office never asks at all, by design: its licences arrive as files, by
+hand, the way a sealed office wants everything to arrive.
 
 ## Also in this release
 
