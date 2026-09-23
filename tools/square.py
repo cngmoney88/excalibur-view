@@ -341,6 +341,26 @@ def a_ladder(square, kind, name, price, most, site, note, location, had):
     return rungs, made, kept
 
 
+def chest_urls(site, download, key):
+    """Where a bought chest lives: the page, and the file the page offers.
+
+    Two addresses under the one unguessable name. The page is what a payment
+    link sends somebody to, because a chest that arrives in a download bar
+    teaches nobody what to do with it - and on a phone it may not even be
+    findable. The file sits beside it.
+
+    The page is at the unguessable name too, not at /f/thanks/steel/. That
+    matters: the random name is the whole of the difference between having
+    paid and not, so a page anybody could guess that links to the file would
+    hand the chest away. It is not a lock either way - the format is open and
+    a buyer can pass a chest to anybody - but there is no reason to leave it
+    lying on the pricing page.
+    """
+    suffix = "zip" if key == CHEST_BUNDLE[0] else "evtools"
+    site = site.rstrip("/")
+    return f"{site}/f/{download}/", f"{site}/f/{download}.{suffix}"
+
+
 def a_download_name(key, had):
     """The address a bought chest is fetched from, made once and kept.
 
@@ -394,18 +414,17 @@ def chest_links(square, site, location, had):
             rungs[key] = already
             kept += 1
             continue
-        # Paying takes them straight to the file. No email to send, nothing
-        # for anybody to remember to do, and no gap between somebody paying
-        # and somebody getting what they paid for.
+        # Paying takes them straight to their chest. No email to send,
+        # nothing for anybody to remember to do, and no gap between somebody
+        # paying and somebody getting what they paid for.
         download = a_download_name(key, had)
-        # All six is a zip; one trade is the chest itself.
-        suffix = "zip" if key == CHEST_BUNDLE[0] else "evtools"
-        url = f"{site.rstrip('/')}/f/{download}.{suffix}"
+        page, url = chest_urls(site, download, key)
         rungs[key] = one_link(square, f"chest-{key}", name, price, site,
                               f"{note} One price for the whole office.", location,
-                              redirect=url)
+                              redirect=page)
         rungs[key]["download"] = download
         rungs[key]["url_file"] = url
+        rungs[key]["url_page"] = page
         made += 1
     return rungs, made, kept
 
@@ -817,6 +836,13 @@ def cmd_files(a):
         print(f"  {key:<11} {os.path.basename(out):<32} {size:>8.1f} KB")
     print("\nThese go in the site's f/ folder. The addresses never change, so a")
     print("payment link made today still works after the next chest update.")
+    print("\nEach one also needs a page beside it, which is where paying sends")
+    print("people. The site builds these; here is what they are called:\n")
+    for key, _ in made:
+        rung = by_trade.get(key) or {}
+        page, file_url = chest_urls("", rung.get("download", "?"), key)
+        print(f"  {key:<11} f/{page.strip('/').split('/', 1)[-1]}/index.html"
+              f"   offers  {file_url.lstrip('/')}")
 
 
 def cmd_orders(a):
@@ -880,6 +906,66 @@ def cmd_issue(a):
         print(f"\nThe files and their emails are in {folder.licenses}. Attach the .evlicense to the email.")
 
 
+def cmd_thanks(a):
+    """Re-points chest links that already exist at their page.
+
+    The first seven chest links were made when paying downloaded the file
+    straight away. Changing `chest_links` does not touch them - it leaves a
+    link that already exists alone, which is the right thing for prices and
+    the wrong thing for this - so the change is made here, to the links
+    themselves, and the website keeps the same seven URLs it already has.
+
+    Square wants the version it last gave out with every update, so each
+    link is read before it is written.
+    """
+    folder = Folder(a.folder)
+    square = folder.square(a.sandbox)
+    links = folder.links()
+    by_trade = (links.get("chests") or {}).get("by_trade") or {}
+    if not by_trade:
+        raise SystemExit("no chest links yet - run `python square.py setup` first.")
+
+    changed, already, stuck = 0, 0, []
+    for key, rung in by_trade.items():
+        download = rung.get("download")
+        link_id = rung.get("id")
+        if not download or not link_id:
+            stuck.append(f"{key}: no download address yet - run setup again")
+            continue
+        page, file_url = chest_urls(a.site, download, key)
+
+        got = square.call("GET", f"/v2/online-checkout/payment-links/{link_id}")
+        link = got.get("payment_link") or {}
+        options = dict(link.get("checkout_options") or {})
+        if options.get("redirect_url") == page:
+            rung["url_page"], rung["url_file"] = page, file_url
+            already += 1
+            print(f"  {key:<11} already goes to its page")
+            continue
+        was = options.get("redirect_url") or "(nowhere)"
+        options["redirect_url"] = page
+        if a.dry_run:
+            print(f"  {key:<11} would change {was} -> {page}")
+            continue
+        square.call("PUT", f"/v2/online-checkout/payment-links/{link_id}", {
+            "payment_link": {"version": link.get("version"), "checkout_options": options},
+        })
+        rung["url_page"], rung["url_file"] = page, file_url
+        changed += 1
+        print(f"  {key:<11} {was} -> {page}")
+
+    if not a.dry_run:
+        folder.save_links(links)
+    for line in stuck:
+        print(f"  {line}")
+    if a.dry_run:
+        print("\nNothing was changed. Run it again without --dry-run.")
+        return
+    print(f"\n{changed} changed, {already} already right.")
+    print("Each page needs to exist before anybody buys that chest. The addresses are")
+    print("in square-links.json under chests.by_trade, as url_page and url_file.")
+
+
 def cmd_watch(a):
     a.quiet = True
     a.company = None
@@ -898,6 +984,9 @@ def main():
     fi = sub.add_parser("files", help="lay out the f/ folder the website serves")
     fi.add_argument("--into", required=True, help="where to write them (the site's f/ folder)")
     fi.add_argument("--chests", help="where the .evtools files are (default: <folder>/chests)")
+
+    th = sub.add_parser("thanks", help="point chest links at their page rather than the file")
+    th.add_argument("--dry-run", action="store_true", help="say what would change and change nothing")
 
     s = sub.add_parser("setup", help="make the payment links the website's Buy buttons use")
     s.add_argument("--price", type=int, default=SEATS_PRICE, help="cents per user, one time")
@@ -921,7 +1010,7 @@ def main():
     a = p.parse_args()
     try:
         {"setup": cmd_setup, "orders": cmd_orders, "issue": cmd_issue,
-         "watch": cmd_watch, "files": cmd_files}[a.command](a)
+         "watch": cmd_watch, "files": cmd_files, "thanks": cmd_thanks}[a.command](a)
     except SquareSaid as e:
         raise SystemExit(str(e))
 
