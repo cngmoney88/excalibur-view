@@ -12,8 +12,15 @@ never goes anywhere else. Standard library plus `cryptography` for Ed25519.
     python3 publish.py upload   --token-file github-token.txt --repo owner/name \\
                                 --version 0.5.0 --notes-file notes.txt \\
                                 release.json Hyperview.exe Hyperview-Server.exe
+    python3 publish.py release  --key hyperview-signing.key --token-file github-token.txt \\
+                                --repo owner/name --notes-file notes.txt \\
+                                --mac-zip ExcaliburView-mac.zip --mac-dmg ExcaliburView-mac.dmg
     python3 publish.py promote  --key hyperview-signing.key --token-file github-token.txt \\
                                 --repo owner/name --version 0.5.0
+
+`release` is the whole thing in one command: tests, build, sign, upload,
+publish. The three commands above it are its parts, for when one of them has
+to be done on its own.
     python3 publish.py sign-plugin --key hyperview-signing.key --id mesafab-estimating \\
                                 --version 1.0.0 --name "Mesa Fab Estimating" \\
                                 mesafab_estimating.wasm
@@ -53,6 +60,7 @@ import re
 import sys
 import time
 import urllib.error
+import subprocess
 import urllib.request
 
 APP_PLATFORM = "windows-x64"
@@ -457,6 +465,13 @@ def cmd_upload(a):
     if wanted:
         raise SystemExit(f"{a.files[0]} also lists {', '.join(wanted.values())}, which was not given - nothing was uploaded.")
 
+    # Files that go on the release but are not programs anybody updates to.
+    # The Mac disk image is the one of these: a person opens it and drags the
+    # program into Applications, while the updater takes the zip that the
+    # manifest names. It is on the release because the website links to it.
+    for path in getattr(a, "extra", None) or []:
+        uploads.append((path, os.path.basename(path)))
+
     release = gh.release(tag)
     if release is None:
         # A draft first, so no server sees a release with half its files.
@@ -482,6 +497,117 @@ def cmd_upload(a):
     })
     print(f"published {tag} as {'a full release' if channel == 'stable' else 'an early release'}: "
           f"{', '.join(name for _, name in uploads)}")
+
+
+# ---- a whole release, in one command ---------------------------------------
+
+def run(command, where=None):
+    """Runs a command and lets it print as it goes, so a long build is not
+    silence. Stops everything if it fails."""
+    print("  " + " ".join(command))
+    code = subprocess.call(command, cwd=where)
+    if code != 0:
+        raise SystemExit(f"that failed ({code}) - nothing has been published.")
+
+
+def repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def version_in_cargo():
+    with open(os.path.join(repo_root(), "Cargo.toml"), encoding="utf-8") as f:
+        for line in f:
+            if line.startswith("version"):
+                return line.split('"')[1]
+    raise SystemExit("could not read the version out of Cargo.toml")
+
+
+def built(name):
+    """Where cargo leaves a program, whichever kind of computer this is."""
+    root = repo_root()
+    for candidate in (f"{name}.exe", name):
+        path = os.path.join(root, "target", "release", candidate)
+        if os.path.exists(path):
+            return path
+    raise SystemExit(f"target/release/{name} is not there - did the build run?")
+
+
+def cmd_release(a):
+    """Builds, signs, uploads and publishes, in that order, stopping at the
+    first thing that goes wrong.
+
+    The signing key is read on this computer and used here. It is not sent
+    anywhere and nothing about this command changes that: the build and the
+    upload happen either side of it, and the key stays where it is.
+
+    The Mac half is built on a Mac, by deploy/macos/build.sh, because only a
+    Mac can sign and notarize one. Its two files are handed to this with
+    --mac-zip and --mac-dmg. Without them this publishes a Windows-only
+    release, which is a perfectly good release and what every release before
+    0.6.4 was.
+    """
+    root = repo_root()
+    version = a.version or version_in_cargo()
+    if version != version_in_cargo():
+        raise SystemExit(
+            f"you asked for {version} and Cargo.toml says {version_in_cargo()}. "
+            "One of them is wrong, and a release whose program reports a different "
+            "version from its manifest is one nobody can diagnose later.")
+
+    for name, path in (("--mac-zip", a.mac_zip), ("--mac-dmg", a.mac_dmg)):
+        if path and not os.path.exists(path):
+            raise SystemExit(f"{name} {path} is not there.")
+    if bool(a.mac_zip) != bool(a.mac_dmg):
+        raise SystemExit(
+            "give both --mac-zip and --mac-dmg or neither. The zip is what an "
+            "update installs and the disk image is what a person downloads; a "
+            "release with one and not the other is broken for somebody.")
+
+    # 1. Does it pass its own tests? A release that does not is not a release.
+    if a.skip_tests:
+        print("\n== skipping the tests, because you asked ==")
+    else:
+        print("\n== tests ==")
+        run(["cargo", "test", "--workspace", "--quiet"], root)
+
+    # 2. Build the Windows programs.
+    if a.skip_build:
+        print("\n== using the programs already in target/release ==")
+    else:
+        print("\n== building ==")
+        run(["cargo", "build", "--release", "-p", "hyperview", "-p", "hyperview-server"], root)
+    app, server = built("hyperview"), built("hyperview-server")
+
+    # 3. Sign every program, here, with the key on this computer.
+    print("\n== signing ==")
+    manifest = os.path.join(root, MANIFEST)
+    cmd_sign(argparse.Namespace(
+        key=a.key, version=version, channel=a.channel, notes_file=a.notes_file,
+        app=app, mac=a.mac_zip, server=server, out=manifest,
+        published=None, min_api=a.min_api))
+
+    if a.sign_only:
+        print(f"\nstopped after signing, as you asked. {manifest} is ready.")
+        return
+
+    # 4. Up it goes, as a draft until every file is there whole.
+    print("\n== uploading ==")
+    files = [manifest, app, server] + ([a.mac_zip] if a.mac_zip else [])
+    cmd_upload(argparse.Namespace(
+        token_file=a.token_file, repo=a.repo, version=version,
+        notes_file=a.notes_file, files=files,
+        extra=[a.mac_dmg] if a.mac_dmg else []))
+
+    print()
+    print(f"  {version} is up as {'a full release' if a.channel == 'stable' else 'an early release'}.")
+    print(f"  https://github.com/{a.repo}/releases/tag/v{version}")
+    if a.channel != "stable":
+        print()
+        print("  Try it on one seat. When it is good, every office takes it:")
+        print()
+        print(f"      python3 tools/publish.py promote --key {a.key} \\")
+        print(f"          --token-file {a.token_file} --repo {a.repo} --version {version}")
+    print()
 
 
 def cmd_promote(a):
@@ -537,12 +663,28 @@ def main():
     u.add_argument("--repo", required=True)
     u.add_argument("--version", required=True)
     u.add_argument("--notes-file")
+    u.add_argument("--extra", action="append", default=[],
+                   help="a file that goes on the release but is not in the manifest, such as the Mac disk image")
     u.add_argument("files", nargs="+", help="release.json first, then the program files")
     r = sub.add_parser("promote")
     r.add_argument("--key", required=True)
     r.add_argument("--token-file", required=True)
     r.add_argument("--repo", required=True)
     r.add_argument("--version", required=True)
+    rel = sub.add_parser("release", help="build, sign, upload and publish, in one command")
+    rel.add_argument("--key", required=True, help="the signing key, on this computer")
+    rel.add_argument("--token-file", required=True)
+    rel.add_argument("--repo", required=True)
+    rel.add_argument("--version", help="defaults to the version in Cargo.toml")
+    rel.add_argument("--channel", choices=["preview", "stable"], default="preview")
+    rel.add_argument("--notes-file")
+    rel.add_argument("--mac-zip", help="ExcaliburView-mac.zip from deploy/macos/build.sh")
+    rel.add_argument("--mac-dmg", help="the .dmg from the same build")
+    rel.add_argument("--min-api", type=int, default=1)
+    rel.add_argument("--skip-build", action="store_true", help="use what is in target/release already")
+    rel.add_argument("--skip-tests", action="store_true")
+    rel.add_argument("--sign-only", action="store_true", help="stop after writing release.json")
+
     l = sub.add_parser("sign-license")
     l.add_argument("--key", required=True)
     l.add_argument("--company", required=True)
@@ -567,6 +709,7 @@ def main():
     a = p.parse_args()
     try:
         {"sign": cmd_sign, "upload": cmd_upload, "promote": cmd_promote,
+         "release": cmd_release,
          "sign-plugin": cmd_sign_plugin, "sign-license": cmd_sign_license}[a.command](a)
     except GitHubRefused as e:
         raise SystemExit(str(e))
