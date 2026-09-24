@@ -3618,6 +3618,14 @@ impl Engine {
             .iter()
             .map(|one| (one.doc, (0..one.count as u32).collect()))
             .collect();
+        let files: Vec<(String, usize)> = sources
+            .iter()
+            .zip(&open)
+            .map(|(path, one)| {
+                let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                (name, one.count)
+            })
+            .collect();
         let result = self
             .assemble(&plan)
             .and_then(|fresh| {
@@ -3629,6 +3637,11 @@ impl Engine {
             self.close_alone(one);
         }
         result?;
+        // A bookmark per file is a nicety: a combined set without them is
+        // still the combined set, so a failure here is logged, not reported.
+        if let Err(why) = crate::docops::bookmark_each_file(to, &files) {
+            log::warn!("combined {} but could not bookmark it: {why}", nice(to));
+        }
         Ok(Done {
             wrote: vec![to.to_path_buf()],
             said: format!(

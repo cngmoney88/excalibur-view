@@ -607,6 +607,39 @@ impl Client {
         )
     }
 
+    /// Runs one of the office's plugins on the server rather than here, for a
+    /// copy that isn't allowed to run code it downloads. The input goes over
+    /// packed, the way a seat would hand it to the plugin itself, and what
+    /// comes back is the plugin's own answer.
+    pub fn run_plugin(&self, id: &str, input: &plugin_api::Input) -> Answer<plugin_api::Answer> {
+        Self::read(
+            self.post(&format!("/plugins/{id}/run"))
+                .set("Content-Type", "application/octet-stream")
+                .send_bytes(&plugin_api::pack(input)),
+        )
+    }
+
+    /// Where the office tells other programs a takeoff changed. Administrators only.
+    pub fn notices(&self) -> Answer<Vec<ChangeNotice>> {
+        Self::read(self.get("/notices").call())
+    }
+
+    /// A new address to tell. The secret comes back this once.
+    pub fn add_notice(&self, url: &str) -> Answer<ChangeNotice> {
+        Self::read(self.post("/notices").send_json(serde_json::json!({ "url": url })))
+    }
+
+    /// Sends a test notice now. What came of it: `delivered`, or why not.
+    pub fn test_notice(&self, id: &str) -> Answer<String> {
+        let said: serde_json::Value =
+            Self::read(self.post(&format!("/notices/{id}/test")).send_json(serde_json::json!({})))?;
+        Ok(said["status"].as_str().unwrap_or_default().to_string())
+    }
+
+    pub fn remove_notice(&self, id: &str) -> Answer<serde_json::Value> {
+        Self::read(self.post(&format!("/notices/{id}/remove")).send_json(serde_json::json!({})))
+    }
+
     /// Stops handing a plugin out. Seats drop it the next time they look.
     pub fn remove_plugin(&self, id: &str) -> Answer<serde_json::Value> {
         Self::read(self.post(&format!("/plugins/{id}/remove")).send_json(serde_json::json!({})))

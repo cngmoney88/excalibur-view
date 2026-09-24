@@ -1368,6 +1368,9 @@ impl App {
                 "Edit.Multiply" => self.begin_repeat(true),
                 "Help.About" => self.about = true,
                 "Help.CheckForUpdates" => self.check_for_updates_now(),
+                "Help.ConnectAssistant" if !crate::edition::reaches_other_programs() => {
+                    self.status = crate::edition::not_in_this_copy("Connecting an assistant app");
+                }
                 "Help.ConnectAssistant" => self.connect_assistant(),
                 "Help.TestAssistant" => self.test_assistant(),
                 "Help.Shortcuts" => self.shortcuts_open = true,
@@ -1664,7 +1667,8 @@ impl App {
                 }
                 "Plugins.Add" => self.add_plugin(),
                 "Plugins.Manage" => self.managing_plugins = true,
-                "Plugins.SaveInput" => self.save_plugin_input(ctx),
+                "Plugins.SaveInput" => self.save_plugin_input(ctx, false),
+                "Plugins.SaveInputAll" => self.save_plugin_input(ctx, true),
                 other if other.starts_with("Plugin:") => self.start_plugin(other, ctx),
                 other => {
                     // Tools change what the canvas does.

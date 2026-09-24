@@ -88,6 +88,7 @@ pub fn is_installed_copy() -> bool {
 /// somebody asked to keep portable do not.
 fn manages_itself() -> bool {
     (cfg!(windows) || cfg!(target_os = "macos"))
+        && crate::edition::updates_itself()
         && !cfg!(debug_assertions)
         && std::env::var_os("HYPERVIEW_PORTABLE").is_none()
 }
@@ -490,6 +491,14 @@ pub fn uninstall() {
 /// The keys this build accepts an update from.
 pub fn trusted() -> Trusted {
     Trusted::pinned(crate::trust::KEYS)
+}
+
+/// The keys a plugin may be signed with: every release key, so the plugins an
+/// office already has keep loading, and the keys made for plugins alone.
+pub fn plugin_trusted() -> Trusted {
+    let mut trust = Trusted::pinned(crate::trust::KEYS);
+    trust.keys.extend(Trusted::pinned(crate::trust::PLUGIN_KEYS).keys);
+    trust
 }
 
 /// Whether this copy puts updates in place itself: the installed copy of a

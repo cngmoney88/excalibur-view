@@ -1,6 +1,6 @@
 #!/bin/sh
 # Builds the plugin for WebAssembly. Signing happens on the publisher's PC:
-#   python publish.py sign-plugin --key hyperview-signing.key \
+#   python publish.py sign-plugin --key plugin-signing.key \
 #       --id mesafab-estimating --version <version> --name "Mesa Fab Estimating" \
 #       mesafab_estimating.wasm
 set -e

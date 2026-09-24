@@ -494,6 +494,8 @@ mod tests {
                 updates: Default::default(),
                 patience: Default::default(),
                 tunnel: Default::default(),
+                manifests: Default::default(),
+                notices: Default::default(),
             },
             dir,
         )

@@ -483,6 +483,54 @@ pub struct Done {
 /// they have already decided to run, which is a question nobody reads
 /// carefully, on the one occasion where getting it wrong destroys a drawing
 /// set. So this never asks, and never overwrites.
+/// Puts one bookmark per source file into a combined set, named after the
+/// file and opening at its first sheet, so a stapled set can still be found
+/// round in. `files` is each source's name and how many sheets it brought.
+/// Written as an update on the end of the file; nothing already in it moves.
+pub fn bookmark_each_file(path: &Path, files: &[(String, usize)]) -> Result<(), String> {
+    let file = pdf::Document::open(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
+    let pages = file.pages();
+    let starts = run_starts(&files.iter().map(|(_, count)| *count).collect::<Vec<_>>());
+    let mut update = pdf::write::Update::new(&file);
+    let refs: Vec<pdf::Ref> = files.iter().map(|_| update.add(pdf::Object::Null)).collect();
+    let outlines_ref = update.add(pdf::Object::Null);
+    for (at, (title, _)) in files.iter().enumerate() {
+        let Some(page_ref) = starts.get(at).and_then(|start| pages.get(*start)).copied() else {
+            continue;
+        };
+        let mut entry = pdf::Dict::new();
+        entry.set("Title", pdf::Object::text(title));
+        entry.set("Parent", pdf::Object::Ref(outlines_ref));
+        if at > 0 {
+            entry.set("Prev", pdf::Object::Ref(refs[at - 1]));
+        }
+        if at + 1 < refs.len() {
+            entry.set("Next", pdf::Object::Ref(refs[at + 1]));
+        }
+        entry.set(
+            "Dest",
+            pdf::Object::Array(vec![pdf::Object::Ref(page_ref), pdf::Object::name("Fit")]),
+        );
+        update.replace(refs[at], pdf::Object::Dict(entry));
+    }
+    let mut outlines = pdf::Dict::new();
+    outlines.set("Type", pdf::Object::name("Outlines"));
+    if let (Some(first), Some(last)) = (refs.first(), refs.last()) {
+        outlines.set("First", pdf::Object::Ref(*first));
+        outlines.set("Last", pdf::Object::Ref(*last));
+    }
+    outlines.set("Count", pdf::Object::Int(refs.len() as i64));
+    update.replace(outlines_ref, pdf::Object::Dict(outlines));
+    let Some(catalog_ref) = file.xref.trailer.get("Root").and_then(|o| o.as_ref()) else {
+        return Err("the combined file has no catalog".into());
+    };
+    let mut catalog = file.catalog();
+    catalog.set("Outlines", pdf::Object::Ref(outlines_ref));
+    catalog.set("PageMode", pdf::Object::name("UseOutlines"));
+    update.replace(catalog_ref, pdf::Object::Dict(catalog));
+    std::fs::write(path, update.apply(&file)).map_err(|e| format!("could not write {}: {e}", path.display()))
+}
+
 pub fn free_name(wanted: &Path) -> PathBuf {
     if !wanted.exists() {
         return wanted.to_path_buf();

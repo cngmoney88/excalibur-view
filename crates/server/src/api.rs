@@ -33,6 +33,10 @@ pub struct Server {
     pub patience: crate::patience::Patience,
     /// The shop's own tunnel, when they have turned one on.
     pub tunnel: crate::tunnel::Tunnel,
+    /// Change notices waiting to go (`crate::notices`).
+    pub notices: crate::notices::Pending,
+    /// Each plugin's manifest, by the plugin file's digest, read once.
+    pub manifests: std::sync::Mutex<std::collections::HashMap<String, Option<plugin_api::Manifest>>>,
 }
 
 impl Server {
@@ -43,6 +47,8 @@ impl Server {
             updates: crate::updates::Watch::default(),
             patience: crate::patience::Patience::default(),
             tunnel: crate::tunnel::Tunnel::default(),
+            manifests: Default::default(),
+            notices: Default::default(),
         };
         crate::license::begin(&server);
         server
@@ -244,7 +250,11 @@ pub fn router(server: Shared) -> Router {
         .route("/chests/:id/file", get(chest_file))
         .route("/plugins", get(plugins).post(add_plugin))
         .route("/plugins/:id/file", get(plugin_file))
+        .route("/plugins/:id/run", post(run_plugin))
         .route("/plugins/:id/remove", post(remove_plugin))
+        .route("/notices", get(list_notices).post(add_notice))
+        .route("/notices/:id/test", post(test_notice))
+        .route("/notices/:id/remove", post(remove_notice))
         .route("/license", get(read_license).post(add_license))
         .route("/audit", get(read_audit))
         .route("/audit.csv", get(audit_csv))
@@ -318,6 +328,10 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("POST", "/people/{id}/remove"),
     ("GET", "/chests"),
     ("POST", "/chests"),
+    ("GET", "/notices"),
+    ("POST", "/notices"),
+    ("POST", "/notices/{id}/test"),
+    ("POST", "/notices/{id}/remove"),
     ("GET", "/license"),
     ("POST", "/license"),
     ("GET", "/audit"),
@@ -329,6 +343,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/plugins"),
     ("POST", "/plugins"),
     ("GET", "/plugins/{id}/file"),
+    ("POST", "/plugins/{id}/run"),
     ("POST", "/plugins/{id}/remove"),
     ("GET", "/update/latest"),
     ("GET", "/update/{version}/download"),
@@ -1412,7 +1427,116 @@ async fn add_markups(
         })
         .map_err(|e| Denied::broke("save those markups", e))?;
 
+    if result.is_some() {
+        crate::notices::changed(&server, &id);
+    }
     result.map(Json).ok_or_else(|| Denied::missing("drawing set"))
+}
+
+// ---- change notices -------------------------------------------------------
+
+#[derive(Deserialize)]
+struct NewNotice {
+    url: String,
+}
+
+fn notice_rows(db: &Connection) -> rusqlite::Result<Vec<ChangeNotice>> {
+    let mut q = db.prepare(
+        "SELECT id, url, created, created_by, last_status, last_at FROM notices ORDER BY created",
+    )?;
+    let rows = q.query_map([], |r| {
+        Ok(ChangeNotice {
+            id: r.get(0)?,
+            url: r.get(1)?,
+            created: r.get(2)?,
+            created_by: r.get(3)?,
+            last_status: r.get(4)?,
+            last_at: r.get(5)?,
+            secret: None,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Where the office tells other programs a takeoff changed. Administrators only.
+async fn list_notices(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Vec<ChangeNotice>>> {
+    administrator(&server, &headers)?;
+    let list = server
+        .store
+        .with(|db| Ok(notice_rows(db)?))
+        .map_err(|e| Denied::broke("list the notice addresses", e))?;
+    Ok(Json(list))
+}
+
+/// A new address to tell. The secret its notices are signed with comes back
+/// this once.
+async fn add_notice(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(asked): Json<NewNotice>,
+) -> Answer<Json<ChangeNotice>> {
+    let who = administrator(&server, &headers)?;
+    let url = asked.url.trim().to_string();
+    crate::notices::acceptable(&url).map_err(Denied::wrong)?;
+    let notice = ChangeNotice {
+        id: fresh_id("ntc"),
+        url,
+        created: now(),
+        created_by: who.name.clone(),
+        last_status: None,
+        last_at: None,
+        secret: Some(crate::notices::secret()),
+    };
+    server
+        .store
+        .with(|db| {
+            db.execute(
+                "INSERT INTO notices (id, url, secret, created, created_by) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    notice.id,
+                    notice.url,
+                    notice.secret.as_deref().unwrap_or_default(),
+                    notice.created,
+                    notice.created_by
+                ],
+            )?;
+            Ok(())
+        })
+        .map_err(|e| Denied::broke("keep that notice address", e))?;
+    tracing::info!("{} added a change notice to {}", who.name, notice.url);
+    Ok(Json(notice))
+}
+
+/// Sends a test notice now, and says how it went.
+async fn test_notice(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<serde_json::Value>> {
+    administrator(&server, &headers)?;
+    let tried = server.clone();
+    let status = tokio::task::spawn_blocking(move || crate::notices::test(&tried, &id))
+        .await
+        .map_err(|e| Denied::broke("send a test notice", e))?
+        .map_err(Denied::wrong)?;
+    Ok(Json(serde_json::json!({ "status": status })))
+}
+
+async fn remove_notice(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<serde_json::Value>> {
+    let who = administrator(&server, &headers)?;
+    let gone = server
+        .store
+        .with(|db| Ok(db.execute("DELETE FROM notices WHERE id = ?1", params![id])?))
+        .map_err(|e| Denied::broke("remove that notice address", e))?;
+    if gone == 0 {
+        return Err(Denied::missing("notice address"));
+    }
+    tracing::info!("{} removed change notice {id}", who.name);
+    Ok(Json(serde_json::json!({ "removed": id })))
 }
 
 // ---- the takeoff ----------------------------------------------------------
@@ -1948,13 +2072,86 @@ async fn plugins(State(server): State<Shared>, headers: HeaderMap) -> Answer<Jso
                         uploaded: r.get(5)?,
                         uploaded_by: r.get(6)?,
                         key: r.get(7)?,
+                        manifest: None,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
         .map_err(|e| Denied::broke("list the plugins", e))?;
+    let mut list = list;
+    for plugin in list.iter_mut() {
+        plugin.manifest = manifest_of(&server, &plugin.digest).await;
+    }
     Ok(Json(list))
+}
+
+/// A plugin's manifest, read in the sandbox the first time it is asked for
+/// and kept. `None` when the file can't be read or won't say.
+async fn manifest_of(server: &Shared, digest: &str) -> Option<plugin_api::Manifest> {
+    if let Some(known) = server.manifests.lock().ok()?.get(digest) {
+        return known.clone();
+    }
+    let bytes = server.store.get_blob(digest).ok()?;
+    let read = tokio::task::spawn_blocking(move || {
+        let (_, wasm) = plugin_api::open(&bytes).ok()?;
+        plugin_host::manifest_of(wasm).ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Ok(mut known) = server.manifests.lock() {
+        known.insert(digest.to_string(), read.clone());
+    }
+    read
+}
+
+/// Runs a plugin here, for a seat that can't run one itself: the Mac App
+/// Store copy, which isn't allowed to run code it downloads. The body is the
+/// input a seat would hand the plugin (`plugin_api::pack`, or plain JSON); the
+/// answer is the plugin's own. Same sandbox and limits as on a seat, and the
+/// signature is checked again first, so a plugin runs here only if every seat
+/// would have run it.
+async fn run_plugin(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: axum::body::Bytes,
+) -> Answer<Json<plugin_api::Answer>> {
+    let who = caller(&server, &headers)?;
+    let digest = server
+        .store
+        .with(|db| {
+            Ok(db
+                .query_row("SELECT digest FROM plugins WHERE id = ?1", params![id], |r| {
+                    r.get::<_, String>(0)
+                })
+                .optional()?)
+        })
+        .map_err(|e| Denied::broke("find that plugin", e))?
+        .ok_or_else(|| Denied::missing("plugin"))?;
+    let file = server
+        .store
+        .get_blob(&digest)
+        .map_err(|e| Denied::broke("read that plugin", e))?;
+    let mut trusted = crate::plugin_trust();
+    trusted.keys.extend(server.config.plugin_keys_for_tests.iter().cloned());
+    let checked = hub::plugin::check(&trusted, &file).map_err(Denied::wrong)?;
+    let input = plugin_api::unpack(&body)
+        .map_err(|e| Denied::wrong(format!("That isn't a plugin's input: {e}")))?;
+    let command = input.command.clone();
+    let answer = tokio::task::spawn_blocking(move || plugin_host::run(&checked.wasm, &input))
+        .await
+        .map_err(|e| Denied::broke("run that plugin", e))?;
+    tracing::info!(
+        "ran plugin {id} {command} for {}: {}",
+        who.name,
+        if answer.is_ok() { "done" } else { "failed" }
+    );
+    Ok(Json(match answer {
+        Ok(output) => plugin_api::Answer::Done(output),
+        Err(why) => plugin_api::Answer::Failed(why),
+    }))
 }
 
 async fn plugin_file(
@@ -1997,13 +2194,14 @@ async fn add_plugin(
     if body.is_empty() {
         return Err(Denied::wrong("No plugin came with that."));
     }
-    let mut trusted = crate::trusted();
+    let mut trusted = crate::plugin_trust();
     trusted.keys.extend(server.config.plugin_keys_for_tests.iter().cloned());
     let checked = hub::plugin::check(&trusted, &body).map_err(Denied::wrong)?;
     let digest = server
         .store
         .put_blob(&body)
         .map_err(|e| Denied::broke("store that plugin", e))?;
+    let manifest = plugin_host::manifest_of(&checked.wasm).ok();
     let plugin = hub::PluginInfo {
         id: checked.header.id.clone(),
         name: if checked.header.name.trim().is_empty() {
@@ -2017,6 +2215,7 @@ async fn add_plugin(
         uploaded: now(),
         uploaded_by: who.name.clone(),
         key: checked.header.key.clone(),
+        manifest,
     };
     server
         .store

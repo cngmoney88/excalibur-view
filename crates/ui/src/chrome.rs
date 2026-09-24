@@ -558,6 +558,13 @@ impl Chrome {
         {
             clicked = Some("Plugins.SaveInput".into());
         }
+        if ui
+            .button("Save This Drawing for a Plugin Test…")
+            .on_hover_text("The same, for every sheet in the drawing, for a command that looks at them all.")
+            .clicked()
+        {
+            clicked = Some("Plugins.SaveInputAll".into());
+        }
         if let Some(fire) = clicked {
             self.fired.push(fire);
             ui.close();

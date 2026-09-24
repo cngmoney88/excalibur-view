@@ -17,6 +17,7 @@ path = "src/lib.rs"
 # With its client: the server reads the publisher's release feed itself.
 hub = { path = "../hub" }
 plugin-api = { path = "../plugin-api" }
+plugin-host = { path = "../plugin-host" }
 annot = { path = "../annot" }
 pdf = { path = "../pdf" }
 takeoff = { path = "../takeoff" }
@@ -46,6 +47,7 @@ anyhow = "1"
 windows-service = "0.7"
 
 [dev-dependencies]
+wat = "1"
 ureq = { version = "2", features = ["json", "tls"] }
 ed25519-dalek = "2"
 hub = { path = "../hub" }
