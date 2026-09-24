@@ -147,6 +147,8 @@ struct PanelActions {
     share_chest: bool,
     office: bool,
     new_code: bool,
+    /// How many days the join code should last, or 0 for forever.
+    code_days: Option<u32>,
     channel: Option<String>,
     password: Option<(String, String)>,
     watch_fleet: bool,
@@ -1382,6 +1384,9 @@ impl App {
         if let Some(path) = actions.use_found_license {
             self.ask(Ask::AddLicense(path));
         }
+        if let Some(days) = actions.code_days {
+            self.ask(Ask::JoinCodeDays(days));
+        }
         if actions.new_code {
             self.ask(Ask::NewJoinCode);
         }
@@ -1947,6 +1952,47 @@ fn office_section(
                 .clicked()
             {
                 actions.new_code = true;
+            }
+
+            // How long the code lasts. One server-wide secret that never
+            // expires is the weakest thing about a server with a public
+            // address, so it can now be given a date -- and an administrator
+            // who wants the old behaviour has to ask for it on purpose.
+            if let Some(joining) = office.joining.as_ref() {
+                if joining.how == "code" {
+                    if joining.run_out {
+                        ui.label(
+                            RichText::new(
+                                "This code has run out. Nobody can join with it until \
+                                 you make a new one.",
+                            )
+                            .color(theme.warn)
+                            .size(10.0),
+                        );
+                    } else if joining.until.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "This code works forever. If it is ever going to be typed \
+                                 from outside the shop, give it a date.",
+                            )
+                            .color(theme.faint)
+                            .size(10.0),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new(format!("Stops working {}", &joining.until[..10.min(joining.until.len())]))
+                                .color(theme.faint)
+                                .size(10.0),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        for (label, days) in [("30 days", 30u32), ("90 days", 90), ("Forever", 0)] {
+                            if ui.small_button(label).clicked() {
+                                actions.code_days = Some(days);
+                            }
+                        }
+                    });
+                }
             }
 
             people_section(ui, theme, office, people, me, actions);

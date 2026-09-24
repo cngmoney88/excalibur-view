@@ -512,6 +512,14 @@ pub struct Joining {
     pub code: String,
     /// What a new account gets. `viewer`, `markup` or `admin`.
     pub role: String,
+    /// When the code stops working, as an RFC 3339 date and time. Empty
+    /// means never, which is what every server did before this.
+    #[serde(default)]
+    pub until: String,
+    /// True when the date has already gone by, so a panel can say so without
+    /// having to work out what the server's clock says.
+    #[serde(default)]
+    pub run_out: bool,
 }
 
 #[cfg(test)]
