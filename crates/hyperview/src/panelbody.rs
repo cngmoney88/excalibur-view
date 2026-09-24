@@ -1514,6 +1514,7 @@ impl App {
                     self.begin_document_job(crate::docui::Job::Flatten)
                 }
                 "File.LoadChest" => self.pick_and_load_chest(),
+                "File.OpenModel" => self.pick_and_open_model(),
                 "File.SaveChest" => self.save_chest_as(),
                 "File.Preferences" => {
                     self.editing_prefs = Some(self.prefs.clone());

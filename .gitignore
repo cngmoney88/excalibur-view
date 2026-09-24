@@ -18,8 +18,11 @@ hyperview-signing.key
 *.bpx
 *.btx
 
-# Drawing sets are somebody's project, under somebody's contract.
+# Drawing sets are somebody's project, under somebody's contract, and so is a
+# model. The one IFC that is carried is written by hand, for the tests.
 *.pdf
+*.ifc
+!/crates/model/tests/two-bays.ifc
 /research/
 /private/
 
