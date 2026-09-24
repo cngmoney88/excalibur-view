@@ -303,6 +303,161 @@ pub fn run(wasm: &[u8], input: &Input) -> Result<Output, String> {
     }
 }
 
+// ---- checking a plugin before it is signed ------------------------------------
+
+/// What `Hyperview.exe --plugin-check` found.
+pub struct Checkup {
+    pub passed: bool,
+    pub report: String,
+    /// Every command's answer, as JSON, beside the plugin.
+    pub written: Option<PathBuf>,
+}
+
+/// `Hyperview.exe --plugin-check plugin.wasm [sheet.json]`, for somebody
+/// writing a plugin.
+///
+/// Reads the manifest and runs every command in the same sandbox, with the
+/// same limits, that a signed plugin gets: against a sheet saved with
+/// Plugins ▸ Save This Sheet for a Plugin Test…, or against nothing at all.
+/// Nothing is installed or added to any menu, and no signature is asked for,
+/// because nothing here is trusted: it is run once, reported on and thrown
+/// away. Each command's answer goes in `<plugin>-check.json` beside it.
+pub fn checkup(wasm_path: &Path, input_path: Option<&Path>) -> Checkup {
+    let fail = |report: String| Checkup { passed: false, report, written: None };
+    let wasm = match std::fs::read(wasm_path) {
+        Ok(w) => w,
+        Err(e) => return fail(format!("{}: {e}", wasm_path.display())),
+    };
+    if wasm.starts_with(plugin_api::MAGIC.as_bytes()) {
+        return fail(
+            "That is a signed .hvplugin. Check the .wasm it was made from, or add this one \
+             with Plugins > Add Plugin…"
+                .into(),
+        );
+    }
+    let manifest = match manifest_of(&wasm) {
+        Ok(m) => m,
+        Err(e) => return fail(format!("Not ready: {e}")),
+    };
+    let mut problems = Vec::new();
+    let id_ok = !manifest.id.is_empty()
+        && manifest.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !id_ok {
+        problems.push(format!("The id '{}' can only have letters, digits, - and _.", manifest.id));
+    }
+    if manifest.version.trim().is_empty() {
+        problems.push("It has no version.".into());
+    }
+    if manifest.abi > plugin_api::ABI {
+        problems.push(format!(
+            "It is built for contract {}, and this copy knows {}.",
+            manifest.abi,
+            plugin_api::ABI
+        ));
+    }
+    if manifest.commands.is_empty() {
+        problems.push("It has no commands, so there would be nothing in the menu.".into());
+    }
+    let mut seen = HashSet::new();
+    for command in &manifest.commands {
+        if !seen.insert(command.id.as_str()) {
+            problems.push(format!("Two commands are called '{}'.", command.id));
+        }
+    }
+    let mut seen = HashSet::new();
+    for setting in &manifest.settings {
+        if !seen.insert(setting.id.as_str()) {
+            problems.push(format!("Two settings are called '{}'.", setting.id));
+        }
+    }
+
+    let base = match input_path {
+        None => Input::default(),
+        Some(path) => match std::fs::read(path).map_err(|e| e.to_string()).and_then(|b| plugin_api::unpack(&b)) {
+            Ok(input) => input,
+            Err(e) => return fail(format!("{}: {e}", path.display())),
+        },
+    };
+    let on = match input_path {
+        Some(path) => format!("on {}", path.file_name().unwrap_or_default().to_string_lossy()),
+        None => "on an empty drawing".into(),
+    };
+    let mut lines = vec![format!(
+        "{} {} ({}), {} command{}, {} KB",
+        manifest.name,
+        manifest.version,
+        manifest.id,
+        manifest.commands.len(),
+        if manifest.commands.len() == 1 { "" } else { "s" },
+        wasm.len() / 1024
+    )];
+    let mut answers = Vec::new();
+    for command in &manifest.commands {
+        let mut input = base.clone();
+        input.command = command.id.clone();
+        let mut settings = settings_for(&manifest, &Settings::new());
+        settings.extend(base.settings.clone());
+        input.settings = settings;
+        let started = std::time::Instant::now();
+        let result = run(&wasm, &input);
+        let took = started.elapsed();
+        match &result {
+            Ok(output) => {
+                let findings = output.findings.len();
+                let serious = output.findings.iter().filter(|f| f.level == plugin_api::Level::Problem).count();
+                lines.push(format!(
+                    "  {}: ran {on} in {:.1}s. {findings} finding{}, {serious} marked a problem, {} table{}.",
+                    command.id,
+                    took.as_secs_f64(),
+                    if findings == 1 { "" } else { "s" },
+                    output.tables.len(),
+                    if output.tables.len() == 1 { "" } else { "s" },
+                ));
+                for finding in &output.findings {
+                    for fix in &finding.fixes {
+                        if fix.actions.is_empty() {
+                            problems.push(format!("{}: the fix '{}' does nothing.", command.id, fix.label));
+                        }
+                    }
+                }
+            }
+            Err(why) => {
+                lines.push(format!("  {}: did not finish {on}. {why}", command.id));
+                problems.push(format!("{} did not finish: {why}", command.id));
+            }
+        }
+        answers.push(serde_json::json!({
+            "command": command.id,
+            "seconds": took.as_secs_f64(),
+            "output": result.as_ref().ok(),
+            "error": result.as_ref().err(),
+        }));
+    }
+    let written = {
+        let stem = wasm_path.file_stem().unwrap_or_default().to_string_lossy().to_string();
+        let path = wasm_path.with_file_name(format!("{stem}-check.json"));
+        let body = serde_json::json!({ "manifest": manifest, "runs": answers });
+        serde_json::to_vec_pretty(&body)
+            .ok()
+            .and_then(|bytes| std::fs::write(&path, bytes).ok())
+            .map(|_| path)
+    };
+    let passed = problems.is_empty();
+    if passed {
+        lines.insert(0, "Ready to be signed.".into());
+    } else {
+        lines.insert(0, "Not ready yet:".into());
+        for (i, problem) in problems.iter().enumerate() {
+            lines.insert(1 + i, format!("  - {problem}"));
+        }
+        lines.insert(1 + problems.len(), String::new());
+    }
+    if let Some(path) = &written {
+        lines.push(format!("\nEvery answer is in {}", path.display()));
+    }
+    Checkup { passed, report: lines.join("\n"), written }
+}
+
 // ---- settings ------------------------------------------------------------------
 
 /// What each plugin's settings were last set to on this computer.
@@ -431,6 +586,41 @@ mod tests {
             packed = (2048i64 << 32) | answer.len() as i64,
         );
         wat::parse_str(text).unwrap()
+    }
+
+    #[test]
+    fn a_plugin_checked_before_signing_is_run_and_reported_on() {
+        let dir = std::env::temp_dir().join(format!("hv-checkup-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let wasm = dir.join("tiny.wasm");
+        std::fs::write(&wasm, tiny("")).unwrap();
+        let sheet = dir.join("S-201.json");
+        let input = Input {
+            sheets: vec![plugin_api::Sheet { page: 0, name: "S-201".into(), ..Default::default() }],
+            ..Input::default()
+        };
+        std::fs::write(&sheet, serde_json::to_vec(&input).unwrap()).unwrap();
+
+        let checkup = checkup(&wasm, Some(&sheet));
+        assert!(checkup.passed, "{}", checkup.report);
+        assert!(checkup.report.starts_with("Ready to be signed."), "{}", checkup.report);
+        assert!(checkup.report.contains("hello: ran on S-201.json"), "{}", checkup.report);
+        let written: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(checkup.written.unwrap()).unwrap()).unwrap();
+        assert_eq!(written["runs"][0]["output"]["findings"][0]["message"], "Look here");
+
+        // A signed file is not what this checks, and it says so.
+        std::fs::write(&wasm, b"HVPLUGIN1\n{}\n").unwrap();
+        assert!(!checkup_of(&wasm).passed);
+        // Something that isn't a plugin at all is not ready, with a reason.
+        std::fs::write(&wasm, b"not webassembly").unwrap();
+        let not = checkup_of(&wasm);
+        assert!(!not.passed && not.report.starts_with("Not ready"), "{}", not.report);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn checkup_of(wasm: &Path) -> Checkup {
+        checkup(wasm, None)
     }
 
     #[test]

@@ -28,6 +28,8 @@ pub struct Job {
     pub running: Option<mpsc::Receiver<Result<Output, String>>>,
     pub started: Instant,
     pub ctx: egui::Context,
+    /// Not a run: the input is written here, for somebody writing a plugin.
+    pub save_to: Option<std::path::PathBuf>,
 }
 
 /// What a plugin found, on screen.
@@ -123,8 +125,66 @@ impl App {
             running: None,
             started: Instant::now(),
             ctx: ctx.clone(),
+            save_to: None,
         });
         self.launch_plugin_if_ready();
+    }
+
+    /// Plugins ▸ Save This Sheet for a Plugin Test…
+    ///
+    /// Reads the sheet on screen exactly as a command that wants words and
+    /// line-work would, and writes the input to a file instead of handing it
+    /// to anything. Somebody writing a plugin tests against that file, with
+    /// no signing and no program in the way.
+    pub fn save_plugin_input(&mut self, ctx: &egui::Context) {
+        if self.plugin_job.is_some() {
+            self.status = "A plugin is running. Save the sheet once it has finished.".into();
+            return;
+        }
+        let Some(doc) = self.doc() else {
+            self.status = "Open a drawing first, then save a sheet from it.".into();
+            return;
+        };
+        let (doc_id, page) = (doc.id, doc.page);
+        let stem = doc
+            .path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "sheet".into());
+        let Some(save_to) = rfd::FileDialog::new()
+            .set_title("Save this sheet for a plugin test")
+            .set_file_name(format!("{stem} - sheet {}.json", page + 1))
+            .add_filter("Plugin input (JSON)", &["json"])
+            .save_file()
+        else {
+            return;
+        };
+        let command = Command {
+            id: "test".into(),
+            name: "Saving the sheet".into(),
+            description: String::new(),
+            scope: Scope::Sheet,
+            needs: plugin_api::Needs { words: true, lines: true },
+        };
+        let input = self.plugin_input(&command, &[page], BTreeMap::new());
+        self.next_plugin_job += 1;
+        let id = self.next_plugin_job;
+        self.svc.send(ToWorker::Read { doc: doc_id, page, job: id, words: true, lines: true });
+        self.plugin_job = Some(Job {
+            id,
+            plugin: String::new(),
+            plugin_name: "Plugin test".into(),
+            command,
+            doc: doc_id,
+            waiting: BTreeSet::from([page]),
+            of: 1,
+            readings: BTreeMap::new(),
+            input,
+            running: None,
+            started: Instant::now(),
+            ctx: ctx.clone(),
+            save_to: Some(save_to),
+        });
     }
 
     /// Everything a plugin reads, bar the words and line-work, which the
@@ -219,10 +279,6 @@ impl App {
         if !job.waiting.is_empty() || job.running.is_some() {
             return;
         }
-        let Some(plugin) = self.plugins.find(&job.plugin).cloned() else {
-            self.plugin_job = None;
-            return;
-        };
         for sheet in job.input.sheets.iter_mut() {
             if let Some(reading) = job.readings.remove(&sheet.page) {
                 sheet.words = reading.words;
@@ -230,6 +286,22 @@ impl App {
                 sheet.lines_cut_short = reading.cut_short;
             }
         }
+        if let Some(path) = job.save_to.take() {
+            let written = serde_json::to_vec_pretty(&job.input)
+                .map_err(|e| e.to_string())
+                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|e| e.to_string()));
+            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            self.status = match written {
+                Ok(()) => format!("Saved {name} for a plugin test."),
+                Err(e) => format!("Could not save {name}: {e}"),
+            };
+            self.plugin_job = None;
+            return;
+        }
+        let Some(plugin) = self.plugins.find(&job.plugin).cloned() else {
+            self.plugin_job = None;
+            return;
+        };
         let input = std::mem::take(&mut job.input);
         let (tx, rx) = mpsc::channel();
         let ctx = job.ctx.clone();

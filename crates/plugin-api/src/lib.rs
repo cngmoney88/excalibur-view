@@ -673,9 +673,9 @@ pub fn open(file: &[u8]) -> Result<(Header, &[u8]), String> {
     let first = file
         .iter()
         .position(|b| *b == b'\n')
-        .ok_or("That is not a Excalibur View plugin.")?;
+        .ok_or("That is not an Excalibur View plugin.")?;
     if file[..first].strip_suffix(b"\r").unwrap_or(&file[..first]) != MAGIC.as_bytes() {
-        return Err("That is not a Excalibur View plugin.".into());
+        return Err("That is not an Excalibur View plugin.".into());
     }
     let rest = &file[first + 1..];
     let second = rest
