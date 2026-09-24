@@ -42,7 +42,31 @@ impl Attempt {
         Attempt { request, twice: false }
     }
 
+    /// The one check every request to an office server passes.
+    ///
+    /// An office server is not the outside world and is never refused -- a
+    /// sealed seat is a seat with the doors to the internet shut, not a seat
+    /// that cannot work. But "the office server" has to mean a machine on the
+    /// office network, and since remote access it might not be: a server with
+    /// a tunnel answers on a public hostname, and a seat pointed at that one
+    /// is reaching across the internet like anything else.
+    ///
+    /// It matters for exactly one shop shape and that shape is the customer:
+    /// a machine sealed by Group Policy inside an office that is otherwise
+    /// open. The licence cannot seal only one seat, so this is the only way
+    /// it happens -- and it is what a defence contractor does.
+    fn allowed(&self) -> Result<(), ureq::Error> {
+        let url = self.request.url();
+        if crate::sealed::is_sealed() && !crate::sealed::is_inside(url) {
+            return Err(ureq::Error::from(std::io::Error::other(
+                crate::sealed::refusal("Reaching an office server across the internet"),
+            )));
+        }
+        Ok(())
+    }
+
     fn call(self) -> Result<ureq::Response, ureq::Error> {
+        self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
         match (self.request.call(), spare) {
             (Err(e), Some(spare)) if never_arrived(&e) => spare.call(),
@@ -51,6 +75,7 @@ impl Attempt {
     }
 
     fn send_json(self, body: impl serde::Serialize) -> Result<ureq::Response, ureq::Error> {
+        self.allowed()?;
         // Turned into a value first, so the same bytes can go twice without
         // the caller having to hand over something cloneable.
         let body = match serde_json::to_value(body) {
@@ -77,6 +102,7 @@ impl Attempt {
     }
 
     fn send_bytes(self, body: &[u8]) -> Result<ureq::Response, ureq::Error> {
+        self.allowed()?;
         let spare = self.twice.then(|| self.request.clone());
         match (self.request.send_bytes(body), spare) {
             (Err(e), Some(spare)) if never_arrived(&e) => spare.send_bytes(body),
