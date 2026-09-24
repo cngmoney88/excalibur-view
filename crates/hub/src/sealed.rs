@@ -479,3 +479,67 @@ mod tests {
         set_for_testing(Sealed::No);
     }
 }
+
+#[cfg(test)]
+mod what_a_sealed_seat_may_still_reach {
+    //! A sealed seat is a seat with the doors to the internet shut, not a
+    //! seat that cannot work. The office server is not the outside world.
+    //!
+    //! What these pin down is the edge that remote access created: a server
+    //! with a tunnel answers on a public hostname, so "the office server" and
+    //! "a machine on the office network" stopped being the same thing.
+
+    use super::is_inside;
+
+    #[test]
+    fn the_office_server_on_the_office_network_is_always_reachable() {
+        for inside in [
+            "http://192.168.1.20:8714",
+            "http://10.0.0.5:8714",
+            "http://172.16.4.9:8714",
+            "http://drawings:8714",
+            "http://drawings.local:8714",
+            "http://drawings.lan",
+            "http://drawings.internal",
+            "http://localhost:8714",
+            "http://[::1]:8714",
+        ] {
+            assert!(is_inside(inside), "{inside} should count as the office network");
+        }
+    }
+
+    #[test]
+    fn the_same_server_on_a_public_hostname_does_not() {
+        // This is the one that matters. A shop turns remote access on, the
+        // server answers at drawings.theirshop.com, and a seat pointed there
+        // is reaching across the internet however familiar the name looks.
+        for outside in [
+            "https://drawings.mesafab.com",
+            "https://drawings.mesafab.com/mcp",
+            "https://excaliburct.com/f/x.evlicense",
+            "https://api.github.com/repos/x/y",
+            "http://8.8.8.8",
+        ] {
+            assert!(!is_inside(outside), "{outside} should not count as inside");
+        }
+    }
+
+    #[test]
+    fn a_public_address_dressed_up_as_a_private_one_is_still_public() {
+        // The shapes somebody would try if they wanted past this.
+        for dressed in [
+            "https://192.168.1.20.evil.com",
+            "https://user@evil.com",
+            "https://evil.com:8714",
+            "https://drawings.local.evil.com",
+        ] {
+            assert!(!is_inside(dressed), "{dressed} slipped through as inside");
+        }
+    }
+
+    #[test]
+    fn a_trailing_dot_does_not_get_anybody_in() {
+        assert!(!is_inside("https://evil.com."));
+        assert!(is_inside("http://drawings.local."));
+    }
+}
