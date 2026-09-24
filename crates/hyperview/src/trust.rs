@@ -26,6 +26,25 @@ pub const KEYS: &[(&str, &str)] = &[
     ("mesafab-2026", "14d93acf4729859a3a7b01f458e118173a7a1859305193e84c3bd7513eb72790"),
 ];
 
+/// The keys that may sign a licence, and nothing else.
+///
+/// A licence is signed the moment Square says an order is paid, by a service
+/// that is always up, so it cannot be signed with a key from [`KEYS`]: those
+/// never leave Creede's PC, because a release key can put code on every
+/// office's machines. A key here can make a licence file and that is all. No
+/// release, plugin or update is ever checked against this list; only the
+/// server's licence check reads it, and it reads [`KEYS`] too, so every
+/// licence signed on the PC before this list existed still checks out.
+///
+/// If one of these ever leaked, the harm is free licences, not software on
+/// somebody's machine. The fix is a new key here in the next release and the
+/// old one's licences signed again, which their servers fetch by themselves.
+pub const LICENSE_KEYS: &[(&str, &str)] = &[
+    // Made on Creede's own PC on 2026-09-24. The private half is there and in
+    // the licensing service's Cloudflare secrets, and nowhere else.
+    ("excalibur-licences-2026", "5e537bbc4a3c6db7a3622ebe558855ad630392348477f5d86878ff278fa4a50b"),
+];
+
 /// Where new versions are published: a releases page on GitHub.
 ///
 /// A company's server reads this and passes new versions on to its seats. A
