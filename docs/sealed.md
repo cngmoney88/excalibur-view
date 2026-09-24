@@ -59,6 +59,7 @@ existing policy does to them.
 | Update download | Desktop and server | The same | Fetch it |
 | The assistant | Desktop | Anthropic | Claude working alongside the person |
 | Excalibur Fleet | Server | The Fleet service | Watching a server on your behalf |
+| Change notices | Server | The address an administrator gives it | Telling another program a takeoff changed, only once an administrator sets one up. Sealed sends them only to addresses inside your network |
 | Website links | Desktop | excaliburct.com | Pricing, documentation |
 
 That is the complete list. In Sealed none of them is made, and the software

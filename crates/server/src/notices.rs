@@ -1,0 +1,222 @@
+//! Change notices: the office server tells another program when a drawing
+//! set's takeoff changes, instead of that program asking over and over.
+//!
+//! An administrator gives an address (FabWire's, say) under Studio, or with
+//! `POST /notices`, and is shown a secret, once. Each notice is a small JSON
+//! body saying which set changed, in which project, under which of the other
+//! program's references, and at what revision. It is signed with that secret
+//! (`X-Excalibur-Signature: sha256=<hex HMAC-SHA256 of the body>`) so the
+//! other program can tell it came from this server. No drawing, markup or
+//! takeoff travels with it: the program asks the API for what it wants.
+//!
+//! Several changes to one set close together are one notice, sent a couple
+//! of seconds after the first. One that doesn't get through is tried three
+//! times, a little further apart each time, and then the attempt is recorded
+//! and dropped; the other program can always catch up by asking. A sealed
+//! server sends them only to addresses inside the company's network.
+
+use std::collections::HashSet;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use rusqlite::params;
+use sha2::{Digest, Sha256};
+
+use crate::api::Shared;
+
+/// Changes waiting to be told about, as (notice, set), so a burst of pushes
+/// to one set goes out as one notice.
+#[derive(Default)]
+pub struct Pending(Mutex<HashSet<(String, String)>>);
+
+/// How long a notice waits for more changes to the same set before it goes.
+pub const GATHER: Duration = Duration::from_secs(2);
+
+/// How long to wait before each try after the first.
+const AGAIN_AFTER: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(30)];
+
+/// An address a notice may be sent to: http or https, and not absurdly long.
+pub fn acceptable(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    let scheme_ok = url.starts_with("https://") || url.starts_with("http://");
+    if !scheme_ok || url.len() > 2000 || url.contains(char::is_whitespace) {
+        return Err("A notice address is a web address, starting http:// or https://.".into());
+    }
+    hub::web::outbound("Sending change notices", url)
+}
+
+/// A new secret: 32 random bytes, as hex.
+pub fn secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::Rng::fill(&mut rand::thread_rng(), &mut bytes);
+    crate::store::hex(&bytes)
+}
+
+/// HMAC-SHA256, the way every webhook receiver already knows how to check.
+pub fn sign(secret: &str, body: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut key = secret.as_bytes().to_vec();
+    if key.len() > BLOCK {
+        key = Sha256::digest(&key).to_vec();
+    }
+    key.resize(BLOCK, 0);
+    let pad = |with: u8| key.iter().map(|k| k ^ with).collect::<Vec<u8>>();
+    let inner = Sha256::new().chain_update(pad(0x36)).chain_update(body).finalize();
+    let outer = Sha256::new().chain_update(pad(0x5c)).chain_update(inner).finalize();
+    crate::store::hex(&outer)
+}
+
+/// A drawing set's markups changed. Every notice address hears about it,
+/// once, a moment from now.
+pub fn changed(server: &Shared, set: &str) {
+    let targets: Vec<(String, String, String)> = server
+        .store
+        .with(|db| {
+            let mut q = db.prepare("SELECT id, url, secret FROM notices")?;
+            let rows = q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+            Ok(rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    for (id, url, secret) in targets {
+        let key = (id.clone(), set.to_string());
+        let fresh = server.notices.0.lock().map(|mut p| p.insert(key.clone())).unwrap_or(false);
+        if !fresh {
+            continue;
+        }
+        let server = server.clone();
+        let set = set.to_string();
+        let _ = std::thread::Builder::new().name("change notice".into()).spawn(move || {
+            std::thread::sleep(GATHER);
+            if let Ok(mut pending) = server.notices.0.lock() {
+                pending.remove(&key);
+            }
+            let Some(body) = body_for(&server, &set) else { return };
+            let status = deliver(&url, &secret, "markups.changed", &body);
+            record(&server, &id, &status);
+        });
+    }
+}
+
+/// Sends a notice straight away, to see whether the other program is
+/// listening. Returns how it went.
+pub fn test(server: &Shared, id: &str) -> Result<String, String> {
+    let found: Option<(String, String)> = server
+        .store
+        .with(|db| {
+            use rusqlite::OptionalExtension;
+            Ok(db
+                .query_row("SELECT url, secret FROM notices WHERE id = ?1", params![id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .optional()?)
+        })
+        .map_err(|e| e.to_string())?;
+    let (url, secret) = found.ok_or("There is no notice address with that id.")?;
+    let body = serde_json::json!({
+        "event": "ping",
+        "server": server.config.name,
+        "at": crate::api::now(),
+    });
+    let status = deliver(&url, &secret, "ping", &body.to_string());
+    record(server, id, &status);
+    Ok(status)
+}
+
+/// What a notice says about a set: enough to know what to ask for.
+fn body_for(server: &Shared, set: &str) -> Option<String> {
+    let found = server
+        .store
+        .with(|db| {
+            use rusqlite::OptionalExtension;
+            Ok(db
+                .query_row(
+                    "SELECT s.id, s.name, s.revision, p.id, p.number, p.reference
+                     FROM sets s LEFT JOIN projects p ON p.id = s.project
+                     WHERE s.id = ?1",
+                    params![set],
+                    |r| {
+                        Ok(serde_json::json!({
+                            "event": "markups.changed",
+                            "set": r.get::<_, String>(0)?,
+                            "file": r.get::<_, String>(1)?,
+                            "revision": r.get::<_, i64>(2)?,
+                            "project": r.get::<_, Option<String>>(3)?,
+                            "number": r.get::<_, Option<String>>(4)?,
+                            "reference": r.get::<_, Option<String>>(5)?,
+                        }))
+                    },
+                )
+                .optional()?)
+        })
+        .ok()??;
+    let mut body = found;
+    body["server"] = serde_json::json!(server.config.name);
+    body["at"] = serde_json::json!(crate::api::now());
+    Some(body.to_string())
+}
+
+/// Sends one notice, trying again twice. `delivered`, or what went wrong.
+fn deliver(url: &str, secret: &str, event: &str, body: &str) -> String {
+    if let Err(why) = hub::web::outbound("Sending change notices", url) {
+        return why;
+    }
+    let agent = hub::web::agent().timeout(Duration::from_secs(15)).build();
+    let signature = format!("sha256={}", sign(secret, body.as_bytes()));
+    let mut last = String::new();
+    for attempt in 0..=AGAIN_AFTER.len() {
+        if attempt > 0 {
+            std::thread::sleep(AGAIN_AFTER[attempt - 1]);
+        }
+        let sent = agent
+            .post(url)
+            .set("Content-Type", "application/json")
+            .set("User-Agent", concat!("excalibur-view-server/", env!("CARGO_PKG_VERSION")))
+            .set("X-Excalibur-Event", event)
+            .set("X-Excalibur-Signature", &signature)
+            .send_string(body);
+        match sent {
+            Ok(_) => return "delivered".into(),
+            // Told no by the other program: trying again won't change its mind.
+            Err(hub::web::ureq::Error::Status(code, _)) if (400..500).contains(&code) => {
+                return format!("refused with {code}");
+            }
+            Err(e) => last = e.to_string(),
+        }
+    }
+    format!("not delivered: {last}")
+}
+
+fn record(server: &Shared, id: &str, status: &str) {
+    let now = crate::api::now();
+    let _ = server.store.with(|db| {
+        db.execute(
+            "UPDATE notices SET last_status = ?1, last_at = ?2 WHERE id = ?3",
+            params![status, now, id],
+        )?;
+        Ok(())
+    });
+    if status != "delivered" {
+        tracing::warn!("change notice {id}: {status}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn signatures_match_the_published_hmac_test_vector() {
+        // RFC 4231, test case 2.
+        assert_eq!(
+            super::sign("Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn only_a_web_address_is_taken() {
+        assert!(super::acceptable("https://fabwire.mesafab.lan/hooks/excalibur").is_ok());
+        assert!(super::acceptable("http://10.0.0.7:8080/notice").is_ok());
+        assert!(super::acceptable("ftp://example.com").is_err());
+        assert!(super::acceptable("file:///etc/passwd").is_err());
+        assert!(super::acceptable("https://example.com/a b").is_err());
+    }
+}

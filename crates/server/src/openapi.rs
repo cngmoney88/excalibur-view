@@ -432,11 +432,10 @@ sheet, marked `Carried forward — check`.",
             "get": { "summary": "The plugins every seat in the office is handed.", "responses": ok_list("Plugin") },
             "post": {
                 "summary": "Hand a plugin to the whole office. Administrators only.",
-                "description": "The body is a signed `.hvplugin` file. The server runs nothing: \
-                                it checks the signature against the same keys a release must be \
-                                signed by and refuses anything else, and every seat checks it \
-                                again before loading it. A plugin with the same id replaces the \
-                                one the office had.",
+                "description": "The body is a signed `.hvplugin` file. The server checks the \
+                                signature against the keys a plugin may be signed by and refuses \
+                                anything else, and every seat checks it again before loading it. \
+                                A plugin with the same id replaces the one the office had.",
                 "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
                 "responses": ok("Plugin")
             }
@@ -448,11 +447,63 @@ sheet, marked `Carried forward — check`.",
                 "responses": { "200": { "description": "The .hvplugin file." } }
             }
         },
+        "/plugins/{id}/run": {
+            "post": {
+                "summary": "Run a plugin on the server, for a seat that can't run one itself.",
+                "description": "For the Mac App Store copy, which isn't allowed to run code it \
+                                downloads. The body is the plugin's input as a seat would hand it \
+                                over: `plugin_api::pack`, or the same thing as plain JSON. The \
+                                signature is checked again, the plugin runs in the same sandbox \
+                                and limits it would have on a seat, and the answer is the \
+                                plugin's own: `done` with its findings, or `failed` with its \
+                                reason. Nothing is kept.",
+                "parameters": [path_param("id", "The plugin's id.")],
+                "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+                "responses": { "200": { "description": "The plugin's answer." } }
+            }
+        },
         "/plugins/{id}/remove": {
             "post": {
                 "summary": "Stop handing a plugin out. Administrators only.",
                 "description": "Seats drop it the next time they ask what the office has.",
                 "parameters": [path_param("id", "The plugin's id.")],
+                "responses": { "200": { "description": "Removed." } }
+            }
+        },
+        "/notices": {
+            "get": {
+                "summary": "Where the office tells other programs a takeoff changed. Administrators only.",
+                "responses": ok_list("ChangeNotice")
+            },
+            "post": {
+                "summary": "Tell another program whenever a drawing set's markups change. Administrators only.",
+                "description": "The body is `{\"url\": \"https://…\"}`. From then on, a couple of \
+                                seconds after any drawing set's markups change, the server POSTs a \
+                                small JSON body there: `event` (`markups.changed`), `set`, `file`, \
+                                `revision`, `project`, `number`, `reference` (the other program's \
+                                own reference for the job, when it filed one), `server` and `at`. \
+                                No drawing or markup travels with it; ask the API for what you \
+                                want. Several changes to one set close together are one notice. \
+                                Each is signed: `X-Excalibur-Signature: sha256=<hex HMAC-SHA256 of \
+                                the body, keyed with the secret>`, and `X-Excalibur-Event` names \
+                                the event. The secret is in this answer and never shown again. A \
+                                notice that isn't taken is tried three times, then dropped. A \
+                                sealed server sends notices only inside the company's network.",
+                "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "url": { "type": "string" } } } } } },
+                "responses": ok("ChangeNotice")
+            }
+        },
+        "/notices/{id}/test": {
+            "post": {
+                "summary": "Send a `ping` notice now, and say how it went. Administrators only.",
+                "parameters": [path_param("id", "The notice address's id.")],
+                "responses": { "200": { "description": "`{\"status\": \"delivered\"}`, or what went wrong." } }
+            }
+        },
+        "/notices/{id}/remove": {
+            "post": {
+                "summary": "Stop telling that address. Administrators only.",
+                "parameters": [path_param("id", "The notice address's id.")],
                 "responses": { "200": { "description": "Removed." } }
             }
         },
@@ -891,6 +942,16 @@ fn schemas() -> Value {
             ("uploaded", "string", ""),
             ("uploaded_by", "string", ""),
             ("key", "string", "Which trusted key signed it."),
+            ("manifest", "object", "Its commands and settings, as the plugin describes them."),
+        ]),
+        "ChangeNotice": object(&[
+            ("id", "string", ""),
+            ("url", "string", "Where the notices go."),
+            ("created", "string", ""),
+            ("created_by", "string", ""),
+            ("last_status", "string", "How the last one went: delivered, or what went wrong."),
+            ("last_at", "string", ""),
+            ("secret", "string", "What every notice is signed with. Only in the answer that made it."),
         ]),
         "Release": object(&[
             ("version", "string", ""),

@@ -131,6 +131,18 @@ CREATE TABLE IF NOT EXISTS plugins (
     uploaded_by TEXT NOT NULL
 );
 
+-- Where to tell another program that a drawing set's takeoff changed, and
+-- the secret its notices are signed with. See notices.rs.
+CREATE TABLE IF NOT EXISTS notices (
+    id          TEXT PRIMARY KEY,
+    url         TEXT NOT NULL,
+    secret      TEXT NOT NULL,
+    created     TEXT NOT NULL,
+    created_by  TEXT NOT NULL,
+    last_status TEXT,
+    last_at     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS releases (
     version     TEXT NOT NULL,
     channel     TEXT NOT NULL,

@@ -21,7 +21,8 @@ never goes anywhere else. Standard library plus `cryptography` for Ed25519.
 `release` is the whole thing in one command: tests, build, sign, upload,
 publish. The three commands above it are its parts, for when one of them has
 to be done on its own.
-    python3 publish.py sign-plugin --key hyperview-signing.key --id mesafab-estimating \\
+    python3 publish.py make-key    --name excalibur-plugins-2026 --out plugin-signing.key
+    python3 publish.py sign-plugin --key plugin-signing.key --id mesafab-estimating \\
                                 --version 1.0.0 --name "Mesa Fab Estimating" \\
                                 mesafab_estimating.wasm
 
@@ -45,10 +46,12 @@ never pass for the other, and must match `hub::license::License::signing_payload
     python3 publish.py sign-license --key hyperview-signing.key --product citadel \\
                                 --company "Arc Valley Construction" --founding
 
-A plugin is signed with the same key, into a `.hvplugin` file that an office
-administrator adds from Hyperview's Plugins menu. Its signed text must match
-`plugin_api::signing_payload`, and a test in the Rust code checks a plugin
-this script sealed.
+A plugin is signed into a `.hvplugin` file that an office administrator adds
+from the Plugins menu. Its signed text must match `plugin_api::signing_payload`,
+and a test in the Rust code checks a plugin this script sealed. Sign plugins
+with a key made for plugins alone (`make-key`, then its public half pasted into
+PLUGIN_KEYS in trust.rs), not the release key: a plugin key can seal a plugin
+and nothing else, so it can be used as often as plugins need signing.
 """
 
 import argparse
@@ -359,8 +362,30 @@ def plugin_payload(plugin_id, version, sha256):
     return f"hyperview-plugin/1\n{plugin_id}\n{version}\n{sha256.lower()}\n".encode("utf-8")
 
 
+def cmd_make_key(a):
+    """A new signing key, made here and kept here. Prints the line for trust.rs."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{2,60}", a.name):
+        raise SystemExit("a key name is lower-case letters, digits and dashes, like excalibur-plugins-2026")
+    if os.path.exists(a.out):
+        raise SystemExit(f"{a.out} is already there. A key is never written over; pick another name.")
+    key = Ed25519PrivateKey.generate()
+    seed = key.private_bytes(serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+                             serialization.NoEncryption()).hex()
+    public = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+    with open(a.out, "x", encoding="utf-8") as f:
+        f.write(f"{a.name}\n{seed}\n")
+    print(f"made {a.out}. Keep it on this computer and in your password manager, nowhere else.")
+    print("paste this into the list it's for in crates/hyperview/src/trust.rs:")
+    print(f'    ("{a.name}", "{public}"),')
+
+
 def cmd_sign_plugin(a):
     name, key = load_key(a.key)
+    if os.path.basename(a.key) == "hyperview-signing.key":
+        print("note: this is the release key. Plugins signed with it still load, but a plugin key "
+              "(make-key) keeps the release key put away.")
     wasm = open(a.wasm, "rb").read()
     if not wasm.startswith(b"\0asm"):
         raise SystemExit(f"{a.wasm} is not a WebAssembly file")
@@ -783,6 +808,10 @@ def main():
     pl.add_argument("--license", required=True, help="the .evlicense file to publish")
     pl.add_argument("--into", required=True, help="the folder that gets published")
 
+    k = sub.add_parser("make-key", help="make a new signing key on this computer")
+    k.add_argument("--name", required=True, help="what the key is called in trust.rs")
+    k.add_argument("--out", required=True, help="the key file to write")
+
     g = sub.add_parser("sign-plugin")
     g.add_argument("--key", required=True)
     g.add_argument("--id", required=True)
@@ -794,7 +823,8 @@ def main():
     try:
         {"sign": cmd_sign, "upload": cmd_upload, "promote": cmd_promote,
          "release": cmd_release, "publish-license": cmd_publish_license,
-         "sign-plugin": cmd_sign_plugin, "sign-license": cmd_sign_license}[a.command](a)
+         "sign-plugin": cmd_sign_plugin, "sign-license": cmd_sign_license,
+         "make-key": cmd_make_key}[a.command](a)
     except GitHubRefused as e:
         raise SystemExit(str(e))
 

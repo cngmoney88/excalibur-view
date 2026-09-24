@@ -95,6 +95,16 @@ its bytes, the same rule as an update. A plugin written outside Excalibur is
 signed by us: send the `.wasm`, its id and its version to
 hello@excaliburct.com. What comes back is the `.hvplugin`.
 
+Plugins are signed with a plugin key, listed in `PLUGIN_KEYS` in
+`crates/hyperview/src/trust.rs`. A plugin key seals plugins and nothing else:
+no release or license is checked against it, so it can be used as often as
+plugins need signing without the release key coming out. Plugins signed with
+a release key before plugin keys existed still load. A company that writes
+plugins regularly can have a plugin key of its own in that list.
+
+`publish.py make-key --name <name> --out <file>` makes a key on the computer
+that will sign with it and prints the line for `trust.rs`.
+
 ## Building and signing
 
 ```sh
@@ -104,7 +114,7 @@ plugins/mesafab-estimating/build.sh          # -> target/mesafab_estimating.wasm
 On the publisher's PC, beside the signing key:
 
 ```powershell
-py -3 publish.py sign-plugin --key hyperview-signing.key --id mesafab-estimating `
+py -3 publish.py sign-plugin --key plugin-signing.key --id mesafab-estimating `
       --version 1.0.0 --name "Mesa Fab Estimating" mesafab_estimating.wasm
 ```
 

@@ -309,6 +309,11 @@ pub struct PluginInfo {
     /// Which trusted key signed it.
     #[serde(default)]
     pub key: String,
+    /// What it says it can do, read by the server in the sandbox: its
+    /// commands and settings. What a copy that doesn't run plugins itself
+    /// builds its Plugins menu from. Absent from an older server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<plugin_api::Manifest>,
 }
 
 // ---- errors --------------------------------------------------------------
@@ -482,6 +487,27 @@ pub struct FleetAccess {
     /// Only when it has just been turned on, and never again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// Where the office server tells another program that a drawing set's
+/// takeoff changed (`notices` in the server).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ChangeNotice {
+    pub id: String,
+    /// Where the notices go: FabWire's address for them, say.
+    pub url: String,
+    pub created: String,
+    #[serde(default)]
+    pub created_by: String,
+    /// How the last one went: `delivered`, or what went wrong.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_at: Option<String>,
+    /// What every notice is signed with. Given once, when it is made, and
+    /// never again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
 }
 
 /// A key for a program rather than a person: an assistant reading the

@@ -45,6 +45,26 @@ pub const LICENSE_KEYS: &[(&str, &str)] = &[
     ("excalibur-licences-2026", "5e537bbc4a3c6db7a3622ebe558855ad630392348477f5d86878ff278fa4a50b"),
 ];
 
+/// The keys that may sign a plugin, and nothing else.
+///
+/// A plugin used to be signed with a key from [`KEYS`], which meant getting
+/// the release key out every time somebody's plugin needed signing, and a key
+/// that can put a new version of the program on every machine is not one to
+/// be using for anything else. A key here can seal a plugin and that is all:
+/// no release or license is ever checked against it.
+///
+/// If one of these leaked, the harm is a plugin nobody meant to trust, and a
+/// plugin runs in the sandbox with nothing to reach and can only offer fixes
+/// a person clicks. The fix is a new key in the next release and the office's
+/// plugins signed again.
+///
+/// Plugins already signed with a key from [`KEYS`] keep loading. A partner
+/// who writes plugins, like FabWire, can be given a key of their own here.
+///
+/// Make one with `publish.py make-key`, on the PC that will sign with it, and
+/// paste the line it prints below.
+pub const PLUGIN_KEYS: &[(&str, &str)] = &[];
+
 /// Where new versions are published: a releases page on GitHub.
 ///
 /// A company's server reads this and passes new versions on to its seats. A

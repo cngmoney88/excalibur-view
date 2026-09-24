@@ -108,9 +108,17 @@ pub enum Ask {
     SharePlugin(PathBuf),
     /// Stop handing a plugin out. Administrators only.
     RemovePlugin(String),
+    /// Have the server run one of the office's plugins, for a copy that
+    /// doesn't run plugins itself.
+    RunPlugin { id: String, input: plugin_api::Input },
     /// An administrator making a key for another system, such as FabWire.
     MakeIntegrationKey(String),
     RevokeKey(String),
+    /// Tell another program at this address whenever a takeoff changes.
+    AddNotice(String),
+    /// Send that address a test notice now.
+    TestNotice(String),
+    RemoveNotice(String),
     /// Make an assistant key for this computer and put Hyperview on Claude
     /// Desktop's list of connectors.
     ConnectAssistant { computer: String },
@@ -254,9 +262,15 @@ pub enum Told {
     },
     /// Said once a plugin has gone to or come off the office's list.
     PluginShared(String),
+    /// What a plugin the server ran for this copy found.
+    PluginRan(Result<plugin_api::Output, String>),
     Update(Box<UpdateOffer>),
     /// The join code, how the server is keeping up to date, and Fleet.
     Office(Box<Office>),
+    /// A notice address was made; its secret is in it, this once.
+    NoticeMade(Box<hub::ChangeNotice>),
+    /// How a test notice went.
+    NoticeTested(String),
     /// Where the office stands with its license. `None` from a server that
     /// is older than licensing. `added` when a file was just added.
     License {
@@ -295,6 +309,8 @@ pub struct Office {
     pub updates: hub::UpdateSettings,
     pub fleet: hub::FleetAccess,
     pub keys: Vec<hub::ApiKey>,
+    /// Where the office tells other programs a takeoff changed.
+    pub notices: Vec<hub::ChangeNotice>,
 }
 
 pub struct Link {
@@ -693,6 +709,29 @@ pub fn start(repaint: egui::Context) -> Link {
                         },
                     },
 
+                    Ask::RunPlugin { id, input } => match connected(&client) {
+                        Err(message) => say(&told, Told::PluginRan(Err(message))),
+                        Ok(client) => {
+                            // Its own thread: a plugin can think for a minute,
+                            // and nothing else should wait behind it.
+                            let client = client.clone();
+                            let told = told.clone();
+                            let repaint = repaint.clone();
+                            std::thread::Builder::new()
+                                .name(format!("plugin {id} on the server"))
+                                .spawn(move || {
+                                    let ran = match client.run_plugin(&id, &input) {
+                                        Ok(plugin_api::Answer::Done(output)) => Ok(output),
+                                        Ok(plugin_api::Answer::Failed(why)) => Err(why),
+                                        Err(e) => Err(e.to_string()),
+                                    };
+                                    let _ = told.send(Told::PluginRan(ran));
+                                    repaint.request_repaint();
+                                })
+                                .ok();
+                        }
+                    },
+
                     Ask::SharePlugin(path) => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match std::fs::read(&path) {
@@ -779,6 +818,36 @@ pub fn start(repaint: egui::Context) -> Link {
                         },
                     },
 
+                    Ask::AddNotice(url) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => match client.add_notice(&url) {
+                            Ok(made) => {
+                                say(&told, Told::NoticeMade(Box::new(made)));
+                                office(client, &told);
+                            }
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+                    Ask::TestNotice(id) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => {
+                            let said = match client.test_notice(&id) {
+                                Ok(status) if status == "delivered" => "The test notice was delivered.".to_string(),
+                                Ok(status) => format!("The test notice wasn't taken: {status}."),
+                                Err(e) => e.to_string(),
+                            };
+                            say(&told, Told::NoticeTested(said));
+                            office(client, &told);
+                        }
+                    },
+                    Ask::RemoveNotice(id) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => match client.remove_notice(&id) {
+                            Ok(_) => office(client, &told),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+
                     Ask::ConnectAssistant { .. } if hub::sealed::is_sealed() => {
                         say(&told, Told::Trouble(hub::sealed::refusal("The assistant")));
                     }
@@ -837,6 +906,14 @@ pub fn start(repaint: egui::Context) -> Link {
                             .ok();
                     }
 
+                    Ask::CheckForUpdate { asked, .. } if !crate::edition::updates_itself() => {
+                        if asked {
+                            say(
+                                &told,
+                                Told::Trouble("This copy is kept up to date by the App Store.".into()),
+                            );
+                        }
+                    }
                     Ask::CheckForUpdate {
                         running,
                         channel,
@@ -1281,6 +1358,8 @@ fn check_for_update(
 fn office(client: &Client, told: &Sender<Told>) {
     let fleet = client.fleet_access().unwrap_or_default();
     let keys = client.keys().unwrap_or_default();
+    // A server from before change notices simply has none.
+    let notices = client.notices().unwrap_or_default();
     match (client.joining(), client.update_settings()) {
         (Ok(joining), Ok(updates)) => {
             let _ = told.send(Told::Office(Box::new(Office {
@@ -1288,6 +1367,7 @@ fn office(client: &Client, told: &Sender<Told>) {
                 updates,
                 fleet,
                 keys,
+                notices,
             })));
         }
         (Err(e), _) | (_, Err(e)) => {

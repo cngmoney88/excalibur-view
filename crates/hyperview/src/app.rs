@@ -750,6 +750,9 @@ pub struct App {
     pub plugin_settings: crate::plugins::Settings,
     /// A plugin run under way.
     pub plugin_job: Option<crate::pluginui::Job>,
+    /// Where the office server's answer goes, when it ran a plugin for this
+    /// copy (`crate::edition`).
+    pub plugin_answer: Option<std::sync::mpsc::Sender<Result<plugin_api::Output, String>>>,
     pub next_plugin_job: u64,
     /// What the last plugin run found, while its window is open.
     pub plugin_shown: Option<crate::pluginui::Shown>,
@@ -899,9 +902,10 @@ impl App {
             dismissed_update: None,
             standard_bars: None,
             chests_fetched: Default::default(),
-            plugins: crate::plugins::Shelf::load(&crate::install::trusted()),
+            plugins: crate::plugins::Shelf::load(&crate::install::plugin_trusted()),
             plugin_settings: crate::plugins::load_settings(),
             plugin_job: None,
+            plugin_answer: None,
             next_plugin_job: 0,
             plugin_shown: None,
             managing_plugins: false,
@@ -2119,7 +2123,8 @@ impl App {
             .unwrap_or_default();
         match extension.as_str() {
             "evtools" | "bpx" | "btx" => self.load_chest_from(&path),
-            "evlicense" => self.take_license(path),
+            "evlicense" if crate::edition::sells() => self.take_license(path),
+            "evlicense" => self.status = crate::edition::not_in_this_copy("Adding a license"),
             "ifc" => self.open_model(path),
             _ => self.open(path),
         }

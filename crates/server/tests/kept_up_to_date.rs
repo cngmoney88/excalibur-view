@@ -720,6 +720,87 @@ fn a_server_will_not_hand_out_a_plugin_nobody_trusted_signed() {
     assert!(admin.plugins().unwrap().is_empty());
 }
 
+/// A real plugin, small enough to write by hand: one command, "hello", that
+/// finds one thing.
+fn a_working_plugin() -> Vec<u8> {
+    let manifest = r#"{"id":"shop-estimating","name":"Shop Estimating","version":"1.0.0","commands":[{"id":"hello","name":"Hello"}]}"#;
+    let answer = r#"{"done":{"title":"Hello","findings":[{"level":"check","message":"Look here","page":0,"area":[1,2,3,4]}]}}"#;
+    let escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let text = format!(
+        r#"(module
+            (memory (export "memory") 1)
+            (global $next (mut i32) (i32.const 8192))
+            (data (i32.const 0) "{m}")
+            (data (i32.const 2048) "{a}")
+            (func (export "hv_alloc") (param i32) (result i32) (local i32)
+                global.get $next
+                local.set 1
+                global.get $next
+                local.get 0
+                i32.add
+                global.set $next
+                local.get 1)
+            (func (export "hv_manifest") (result i64)
+                i64.const {ml})
+            (func (export "hv_run") (param i32 i32) (result i64)
+                i64.const {packed}))"#,
+        m = escape(manifest),
+        a = escape(answer),
+        ml = manifest.len(),
+        packed = (2048i64 << 32) | answer.len() as i64,
+    );
+    wat::parse_str(text).unwrap()
+}
+
+#[test]
+fn a_seat_that_cant_run_plugins_has_the_server_run_them() {
+    let (key, trusted) = publisher();
+    let office = an_office_with(None, trusted.keys.clone());
+    let admin = creede(&office);
+    let seat = signed_in(&office, "est@mesafab.com", "camber-weld-joist-plate-19");
+    admin
+        .upload_plugin(&a_plugin(&key, "shop-estimating", "1.0.0", &a_working_plugin()))
+        .unwrap();
+
+    // The list says what it can do, so a Mac App Store copy can build its menu
+    // without ever holding the plugin.
+    let listed = seat.plugins().unwrap();
+    let manifest = listed[0].manifest.as_ref().expect("the server read the manifest");
+    assert_eq!(manifest.commands[0].id, "hello");
+
+    let input = plugin_api::Input {
+        command: "hello".into(),
+        sheets: vec![plugin_api::Sheet { page: 0, name: "S-101".into(), ..Default::default() }],
+        ..Default::default()
+    };
+    match seat.run_plugin("shop-estimating", &input).unwrap() {
+        plugin_api::Answer::Done(output) => {
+            assert_eq!(output.title, "Hello");
+            assert_eq!(output.findings[0].message, "Look here");
+        }
+        plugin_api::Answer::Failed(why) => panic!("it failed: {why}"),
+    }
+    assert!(seat.run_plugin("no-such-plugin", &input).is_err());
+}
+
+#[test]
+fn a_plugin_that_isnt_really_one_says_so_rather_than_running() {
+    let (key, trusted) = publisher();
+    let office = an_office_with(None, trusted.keys.clone());
+    let admin = creede(&office);
+    // Signed properly, but not WebAssembly that does anything.
+    admin
+        .upload_plugin(&a_plugin(&key, "shop-estimating", "1.0.0", b"\0asm\x01\0\0\0 one"))
+        .unwrap();
+    let listed = admin.plugins().unwrap();
+    assert!(listed[0].manifest.is_none());
+    let input = plugin_api::Input { command: "hello".into(), ..Default::default() };
+    match admin.run_plugin("shop-estimating", &input).unwrap() {
+        plugin_api::Answer::Failed(why) => assert!(!why.is_empty()),
+        plugin_api::Answer::Done(_) => panic!("that was never a plugin"),
+    }
+}
+
 // ---- an office with Macs in it ----------------------------------------------
 
 /// The whole point of the release carrying two builds: a Windows office holds

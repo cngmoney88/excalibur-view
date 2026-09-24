@@ -163,7 +163,8 @@ it was fine.
 For your own plugins you have two routes, and you should pick deliberately:
 
 - **We sign it**, and it runs in any copy of Excalibur View. Send us the wasm.
-- **You add your own key** to your own build, and it runs only in your shop.
+- **You add your own key** to `PLUGIN_KEYS` in your own build, and it runs
+  only in your shop. A plugin key signs plugins and nothing else.
   Nobody has to ask us for anything, ever. This is the right answer for tools
   that encode your costs or your standards.
 
@@ -226,6 +227,27 @@ a markup Excalibur View drew is a markup every PDF reader shows, and your code
 can read it with any PDF library. Everything beside it in the API — subject,
 author, quantity, the custom columns — is derived, and is there so you never
 have to parse PDF to filter and total.
+
+### Being told instead of asking
+
+Studio → Office → Change notices, or `POST /notices` with a `url`, and the
+server tells that address whenever a drawing set's markups change: a couple
+of seconds after the change, one small JSON body per set however many pushes
+there were.
+
+```json
+{"event":"markups.changed","set":"set_…","file":"S-101.pdf","revision":12,
+ "project":"prj_…","number":"2640","reference":"fabwire:bid:2640",
+ "server":"Mesa Fab","at":"2026-09-24T19:02:11Z"}
+```
+
+`reference` is your own reference for the job, when you filed the project
+under one. No drawing or markup travels with a notice; ask the API for what
+you want. Each is signed: check `X-Excalibur-Signature: sha256=<hex>` against
+HMAC-SHA256 of the raw body, keyed with the secret the server gave you once,
+when the address was added. A notice that isn't taken is tried three times,
+then dropped, so keep the revision you last saw and catch up by asking.
+`POST /notices/{id}/test` sends a `ping`.
 
 ### Writing back
 

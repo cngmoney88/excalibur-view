@@ -15,6 +15,7 @@ pub mod compareui;
 pub mod doublewindow;
 pub mod docops;
 pub mod docui;
+pub mod edition;
 pub mod dynamicfill;
 pub mod find;
 pub mod fleetlink;

@@ -135,6 +135,10 @@ fn main() -> eframe::Result {
     // runs it in the sandbox once and says whether it is ready to be signed.
     // Nothing is installed.
     if let Some(at) = arguments.iter().position(|a| a == "--plugin-check") {
+        if !hyperview::edition::runs_plugins_itself() {
+            println!("{}", hyperview::edition::not_in_this_copy("Checking a plugin"));
+            std::process::exit(1);
+        }
         let files: Vec<PathBuf> = arguments[at + 1..]
             .iter()
             .filter(|a| !a.to_string_lossy().starts_with("--"))

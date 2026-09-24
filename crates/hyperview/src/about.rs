@@ -128,10 +128,12 @@ impl App {
                             .size(10.0),
                         );
                     });
-                    ui.horizontal(|ui| {
-                        gutter(ui, "", theme);
-                        ui.hyperlink_to(RichText::new("Learn about Office").size(11.0), hub::site::PRICING);
-                    });
+                    if crate::edition::sells() {
+                        ui.horizontal(|ui| {
+                            gutter(ui, "", theme);
+                            ui.hyperlink_to(RichText::new("Learn about Office").size(11.0), hub::site::PRICING);
+                        });
+                    }
                 }
                 row(
                     ui,

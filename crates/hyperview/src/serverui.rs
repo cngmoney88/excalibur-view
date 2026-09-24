@@ -96,6 +96,12 @@ pub struct OfficePanel {
     /// Keys for other programs, and a new one's name as it is typed.
     pub keys: Vec<hub::ApiKey>,
     pub key_name: String,
+    /// Where the office tells other programs a takeoff changed, the address
+    /// being typed, one just made (its secret shown once), and how a test went.
+    pub notices: Vec<hub::ChangeNotice>,
+    pub notice_url: String,
+    pub new_notice: Option<hub::ChangeNotice>,
+    pub notice_note: Option<String>,
     /// A key just made: shown until somebody copies it and closes it.
     pub new_key: Option<hub::ApiKey>,
     /// The server's address, for whoever is setting another program up.
@@ -165,6 +171,9 @@ struct PanelActions {
     remote_look: bool,
     make_key: Option<String>,
     revoke_key: Option<String>,
+    add_notice: Option<String>,
+    test_notice: Option<String>,
+    remove_notice: Option<String>,
     add_license: bool,
     paste_license: bool,
     send_license: Option<String>,
@@ -378,6 +387,11 @@ impl App {
                     }
                 }
                 Told::PluginShared(said) => self.status = said,
+                Told::PluginRan(ran) => {
+                    if let Some(answer) = self.plugin_answer.take() {
+                        let _ = answer.send(ran);
+                    }
+                }
                 Told::ChestFetched { name, path } => {
                     self.status = format!("Tool chest '{name}' is on this computer now.");
                     log::info!("chest at {}", path.display());
@@ -434,6 +448,12 @@ impl App {
                     self.standing.update = offer.release.clone();
                 }
                 Told::SyncFailed(_) => self.sync_asked = None,
+                Told::NoticeMade(made) => {
+                    self.office.notice_url.clear();
+                    self.office.notice_note = None;
+                    self.office.new_notice = Some(*made);
+                }
+                Told::NoticeTested(said) => self.office.notice_note = Some(said),
                 Told::IntegrationKey(key) => {
                     self.office.key_name.clear();
                     self.office.new_key = Some(*key);
@@ -451,6 +471,7 @@ impl App {
                     self.office.updates = Some(office.updates);
                     self.office.fleet = Some(office.fleet);
                     self.office.keys = office.keys;
+                    self.office.notices = office.notices;
                 }
                 Told::License { standing, added } => {
                     if added {
@@ -962,7 +983,9 @@ impl App {
                     .color(theme.faint)
                     .size(10.0),
                 );
-                ui.hyperlink_to(RichText::new("Get the server").size(11.0), hub::site::OFFICE_SERVER);
+                if crate::edition::sells() {
+                    ui.hyperlink_to(RichText::new("Get the server").size(11.0), hub::site::OFFICE_SERVER);
+                }
             });
             return;
         }
@@ -1013,7 +1036,7 @@ impl App {
                         // Every message an administrator is shown here has
                         // the same two ways forward: a license file, or the
                         // page that sells one.
-                        if admin && license.state != "founding" {
+                        if admin && license.state != "founding" && crate::edition::sells() {
                             let licensed = license.state == "licensed";
                             ui.horizontal(|ui| {
                                 if ui.small_button("Add license file…").clicked() {
@@ -1441,6 +1464,16 @@ impl App {
         }
         if let Some(id) = actions.revoke_key {
             self.ask(Ask::RevokeKey(id));
+        }
+        if let Some(url) = actions.add_notice {
+            self.ask(Ask::AddNotice(url));
+        }
+        if let Some(id) = actions.test_notice {
+            self.office.notice_note = Some("Sending a test notice…".into());
+            self.ask(Ask::TestNotice(id));
+        }
+        if let Some(id) = actions.remove_notice {
+            self.ask(Ask::RemoveNotice(id));
         }
         if let Some((current, new)) = actions.password {
             self.office.password_note = None;
@@ -2227,6 +2260,72 @@ fn office_section(
                         .size(10.0),
                 );
             }
+
+            // Being told rather than asking: FabWire hears when a takeoff changes.
+            ui.add_space(8.0);
+            ui.label(RichText::new("Change notices").strong().size(11.0));
+            ui.label(
+                RichText::new(
+                    "Tell another program whenever a drawing set's markups change, so it \
+                     doesn't have to keep asking. Each notice says which set and job changed, \
+                     signed so the program knows it came from here. No drawing or markup goes \
+                     with it.",
+                )
+                .color(theme.faint)
+                .size(10.0),
+            );
+            for notice in &office.notices {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&notice.url).size(11.0));
+                    let how = match (&notice.last_status, &notice.last_at) {
+                        (Some(status), Some(at)) => format!("{status} · {}", at.get(..16).unwrap_or(at)),
+                        _ => "nothing sent yet".into(),
+                    };
+                    ui.label(RichText::new(how).color(theme.faint).size(10.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Stop").clicked() {
+                            actions.remove_notice = Some(notice.id.clone());
+                        }
+                        if ui.small_button("Test").clicked() {
+                            actions.test_notice = Some(notice.id.clone());
+                        }
+                    });
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut office.notice_url)
+                        .hint_text("https://fabwire.example/hooks/excalibur")
+                        .desired_width(260.0),
+                );
+                let url = office.notice_url.trim().to_string();
+                if ui.add_enabled(!url.is_empty(), egui::Button::new("Add").small()).clicked() {
+                    actions.add_notice = Some(url);
+                }
+            });
+            if let Some(note) = &office.notice_note {
+                ui.label(RichText::new(note).color(theme.faint).size(10.0));
+            }
+            if let Some(made) = office.new_notice.clone() {
+                let secret = made.secret.clone().unwrap_or_default();
+                ui.label(
+                    RichText::new(
+                        "The secret its notices are signed with. It is shown this once — copy \
+                         it into the other program's settings now.",
+                    )
+                    .color(theme.warn)
+                    .size(10.0),
+                );
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&secret).monospace().size(11.0));
+                    if ui.small_button("Copy").clicked() {
+                        ui.ctx().copy_text(secret.clone());
+                    }
+                    if ui.small_button("Done").clicked() {
+                        office.new_notice = None;
+                    }
+                });
+            }
         });
     if shown.body_returned.is_some() && !office.asked {
         office.asked = true;
@@ -2342,6 +2441,14 @@ fn license_section(
     for line in lines {
         ui.label(RichText::new(line).color(theme.faint).size(10.0));
     }
+    if !crate::edition::sells() {
+        ui.label(
+            RichText::new("The office's license is added on the server, or from Excalibur View on Windows.")
+                .color(theme.faint)
+                .size(10.0),
+        );
+        return;
+    }
     // Before asking anybody to go and find a file: the one they were sent is
     // almost certainly already on this computer.
     for found in lying_about {
@@ -2425,6 +2532,10 @@ fn license_section(
 impl App {
     /// Asks for a license file and hands it to the server.
     pub fn pick_license(&mut self) {
+        if !crate::edition::sells() {
+            self.status = crate::edition::not_in_this_copy("Adding a license");
+            return;
+        }
         if let Some(file) = rfd::FileDialog::new()
             .set_title("Add an Excalibur View Office license")
             .add_filter("License", &[hub::license::EXTENSION])

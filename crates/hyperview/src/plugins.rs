@@ -23,18 +23,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use hub::update::Trusted;
-use plugin_api::{Answer, Input, Manifest, Output};
+use plugin_api::{Input, Manifest};
 
-/// How much work one run may do. About a minute of a busy interpreter —
-/// far more than reading a hundred sheets needs, and a stop for one that
-/// has gone round in circles.
-pub const FUEL: u64 = 60_000_000_000;
-
-/// How much memory one run may hold.
-pub const MEMORY: usize = 1536 << 20;
-
-/// The most a plugin may hand back.
-const MOST_OUTPUT: usize = 64 << 20;
+pub use plugin_host::{manifest_of, run, FUEL, MEMORY};
 
 pub const EXTENSION: &str = "hvplugin";
 
@@ -75,6 +66,32 @@ pub fn office_folder() -> PathBuf {
 }
 
 impl Shelf {
+    /// The office's plugins as the server describes them, for a copy that
+    /// doesn't run plugins itself: the server runs them, so there is nothing
+    /// here to load, only commands to list.
+    pub fn from_office(list: &[hub::PluginInfo]) -> Shelf {
+        Shelf {
+            plugins: list
+                .iter()
+                .filter_map(|info| {
+                    Some(Plugin {
+                        manifest: info.manifest.clone()?,
+                        wasm: Arc::new(Vec::new()),
+                        digest: info.digest.to_lowercase(),
+                        key: info.key.clone(),
+                        from_office: true,
+                        path: PathBuf::new(),
+                    })
+                })
+                .collect(),
+            refused: list
+                .iter()
+                .filter(|info| info.manifest.is_none())
+                .map(|info| (info.name.clone(), "the server couldn't read what it does".into()))
+                .collect(),
+        }
+    }
+
     /// Everything in the two folders that passes.
     pub fn load(trusted: &Trusted) -> Shelf {
         Shelf::load_from(trusted, &folder(), &office_folder())
@@ -193,114 +210,6 @@ pub fn add_from_file(trusted: &Trusted, source: &Path) -> Result<(Plugin, Vec<u8
     let path = dir.join(format!("{}.{EXTENSION}", checked.manifest.id));
     std::fs::write(&path, &bytes).map_err(|e| format!("Could not keep the plugin: {e}"))?;
     Ok((Plugin { path, ..checked }, bytes))
-}
-
-// ---- the sandbox --------------------------------------------------------------
-
-struct Host {
-    limits: wasmi::StoreLimits,
-}
-
-fn instantiate(wasm: &[u8]) -> Result<(wasmi::Store<Host>, wasmi::Instance), String> {
-    let mut config = wasmi::Config::default();
-    config.consume_fuel(true);
-    let engine = wasmi::Engine::new(&config);
-    let module = wasmi::Module::new(&engine, wasm)
-        .map_err(|e| format!("The plugin could not be read as WebAssembly: {e}"))?;
-    // There is nothing to import. A plugin that asks for something wants to
-    // reach outside the sandbox, and does not run.
-    let wants: Vec<String> = module
-        .imports()
-        .map(|i| format!("{}.{}", i.module(), i.name()))
-        .collect();
-    if !wants.is_empty() {
-        return Err(format!(
-            "The plugin asks for things Excalibur View does not give plugins: {}.",
-            wants.join(", ")
-        ));
-    }
-    let limits = wasmi::StoreLimitsBuilder::new()
-        .memory_size(MEMORY)
-        .instances(1)
-        .memories(1)
-        .tables(4)
-        .build();
-    let mut store = wasmi::Store::new(&engine, Host { limits });
-    store.limiter(|host| &mut host.limits);
-    store
-        .set_fuel(FUEL)
-        .map_err(|e| format!("The plugin's budget could not be set: {e}"))?;
-    let linker = wasmi::Linker::<Host>::new(&engine);
-    let instance = linker
-        .instantiate(&mut store, &module)
-        .and_then(|pre| pre.start(&mut store))
-        .map_err(|e| explain(&e))?;
-    Ok((store, instance))
-}
-
-fn explain(e: &wasmi::Error) -> String {
-    let text = e.to_string();
-    if text.contains("fuel") {
-        "The plugin took too long and was stopped.".into()
-    } else if text.contains("memory") && (text.contains("limit") || text.contains("grow")) {
-        "The plugin wanted more memory than it is allowed and was stopped.".into()
-    } else {
-        format!("The plugin stopped with an error: {text}")
-    }
-}
-
-/// Reads an answer out of the plugin's memory: address high, length low.
-fn take(store: &wasmi::Store<Host>, memory: &wasmi::Memory, packed: i64) -> Result<Vec<u8>, String> {
-    let at = ((packed as u64) >> 32) as usize;
-    let len = (packed as u64 & 0xffff_ffff) as usize;
-    if len > MOST_OUTPUT {
-        return Err("The plugin answered with more than Excalibur View will read.".into());
-    }
-    let data = memory.data(store);
-    data.get(at..at + len)
-        .map(|b| b.to_vec())
-        .ok_or_else(|| "The plugin answered from outside its own memory.".into())
-}
-
-/// What a plugin says about itself.
-pub fn manifest_of(wasm: &[u8]) -> Result<Manifest, String> {
-    let (mut store, instance) = instantiate(wasm)?;
-    let memory = instance
-        .get_memory(&store, "memory")
-        .ok_or("The plugin has no memory to talk through.")?;
-    let manifest = instance
-        .get_typed_func::<(), i64>(&store, "hv_manifest")
-        .map_err(|_| "The plugin does not say what it is (no hv_manifest).".to_string())?;
-    let packed = manifest.call(&mut store, ()).map_err(|e| explain(&e))?;
-    let bytes = take(&store, &memory, packed)?;
-    serde_json::from_slice(&bytes).map_err(|e| format!("The plugin's description could not be read: {e}"))
-}
-
-/// Runs one command. Blocking — call it off the window's thread.
-pub fn run(wasm: &[u8], input: &Input) -> Result<Output, String> {
-    let (mut store, instance) = instantiate(wasm)?;
-    let memory = instance
-        .get_memory(&store, "memory")
-        .ok_or("The plugin has no memory to talk through.")?;
-    let alloc = instance
-        .get_typed_func::<i32, i32>(&store, "hv_alloc")
-        .map_err(|_| "The plugin cannot be handed anything (no hv_alloc).".to_string())?;
-    let go = instance
-        .get_typed_func::<(i32, i32), i64>(&store, "hv_run")
-        .map_err(|_| "The plugin cannot be run (no hv_run).".to_string())?;
-    let bytes = plugin_api::pack(input);
-    let len = i32::try_from(bytes.len()).map_err(|_| "There is too much to hand the plugin.".to_string())?;
-    let at = alloc.call(&mut store, len).map_err(|e| explain(&e))?;
-    memory
-        .write(&mut store, at as u32 as usize, &bytes)
-        .map_err(|_| "The plugin gave no room for what it was handed.".to_string())?;
-    let packed = go.call(&mut store, (at, len)).map_err(|e| explain(&e))?;
-    let answer = take(&store, &memory, packed)?;
-    match serde_json::from_slice::<Answer>(&answer) {
-        Ok(Answer::Done(output)) => Ok(output),
-        Ok(Answer::Failed(why)) => Err(why),
-        Err(e) => Err(format!("The plugin's answer could not be read: {e}")),
-    }
 }
 
 // ---- checking a plugin before it is signed ------------------------------------
@@ -589,6 +498,28 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_that_doesnt_run_plugins_lists_what_the_server_says_they_do() {
+        let manifest = manifest_of(&tiny("")).unwrap();
+        let info = |id: &str, manifest: Option<Manifest>| hub::PluginInfo {
+            id: id.into(),
+            name: id.into(),
+            version: "1.0.0".into(),
+            digest: "AB".into(),
+            bytes: 1,
+            uploaded: String::new(),
+            uploaded_by: String::new(),
+            key: "test-2026".into(),
+            manifest,
+        };
+        let shelf = Shelf::from_office(&[info("tiny", Some(manifest)), info("broken", None)]);
+        assert_eq!(shelf.plugins.len(), 1);
+        assert!(shelf.plugins[0].wasm.is_empty(), "nothing to run here");
+        assert!(shelf.plugins[0].from_office);
+        assert_eq!(shelf.menu()[0].fire, "Plugin:tiny:hello");
+        assert_eq!(shelf.refused.len(), 1, "one the server couldn't read is named, not listed");
+    }
+
+    #[test]
     fn a_plugin_checked_before_signing_is_run_and_reported_on() {
         let dir = std::env::temp_dir().join(format!("hv-checkup-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -644,11 +575,8 @@ mod tests {
         let started = std::time::Instant::now();
         // Smaller budget than the real one, so the test is quick; the same
         // wall stops both.
-        let (mut store, instance) = instantiate(&wasm).unwrap();
-        store.set_fuel(50_000_000).unwrap();
-        let go = instance.get_typed_func::<(i32, i32), i64>(&store, "hv_run").unwrap();
-        let e = go.call(&mut store, (0, 0)).unwrap_err();
-        assert!(explain(&e).contains("too long"), "{e}");
+        let e = plugin_host::run_with_fuel(&wasm, &Input::default(), 50_000_000).unwrap_err();
+        assert!(e.contains("too long"), "{e}");
         assert!(started.elapsed().as_secs() < 30);
     }
 

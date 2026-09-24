@@ -16,6 +16,11 @@ path = "src/main.rs"
 name = "probe"
 path = "src/bin/probe.rs"
 
+[features]
+# The Mac App Store edition: no self-updating, no license keys or links to
+# buy, plugins run by the office server. See `edition.rs`.
+store = []
+
 [dependencies]
 annot = { path = "../annot" }
 chest = { path = "../chest" }
@@ -25,8 +30,9 @@ ui = { path = "../ui" }
 hub = { path = "../hub" }
 plugin-api = { path = "../plugin-api" }
 # Plugins run in an interpreter, sandboxed: no files, no network, no screen,
-# and a fixed budget of work and memory. See `plugins.rs`.
-wasmi = { version = "0.42", default-features = false, features = ["std"] }
+# and a fixed budget of work and memory. The same one the office server runs
+# them in for a copy that can't run them itself. See `plugin-host`.
+plugin-host = { path = "../plugin-host" }
 # The server is not a separate program. One download, one exe: started
 # normally it is the viewer, started with --serve it is the company's server,
 # and the "host the drawings here" button runs one inside the other.

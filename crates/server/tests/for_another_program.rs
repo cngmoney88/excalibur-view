@@ -436,3 +436,96 @@ fn an_office_whose_trial_ended_keeps_everything_readable_and_only_sharing_pauses
     assert!(matches!(forged, Err(ureq::Error::Status(400, _))), "{forged:?}");
     assert_eq!(server.get("/license")["state"], "unlicensed");
 }
+
+// ---- being told instead of asking -----------------------------------------
+
+/// A program listening for notices, as FabWire would: every request that
+/// arrives, as (headers, body), answered 200.
+fn a_listener() -> (String, std::sync::mpsc::Receiver<(String, String)>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/hooks/excalibur", listener.local_addr().unwrap());
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut head = String::new();
+            let mut length = 0usize;
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse().unwrap_or(0);
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0u8; length];
+            let _ = reader.read_exact(&mut body);
+            let mut stream = stream;
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = tx.send((head, String::from_utf8_lossy(&body).into_owned()));
+        }
+    });
+    (url, rx)
+}
+
+fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+    head.lines().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+#[test]
+fn fabwire_is_told_when_a_takeoff_changes_and_can_prove_who_told_it() {
+    let server = start();
+    let (url, heard) = a_listener();
+    let notice = server.post("/notices", json!({ "url": url }));
+    let secret = notice["secret"].as_str().expect("the secret, this once").to_string();
+    let id = notice["id"].as_str().unwrap().to_string();
+
+    let project = server.post("/projects", json!({ "number": "2640", "name": "Riverside", "reference": "fabwire:bid:2640" }));
+    let set = server.upload(project["id"].as_str().unwrap(), "S-101.pdf", &a_drawing(3024, 2160, "n"), false);
+    // Two pushes close together: one notice, saying where things ended up.
+    server.push(&set.id, &[a_beam(720.0, 1.0)]);
+    server.push(&set.id, &[moments(3)]);
+
+    let (head, body) = heard.recv_timeout(std::time::Duration::from_secs(20)).expect("a notice arrives");
+    assert_eq!(header(&head, "X-Excalibur-Event"), Some("markups.changed"));
+    let signed = header(&head, "X-Excalibur-Signature").expect("it is signed");
+    assert_eq!(signed, format!("sha256={}", hyperview_server::notices::sign(&secret, body.as_bytes())));
+    let said: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(said["set"], set.id.as_str());
+    assert_eq!(said["reference"], "fabwire:bid:2640", "in FabWire's own terms");
+    assert_eq!(said["revision"], 2, "both pushes, one notice");
+    assert!(said.get("markups").is_none(), "no takeoff travels with it");
+    assert!(
+        heard.recv_timeout(std::time::Duration::from_secs(4)).is_err(),
+        "the second push didn't make a second notice"
+    );
+
+    // The list says how it went, and never shows the secret again.
+    let listed = server.get("/notices");
+    assert_eq!(listed[0]["last_status"], "delivered");
+    assert!(listed[0].get("secret").is_none());
+
+    // A test sends a ping straight away.
+    let tried = server.post(&format!("/notices/{id}/test"), json!({}));
+    assert_eq!(tried["status"], "delivered");
+    let (head, _) = heard.recv_timeout(std::time::Duration::from_secs(10)).expect("the ping");
+    assert_eq!(header(&head, "X-Excalibur-Event"), Some("ping"));
+
+    server.post(&format!("/notices/{id}/remove"), json!({}));
+    assert_eq!(server.get("/notices").as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn a_notice_address_has_to_be_a_web_address() {
+    let server = start();
+    let refused = ureq::post(&format!("{}/api/v1/notices", server.base))
+        .set("Authorization", &format!("Bearer {}", server.token))
+        .send_json(json!({ "url": "file:///etc/passwd" }));
+    assert!(refused.is_err());
+}

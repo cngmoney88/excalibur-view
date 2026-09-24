@@ -68,7 +68,11 @@ fn level_word(level: Level) -> &'static str {
 impl App {
     /// Reads the plugins folders again and rebuilds the menu.
     pub fn reload_plugins(&mut self) {
-        self.plugins = plugins::Shelf::load(&crate::install::trusted());
+        self.plugins = if crate::edition::runs_plugins_itself() {
+            plugins::Shelf::load(&crate::install::plugin_trusted())
+        } else {
+            plugins::Shelf::from_office(&self.standing.plugins)
+        };
         self.chrome.plugins = self.plugins.menu();
     }
 
@@ -130,13 +134,13 @@ impl App {
         self.launch_plugin_if_ready();
     }
 
-    /// Plugins ▸ Save This Sheet for a Plugin Test…
+    /// Plugins ▸ Save This Sheet (or This Drawing) for a Plugin Test…
     ///
-    /// Reads the sheet on screen exactly as a command that wants words and
-    /// line-work would, and writes the input to a file instead of handing it
-    /// to anything. Somebody writing a plugin tests against that file, with
-    /// no signing and no program in the way.
-    pub fn save_plugin_input(&mut self, ctx: &egui::Context) {
+    /// Reads the sheet on screen, or every sheet, exactly as a command that
+    /// wants words and line-work would, and writes the input to a file
+    /// instead of handing it to anything. Somebody writing a plugin tests
+    /// against that file, with no signing and no program in the way.
+    pub fn save_plugin_input(&mut self, ctx: &egui::Context, whole: bool) {
         if self.plugin_job.is_some() {
             self.status = "A plugin is running. Save the sheet once it has finished.".into();
             return;
@@ -146,14 +150,15 @@ impl App {
             return;
         };
         let (doc_id, page) = (doc.id, doc.page);
+        let pages: Vec<u32> = if whole { (0..doc.pages.len() as u32).collect() } else { vec![page] };
         let stem = doc
             .path
             .file_stem()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "sheet".into());
         let Some(save_to) = rfd::FileDialog::new()
-            .set_title("Save this sheet for a plugin test")
-            .set_file_name(format!("{stem} - sheet {}.json", page + 1))
+            .set_title(if whole { "Save this drawing for a plugin test" } else { "Save this sheet for a plugin test" })
+            .set_file_name(if whole { format!("{stem}.json") } else { format!("{stem} - sheet {}.json", page + 1) })
             .add_filter("Plugin input (JSON)", &["json"])
             .save_file()
         else {
@@ -161,23 +166,25 @@ impl App {
         };
         let command = Command {
             id: "test".into(),
-            name: "Saving the sheet".into(),
+            name: if whole { "Saving the drawing".into() } else { "Saving the sheet".into() },
             description: String::new(),
-            scope: Scope::Sheet,
+            scope: if whole { Scope::Drawing } else { Scope::Sheet },
             needs: plugin_api::Needs { words: true, lines: true },
         };
-        let input = self.plugin_input(&command, &[page], BTreeMap::new());
+        let input = self.plugin_input(&command, &pages, BTreeMap::new());
         self.next_plugin_job += 1;
         let id = self.next_plugin_job;
-        self.svc.send(ToWorker::Read { doc: doc_id, page, job: id, words: true, lines: true });
+        for page in &pages {
+            self.svc.send(ToWorker::Read { doc: doc_id, page: *page, job: id, words: true, lines: true });
+        }
         self.plugin_job = Some(Job {
             id,
             plugin: String::new(),
             plugin_name: "Plugin test".into(),
             command,
             doc: doc_id,
-            waiting: BTreeSet::from([page]),
-            of: 1,
+            waiting: pages.iter().copied().collect(),
+            of: pages.len(),
             readings: BTreeMap::new(),
             input,
             running: None,
@@ -304,6 +311,14 @@ impl App {
         };
         let input = std::mem::take(&mut job.input);
         let (tx, rx) = mpsc::channel();
+        job.running = Some(rx);
+        // A copy that doesn't run plugins itself has the office server run
+        // this one, in the same sandbox, and waits for what it found.
+        if !crate::edition::runs_plugins_itself() {
+            self.plugin_answer = Some(tx);
+            self.ask(crate::server::Ask::RunPlugin { id: plugin.manifest.id.clone(), input });
+            return;
+        }
         let ctx = job.ctx.clone();
         let wasm = plugin.wasm.clone();
         std::thread::Builder::new()
@@ -315,7 +330,6 @@ impl App {
                 ctx.request_repaint();
             })
             .ok();
-        job.running = Some(rx);
     }
 
     /// Picks up a finished run. Called every frame.
@@ -362,6 +376,12 @@ impl App {
 
     /// Plugins ▸ Add Plugin…
     pub fn add_plugin(&mut self) {
+        if !crate::edition::runs_plugins_itself() {
+            self.status = "Plugins come from your office's server on this copy. \
+                           An administrator adds them from Excalibur View on Windows."
+                .into();
+            return;
+        }
         let Some(path) = rfd::FileDialog::new()
             .set_title("Add a plugin")
             .add_filter("Excalibur View plugin", &[plugins::EXTENSION])
@@ -369,7 +389,7 @@ impl App {
         else {
             return;
         };
-        match plugins::add_from_file(&crate::install::trusted(), &path) {
+        match plugins::add_from_file(&crate::install::plugin_trusted(), &path) {
             Err(why) => self.status = why,
             Ok((plugin, _)) => {
                 let name = format!("{} {}", plugin.manifest.name, plugin.manifest.version);
@@ -973,6 +993,13 @@ impl App {
     /// What the office's server says it hands out: fetch what this seat
     /// has not got, drop what the office no longer lists.
     pub fn take_plugin_list(&mut self, list: Vec<hub::PluginInfo>) {
+        // Nothing is fetched to a copy that doesn't run plugins itself. Its
+        // menu is built from what the server says each one can do.
+        if !crate::edition::runs_plugins_itself() {
+            self.standing.plugins = list;
+            self.reload_plugins();
+            return;
+        }
         let have = self.plugins.office_digests();
         for plugin in &list {
             let digest = plugin.digest.to_lowercase();

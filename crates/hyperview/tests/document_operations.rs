@@ -721,6 +721,13 @@ fn a_batch_combine_puts_them_all_in_one_file_in_order() {
     assert_eq!(sheets_in(&all), 5);
     assert_eq!(sheets_in(&one), 2, "originals untouched");
     assert_eq!(sheets_in(&two), 3);
+
+    // One bookmark per file, named after it, opening at its first sheet.
+    let combined = pdf::Document::open(&all).unwrap();
+    let marks = hyperview::morepanels::bookmarks_of(&combined);
+    let titles: Vec<&str> = marks.iter().map(|b| b.title.as_str()).collect();
+    assert_eq!(titles, ["A", "B"]);
+    assert_eq!(marks[1].page, Some(2), "B starts on the third sheet");
 }
 
 #[test]
