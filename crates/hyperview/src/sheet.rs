@@ -186,7 +186,18 @@ impl Draft {
                 markup.set("IT", pdf::Object::name(intent));
             }
             None => {
-                markup.dict.remove("IT");
+                // A Tool Chest markup keeps the intent it came with, like
+                // Revu's PolygonCloud, so it goes back to Revu as the same
+                // tool. A measuring intent it has no business carrying goes.
+                let its_own = self
+                    .template
+                    .as_ref()
+                    .and_then(|d| d.get("IT"))
+                    .and_then(|o| o.as_name())
+                    .is_some_and(|n| known_intent(n.as_str()).is_none());
+                if !its_own {
+                    markup.dict.remove("IT");
+                }
                 markup.dict.remove("MeasurementTypes");
             }
         }
@@ -321,7 +332,7 @@ impl Draft {
         // A cloud is an ordinary shape carrying a border effect that says to
         // draw its edge cloudy. Revu writes it that way and so does Acrobat,
         // so a cloud drawn here is a cloud wherever the set goes.
-        if self.tool.is_cloudy() {
+        if self.tool.is_cloudy() && !markup.dict.has("BE") {
             let mut effect = pdf::Dict::new();
             effect.set("S", pdf::Object::name("C"));
             effect.set("I", pdf::Object::Real(2.0));
@@ -1621,5 +1632,84 @@ mod tests {
         let on_sheet = mark.on_sheet(&frame);
         assert_eq!(on_sheet[0], [0.0, 0.0]);
         assert_eq!(on_sheet[1], [360.0, 0.0]);
+    }
+
+    /// A tool as a Revu chest carries it: the annotation dictionary.
+    fn a_chest_tool(text: &str) -> (crate::app::Tool, pdf::Dict) {
+        let dict = pdf::Reader::new(text.as_bytes())
+            .object()
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .clone();
+        let (tool, _) = crate::app::Tool::for_chest(annot::Kind::read(&dict), &dict);
+        (tool, dict)
+    }
+
+    fn drawn_with(tool: crate::app::Tool, template: pdf::Dict, points: &[[f64; 2]]) -> Markup {
+        let draft = Draft {
+            tool,
+            points: points.to_vec(),
+            subject: "Revision".into(),
+            template: Some(template),
+            ..Draft::default()
+        };
+        draft
+            .into_markup(&Frame::new([0.0, 0.0, 612.0, 792.0], 0), None)
+            .expect("a markup")
+    }
+
+    #[test]
+    fn a_cloud_from_a_chest_is_drawn_as_a_cloud() {
+        let (tool, template) = a_chest_tool(
+            "<< /Type /Annot /Subtype /Polygon /IT /PolygonCloud /Subj (Revision) \
+             /BE << /S /C /I 1 >> /C [1 0 0] >>",
+        );
+        assert_eq!(tool, crate::app::Tool::CloudPolygon);
+        let m = drawn_with(tool, template, &[[10.0, 10.0], [90.0, 10.0], [90.0, 60.0], [10.0, 60.0]]);
+        assert_eq!(m.subtype(), Subtype::Polygon, "not a rectangle");
+        assert_eq!(m.kind(), Kind::Markup);
+        let be = m.dict.get("BE").and_then(|o| o.as_dict()).expect("a cloudy border");
+        assert_eq!(be.get("I").and_then(|o| o.as_f64()), Some(1.0), "his intensity, not ours");
+        assert_eq!(
+            m.dict.get("IT").and_then(|o| o.as_name()).map(|n| n.as_str().to_string()),
+            Some("PolygonCloud".into()),
+            "it goes back to Revu as the same tool"
+        );
+    }
+
+    #[test]
+    fn a_callout_from_a_chest_is_drawn_as_a_callout() {
+        let (tool, template) = a_chest_tool(
+            "<< /Type /Annot /Subtype /FreeText /IT /FreeTextCallout /Subj (RFI) >>",
+        );
+        assert_eq!(tool, crate::app::Tool::Callout);
+        let m = drawn_with(tool, template, &[[10.0, 10.0], [120.0, 200.0]]);
+        assert_eq!(m.subtype(), Subtype::FreeText);
+        assert!(m.dict.get("CL").is_some(), "it has its leader");
+    }
+
+    #[test]
+    fn every_markup_in_a_chest_is_armed_as_its_own_kind() {
+        use crate::app::Tool;
+        for (text, expected) in [
+            ("<< /Subtype /Square /BE << /S /C >> >>", Tool::Cloud),
+            ("<< /Subtype /Square >>", Tool::Rect),
+            ("<< /Subtype /Circle >>", Tool::Ellipse),
+            ("<< /Subtype /Polygon >>", Tool::Polygon),
+            ("<< /Subtype /PolyLine >>", Tool::Polyline),
+            ("<< /Subtype /Line /LE [/None /OpenArrow] >>", Tool::Arrow),
+            ("<< /Subtype /Ink >>", Tool::Ink),
+            ("<< /Subtype /FreeText >>", Tool::Text),
+            ("<< /Subtype /FreeText /IT /FreeTextTypeWriter >>", Tool::Typewriter),
+            ("<< /Subtype /Text >>", Tool::Note),
+            ("<< /Subtype /Highlight >>", Tool::Highlight),
+            ("<< /Subtype /Line /IT /LineDimension >>", Tool::Length),
+            ("<< /Subtype /Polygon /IT /PolygonVolume >>", Tool::Volume),
+            ("<< /Subtype /Circle /IT /CircleDimension >>", Tool::Diameter),
+            ("<< /Subtype /PolyLine /IT /PolyLineAngle >>", Tool::Angle),
+        ] {
+            assert_eq!(a_chest_tool(text).0, expected, "{text}");
+        }
     }
 }

@@ -757,13 +757,7 @@ impl App {
             255,
         ];
         self.template = Some(tool.annotation.clone());
-        let (canvas, id) = match tool.kind {
-            annot::Kind::Area | annot::Kind::Volume => (Tool::Area, "Measure.Area"),
-            annot::Kind::Count => (Tool::Count, "Measure.Count"),
-            annot::Kind::Angle => (Tool::Length, "Measure.Length"),
-            annot::Kind::Markup => (Tool::Rect, "Markup.Rectangle"),
-            _ => (Tool::Length, "Measure.Length"),
-        };
+        let (canvas, id) = Tool::for_chest(tool.kind, &tool.annotation);
         self.finish_draft();
         self.tool = canvas;
         self.chrome.tool = id.into();
