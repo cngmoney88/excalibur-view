@@ -179,7 +179,12 @@ impl App {
                     version,
                     claimed,
                     joining,
+                    reachable_at,
                 } => {
+                    // Learned here, kept when they sign in. A seat only ever
+                    // finds out about the outside address while it is on the
+                    // inside, which is the right way round: nobody types it.
+                    self.standing.reachable_at = reachable_at;
                     if let Some(signing) = self.signing_in.as_mut() {
                         signing.waiting = false;
                         signing.error = None;
@@ -580,6 +585,10 @@ impl App {
             token: token.to_string(),
             name: self.standing.name.clone(),
             user: user.to_string(),
+            // Kept from the last health answer. A server that has not turned
+            // remote access on says nothing here, and a seat that never
+            // learned an outside address simply has none to fall back to.
+            reachable_at: self.standing.reachable_at.clone(),
         };
         if let Err(e) = self.prefs.save() {
             log::warn!("could not keep the server details: {e}");

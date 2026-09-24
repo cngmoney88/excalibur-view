@@ -895,6 +895,7 @@ impl App {
             app.ask(crate::server::Ask::Resume {
                 base: remembered.base,
                 token: remembered.token,
+                reachable_at: remembered.reachable_at,
             });
         } else {
             // A copy with no server behind it — a laptop, a demo zip, the first

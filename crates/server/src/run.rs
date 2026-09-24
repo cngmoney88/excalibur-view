@@ -63,6 +63,15 @@ pub async fn serve(
     let claimed = !server.store.is_empty().unwrap_or(false);
     let name = api::installation_name(&server);
 
+    // Remote access comes back by itself after a restart. A shop that turned
+    // it on once should not find their jobsite access gone because the box
+    // rebooted overnight; and a sealed server refuses here exactly as it
+    // refuses everywhere else.
+    if let Some((token, hostname)) = crate::tunnel::held(&server.store) {
+        tracing::info!("remote access is on at {hostname}");
+        crate::tunnel::start(&server.tunnel, &server.config.data, token, hostname);
+    }
+
     // Answering for itself on the local network, so nobody in the office has to
     // be told an IP address. It is its own thread rather than a task because it
     // is a blocking socket that lives as long as the process, and it is not
