@@ -77,6 +77,7 @@ pub const ALL: &[Command] = &[
     Command { id: "Document.Save", label: "Save", shortcut: Some("Ctrl+S"), glyph: Some(icon::SAVE), kind: Kind::Button, hint: "Save markups into the file." },
     Command { id: "Document.SaveAll", label: "Save All", shortcut: Some("Shift+F2"), glyph: Some(icon::SAVE), kind: Kind::Button, hint: "Save every open set." },
     Command { id: "Document.Print", label: "Print", shortcut: Some("Ctrl+P"), glyph: Some(icon::PRINT), kind: Kind::Button, hint: "Print the sheet." },
+    Command { id: "File.OpenModel", label: "Open Model…", shortcut: None, glyph: Some(icon::OPEN), kind: Kind::Button, hint: "Open a steel model (IFC) and total its tonnage by profile, from the weights the model itself gives." },
     Command { id: "File.LoadChest", label: "Load Tool Chest…", shortcut: None, glyph: Some(icon::CHEST), kind: Kind::Button, hint: "Load an Excalibur View tool chest (.evtools), or import the tools, columns and unit weights from a Revu profile (.bpx)." },
     Command { id: "File.SaveChest", label: "Save Tool Chest As…", shortcut: None, glyph: Some(icon::CHEST), kind: Kind::Button, hint: "Save the tools this computer has as one Excalibur View tool chest (.evtools), to keep or hand to somebody." },
     Command { id: "Document.Combine", label: "Combine", shortcut: None, glyph: Some(icon::COMBINE), kind: Kind::Button, hint: "Several drawing sets into one." },

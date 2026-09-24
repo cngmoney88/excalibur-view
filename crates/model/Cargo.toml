@@ -1,0 +1,19 @@
+[package]
+name = "model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Steel models from IFC: the parts a detailer's model holds, with the profile, length and weight the model gives, and tonnage by profile."
+
+[dependencies]
+# Pinned exactly. ifc-lite ships a major version most weeks, and a model that
+# reads one way this month and another next month is worse than one that
+# never changes until somebody moves this line on purpose. MPL-2.0: used as
+# published, which asks nothing of this program's license.
+ifc-lite-core = "=19.1.0"
+# The 3D shapes, for drawing a model. Off until the program draws one: the
+# takeoff needs only what the model states.
+ifc-lite-geometry = { version = "=19.1.0", optional = true }
+
+[features]
+geometry = ["dep:ifc-lite-geometry"]

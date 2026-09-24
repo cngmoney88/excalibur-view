@@ -708,6 +708,8 @@ pub struct App {
     pub asking_depth: Option<AskingDepth>,
     /// The cut list window: what to cut, and what to buy to cut it from.
     pub shop: crate::shopwindow::Shop,
+    /// Steel models open from File ▸ Open Model.
+    pub models: crate::modelwindow::Models,
     /// The double-count check: what looks counted twice.
     pub doubles: crate::doublewindow::Checking,
     /// Revision cost: what a new issue did to the quantities.
@@ -890,6 +892,7 @@ impl App {
             choosing: None,
             asking_depth: None,
             shop: Default::default(),
+            models: Default::default(),
             doubles: Default::default(),
             costing: Default::default(),
             snap_hit: None,
@@ -1180,9 +1183,10 @@ impl App {
     pub fn pick_and_open(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Drawing sets (PDF)", &["pdf", "PDF"])
+            .add_filter("Models (IFC)", &["ifc", "IFC"])
             .pick_file()
         {
-            self.open(path);
+            self.take_file(path);
         }
     }
 
@@ -1925,6 +1929,7 @@ impl eframe::App for App {
         self.spell_window(ctx);
         self.depth_dialog(ctx);
         self.shop_window(ctx);
+        self.model_windows(ctx);
         self.doubles_window(ctx);
         self.revision_window(ctx);
         self.plugin_windows(ctx);
@@ -2115,6 +2120,7 @@ impl App {
         match extension.as_str() {
             "evtools" | "bpx" | "btx" => self.load_chest_from(&path),
             "evlicense" => self.take_license(path),
+            "ifc" => self.open_model(path),
             _ => self.open(path),
         }
     }

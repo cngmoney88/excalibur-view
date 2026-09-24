@@ -104,6 +104,7 @@ pub const FILE: &[Entry] = &[
     Entry::Item("File.CreatePDF"),
     Entry::Named("File.Open", "Open…"),
     Entry::Named("File.OpenRecent", "Open Recent…"),
+    Entry::Named("File.OpenModel", "Open Model (IFC)…"),
     Entry::Named("Server.Connect", "Connect to a Server…"),
     Entry::Named("File.CombinePDFs", "Combine…"),
     Entry::Line,
