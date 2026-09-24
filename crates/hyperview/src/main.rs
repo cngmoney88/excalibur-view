@@ -35,7 +35,7 @@ fn report_crashes() {
 enum Mode {
     /// The ordinary one: the window, with whatever drawings were double-clicked.
     /// The flag is `--new-window`: a separate window even when one is open.
-    Viewer(Vec<PathBuf>, bool),
+    Viewer(Vec<PathBuf>, Flags),
     /// The company's server, with no window at all. What the Windows service
     /// runs, and what a Linux box would run from systemd.
     Serve(Settings),
@@ -43,6 +43,16 @@ enum Mode {
     Uninstall,
     /// `--benchmark drawing.pdf`: measure, write it down, close.
     Benchmark(PathBuf),
+}
+
+/// How the window was asked to open.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Flags {
+    /// `--new-window`: a separate window even when one is open.
+    new_window: bool,
+    /// `--combine`: Explorer's "Combine in Excalibur View", for the files
+    /// that came with it.
+    combine: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -56,7 +66,7 @@ fn read_arguments(args: Vec<std::ffi::OsString>) -> Mode {
     let mut settings = Settings::default();
     let mut mode: Option<&str> = None;
     let mut open = Vec::new();
-    let mut new_window = false;
+    let mut flags = Flags::default();
     let mut rest = args.into_iter().peekable();
 
     while let Some(argument) = rest.next() {
@@ -64,7 +74,8 @@ fn read_arguments(args: Vec<std::ffi::OsString>) -> Mode {
         match text.as_str() {
             "--serve" => mode = Some("serve"),
             "--uninstall" => mode = Some("uninstall"),
-            "--new-window" => new_window = true,
+            "--new-window" => flags.new_window = true,
+            "--combine" => flags.combine = true,
             "--benchmark" => {
                 mode = Some("benchmark");
                 if let Some(drawing) = rest.next() {
@@ -89,7 +100,7 @@ fn read_arguments(args: Vec<std::ffi::OsString>) -> Mode {
         Some("serve") => Mode::Serve(settings),
         Some("uninstall") => Mode::Uninstall,
         Some("benchmark") => Mode::Benchmark(open.into_iter().next().unwrap_or_default()),
-        _ => Mode::Viewer(open, new_window),
+        _ => Mode::Viewer(open, flags),
     }
 }
 
@@ -124,13 +135,16 @@ fn main() -> eframe::Result {
     let restarted = arguments.iter().any(|a| a == hyperview::install::RESTARTED);
     arguments.retain(|a| a != hyperview::install::RESTARTED);
     match read_arguments(arguments) {
-        Mode::Viewer(open, new_window) => {
+        Mode::Viewer(open, flags) => {
             // Wherever it was double-clicked from, it installs itself for this
             // person and opens from there. Nothing to ask anybody.
             let mut args: Vec<std::ffi::OsString> =
                 open.iter().map(|p| p.as_os_str().to_os_string()).collect();
-            if new_window {
+            if flags.new_window {
                 args.push("--new-window".into());
+            }
+            if flags.combine {
+                args.push("--combine".into());
             }
             if hyperview::install::settle_in(&args) {
                 return Ok(());
@@ -139,13 +153,18 @@ fn main() -> eframe::Result {
             // Hyperview is open becomes a tab in it.
             let started = if restarted {
                 hyperview::instance::start_when_free(&open, std::time::Duration::from_secs(30))
-            } else if new_window {
+            } else if flags.new_window {
                 hyperview::instance::Start::First
             } else {
-                hyperview::instance::start(&open)
+                hyperview::instance::start(&open, flags.combine)
             };
             if started == hyperview::instance::Start::HandedOver {
                 return Ok(());
+            }
+            // The first of Explorer's starts to arrive is the window. Its own
+            // file joins the others in the inbox, so they are gathered as one.
+            if flags.combine && hyperview::instance::combine_here(&open) {
+                return viewer(Vec::new());
             }
             viewer(open)
         }
@@ -460,7 +479,7 @@ mod tests {
 
     #[test]
     fn started_with_nothing_it_is_the_viewer() {
-        assert!(matches!(read_arguments(args(&[])), Mode::Viewer(open, false) if open.is_empty()));
+        assert!(matches!(read_arguments(args(&[])), Mode::Viewer(open, flags) if open.is_empty() && flags == Flags::default()));
     }
 
     #[test]
@@ -523,8 +542,20 @@ mod tests {
     #[test]
     fn new_window_is_a_flag_not_a_drawing() {
         match read_arguments(args(&["--new-window", "S-101.pdf"])) {
-            Mode::Viewer(open, true) => assert_eq!(open, vec![PathBuf::from("S-101.pdf")]),
+            Mode::Viewer(open, flags) if flags.new_window && !flags.combine => {
+                assert_eq!(open, vec![PathBuf::from("S-101.pdf")])
+            }
             _ => panic!("a separate window with one drawing in it"),
+        }
+    }
+
+    #[test]
+    fn combine_from_explorer_is_a_flag_and_the_file_is_still_the_file() {
+        match read_arguments(args(&["--combine", "S-102.pdf"])) {
+            Mode::Viewer(open, flags) if flags.combine && !flags.new_window => {
+                assert_eq!(open, vec![PathBuf::from("S-102.pdf")])
+            }
+            _ => panic!("one file, to be combined"),
         }
     }
 

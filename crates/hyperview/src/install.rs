@@ -236,6 +236,11 @@ mod windows_shell {
             "Excalibur View tool chest",
         ),
     ];
+    /// "Combine in Excalibur View" on a PDF's right-click menu (under Show
+    /// more options on Windows 11), for any number of PDFs selected at once.
+    /// Per person, and on PDFs whichever program opens them.
+    const COMBINE_KEY: &str =
+        r"Software\Classes\SystemFileAssociations\.pdf\shell\ExcaliburView.Combine";
     const LINK_NAME: &str = "Excalibur View.lnk";
     /// What the shortcuts were called before the rename. Taken away when the
     /// new ones are made, so nobody ends up with two icons for one program.
@@ -328,6 +333,22 @@ mod windows_shell {
             && key_text(&format!(r"{PROTOCOL_KEY}\shell\open\command"), "", &format!("\"{exe}\" \"%1\""))
     }
 
+    /// Puts "Combine in Excalibur View" on the menu of selected PDFs.
+    ///
+    /// `Player` lets the verb take more than the fifteen files Explorer
+    /// otherwise allows. Explorer still starts the program once per file, and
+    /// the window gathers them (`crate::instance`).
+    fn combine_verb(exe: &str) -> bool {
+        key_text(COMBINE_KEY, "MUIVerb", "Combine in Excalibur View")
+            && key_text(COMBINE_KEY, "Icon", &format!("\"{exe}\",0"))
+            && key_text(COMBINE_KEY, "MultiSelectModel", "Player")
+            && key_text(
+                &format!(r"{COMBINE_KEY}\command"),
+                "",
+                &format!("\"{exe}\" --combine \"%1\""),
+            )
+    }
+
     /// Makes a `.evlicense` or `.evtools` open in this program.
     fn file_type(exe: &str, extension: &str, class: &str, shown_as: &str) -> bool {
         let class_key = format!(r"Software\Classes\{class}");
@@ -347,6 +368,9 @@ mod windows_shell {
         }
         if !protocol(&target.display().to_string()) {
             log::warn!("could not register hyperview:// links");
+        }
+        if !combine_verb(&target.display().to_string()) {
+            log::warn!("could not add Combine to the PDF menu");
         }
         for (extension, class, shown_as) in FILE_TYPES {
             if !file_type(&target.display().to_string(), extension, class, shown_as) {
@@ -406,6 +430,7 @@ mod windows_shell {
         unsafe {
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(UNINSTALL_KEY));
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(PROTOCOL_KEY));
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(COMBINE_KEY));
             for (extension, class, _) in FILE_TYPES {
                 let _ = RegDeleteTreeW(
                     HKEY_CURRENT_USER,

@@ -644,6 +644,11 @@ pub struct App {
     /// The Batch window, when one is up.
     pub batching: Option<crate::batchui::Batching>,
     pub batch_task: u64,
+    /// Files Explorer handed over to combine, and when the last one came.
+    /// They arrive one start at a time; the Combine window opens once they
+    /// stop coming.
+    pub to_combine: Vec<PathBuf>,
+    pub to_combine_at: Option<std::time::Instant>,
     /// The About box, and the list of shortcuts.
     pub about: bool,
     pub shortcuts_open: bool,
@@ -756,7 +761,7 @@ pub struct App {
     /// Tiles the screen is still waiting for, as of the last frame.
     pub missing_tiles: usize,
     /// Drawings another start of the program handed to this window.
-    pub inbox: crossbeam_channel::Receiver<Vec<PathBuf>>,
+    pub inbox: crossbeam_channel::Receiver<crate::instance::Handed>,
     /// What Claude asks of this window, through the connector (`crate::desk`).
     pub desk: crossbeam_channel::Receiver<crate::desk::Ask>,
     /// Questions from Claude waiting on something: a drawing opening, a check.
@@ -852,6 +857,8 @@ impl App {
             compare_task: 0,
             overlaying: None,
             batching: None,
+            to_combine: Vec::new(),
+            to_combine_at: None,
             batch_task: 0,
             about: false,
             shortcuts_open: false,
@@ -1817,9 +1824,15 @@ impl eframe::App for App {
         crate::bench::mark(&mut marks, "messages");
         // Drawings double-clicked while this window was already open. They
         // open as tabs, and the window comes to the front to show them.
-        let handed: Vec<Vec<PathBuf>> = self.inbox.try_iter().collect();
+        let handed: Vec<crate::instance::Handed> = self.inbox.try_iter().collect();
+        let (combine, handed): (Vec<_>, Vec<_>) = handed.into_iter().partition(|h| h.combine);
+        if !combine.is_empty() {
+            self.to_combine.extend(combine.into_iter().flat_map(|h| h.files));
+            self.to_combine_at = Some(std::time::Instant::now());
+        }
+        self.combine_when_gathered(ctx);
         if !handed.is_empty() {
-            for path in handed.into_iter().flatten() {
+            for path in handed.into_iter().flat_map(|h| h.files) {
                 // A hyperview:// link rides the same inbox as a drawing.
                 match path.to_str().filter(|p| crate::deskui::is_link(p)) {
                     Some(link) => {

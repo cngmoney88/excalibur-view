@@ -16,6 +16,12 @@
 //!
 //! `--new-window` opens a separate window anyway, for somebody who wants one
 //! on each screen.
+//!
+//! `--combine` is Explorer's "Combine in Excalibur View". Explorer starts the
+//! program once for every PDF selected, all at the same moment, so each start
+//! hands its one file over marked for combining, the window gathers them for
+//! a moment, and they arrive in the Combine window together rather than as a
+//! pile of tabs.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -26,6 +32,18 @@ use crossbeam_channel::{Receiver, Sender};
 
 /// The lock, held for as long as this window is open.
 static HELD: OnceLock<File> = OnceLock::new();
+
+/// The first line of a hand-over that is for combining, not opening.
+const COMBINE: &str = "--combine";
+
+/// What a start handed to the window that is open.
+#[derive(Debug, Default, PartialEq)]
+pub struct Handed {
+    /// Drawings, or `hyperview://` links.
+    pub files: Vec<PathBuf>,
+    /// Put these in one PDF rather than opening them.
+    pub combine: bool,
+}
 
 /// What starting up came to.
 #[derive(Debug, PartialEq)]
@@ -52,14 +70,14 @@ fn inbox(root: &Path) -> PathBuf {
 /// Anything unexpected — no app data folder, a disk that will not take a lock
 /// — means this simply opens as its own window. Two windows is a nuisance;
 /// no window is a program that does not work.
-pub fn start(files: &[PathBuf]) -> Start {
+pub fn start(files: &[PathBuf], combine: bool) -> Start {
     match folder() {
-        Some(root) => start_in(&root, files),
+        Some(root) => start_in(&root, files, combine),
         None => Start::First,
     }
 }
 
-pub fn start_in(root: &Path, files: &[PathBuf]) -> Start {
+pub fn start_in(root: &Path, files: &[PathBuf], combine: bool) -> Start {
     if std::fs::create_dir_all(inbox(root)).is_err() {
         return Start::First;
     }
@@ -77,7 +95,7 @@ pub fn start_in(root: &Path, files: &[PathBuf]) -> Start {
             Start::First
         }
         Err(std::fs::TryLockError::WouldBlock) => {
-            if hand_over(root, files).is_ok() {
+            if hand_over(root, files, combine).is_ok() {
                 allow_the_other_window_to_the_front();
                 Start::HandedOver
             } else {
@@ -117,14 +135,22 @@ pub fn start_when_free(files: &[PathBuf], patience: Duration) -> Start {
             Err(_) => break,
         }
     }
-    start_in(&root, files)
+    start_in(&root, files, false)
+}
+
+/// Leaves files for this window to combine, the same way every other start
+/// Explorer made at the same moment leaves its own. `false` when there is no
+/// inbox to leave them in, and they should simply be opened.
+pub fn combine_here(files: &[PathBuf]) -> bool {
+    is_the_window() && folder().is_some_and(|root| hand_over(&root, files, true).is_ok())
 }
 
 /// Leaves the drawings in the inbox for the window that is open. An empty
 /// request just brings it to the front.
-fn hand_over(root: &Path, files: &[PathBuf]) -> std::io::Result<()> {
+fn hand_over(root: &Path, files: &[PathBuf], combine: bool) -> std::io::Result<()> {
     let here = std::env::current_dir().unwrap_or_default();
-    let lines: Vec<String> = files
+    let mut lines: Vec<String> = combine.then(|| COMBINE.to_string()).into_iter().collect();
+    lines.extend(files
         .iter()
         // A hyperview:// link is not a file and must not be made into a path
         // under wherever this was started from.
@@ -132,8 +158,7 @@ fn hand_over(root: &Path, files: &[PathBuf]) -> std::io::Result<()> {
             let link = f.to_str().is_some_and(crate::deskui::is_link);
             if f.is_absolute() || link { f.clone() } else { here.join(f) }
         })
-        .map(|f| f.display().to_string())
-        .collect();
+        .map(|f| f.display().to_string()));
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -163,7 +188,7 @@ pub fn is_the_window() -> bool {
 /// What the open window hears: drawings to open, possibly none (come to the
 /// front). Only the window holding the lock listens; a `--new-window` copy
 /// does not, or the two would race for the same drawings.
-pub fn listen(ctx: egui::Context) -> Receiver<Vec<PathBuf>> {
+pub fn listen(ctx: egui::Context) -> Receiver<Handed> {
     let (tx, rx) = crossbeam_channel::unbounded();
     if !is_the_window() {
         return rx;
@@ -176,7 +201,7 @@ pub fn listen(ctx: egui::Context) -> Receiver<Vec<PathBuf>> {
     rx
 }
 
-fn watch(root: &Path, tx: &Sender<Vec<PathBuf>>, ctx: &egui::Context) {
+fn watch(root: &Path, tx: &Sender<Handed>, ctx: &egui::Context) {
     loop {
         for request in take(root) {
             if tx.send(request).is_err() {
@@ -190,7 +215,7 @@ fn watch(root: &Path, tx: &Sender<Vec<PathBuf>>, ctx: &egui::Context) {
 }
 
 /// Everything waiting in the inbox, oldest first, taken out of it.
-pub fn take(root: &Path) -> Vec<Vec<PathBuf>> {
+pub fn take(root: &Path) -> Vec<Handed> {
     let Ok(entries) = std::fs::read_dir(inbox(root)) else {
         return Vec::new();
     };
@@ -205,13 +230,12 @@ pub fn take(root: &Path) -> Vec<Vec<PathBuf>> {
         .filter_map(|path| {
             let text = std::fs::read_to_string(&path).ok()?;
             let _ = std::fs::remove_file(&path);
-            Some(
-                text.lines()
-                    .map(str::trim)
-                    .filter(|l| !l.is_empty())
-                    .map(PathBuf::from)
-                    .collect(),
-            )
+            let mut lines = text.lines().map(str::trim).filter(|l| !l.is_empty()).peekable();
+            let combine = lines.next_if_eq(&COMBINE).is_some();
+            Some(Handed {
+                files: lines.map(PathBuf::from).collect(),
+                combine,
+            })
         })
         .collect()
 }
@@ -261,10 +285,10 @@ mod tests {
 
         let sheet = absolute("Fox Theater/S-101.pdf");
         let quote = absolute("Quote.pdf");
-        let started = start_in(&root, &[sheet.clone(), quote.clone()]);
+        let started = start_in(&root, &[sheet.clone(), quote.clone()], false);
         assert_eq!(started, Start::HandedOver);
         let heard = take(&root);
-        assert_eq!(heard, vec![vec![sheet, quote]]);
+        assert_eq!(heard, vec![Handed { files: vec![sheet, quote], combine: false }]);
         // Taken once, not twice.
         assert!(take(&root).is_empty());
         let _ = std::fs::remove_dir_all(&root);
@@ -289,8 +313,25 @@ mod tests {
     fn a_start_with_no_drawings_just_brings_the_window_forward() {
         let root = scratch();
         std::fs::create_dir_all(inbox(&root)).unwrap();
-        hand_over(&root, &[]).unwrap();
-        assert_eq!(take(&root), vec![Vec::<PathBuf>::new()]);
+        hand_over(&root, &[], false).unwrap();
+        assert_eq!(take(&root), vec![Handed::default()]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn files_explorer_hands_over_for_combining_arrive_marked_for_combining() {
+        let root = scratch();
+        std::fs::create_dir_all(inbox(&root)).unwrap();
+        let first = absolute("S-101.pdf");
+        let second = absolute("S-102.pdf");
+        hand_over(&root, &[first.clone()], true).unwrap();
+        hand_over(&root, &[second.clone()], true).unwrap();
+        hand_over(&root, &[absolute("Quote.pdf")], false).unwrap();
+        let heard = take(&root);
+        assert_eq!(heard.len(), 3);
+        assert_eq!(heard[0], Handed { files: vec![first], combine: true });
+        assert_eq!(heard[1], Handed { files: vec![second], combine: true });
+        assert!(!heard[2].combine, "an ordinary open is not swept up with them");
         let _ = std::fs::remove_dir_all(&root);
     }
 }
