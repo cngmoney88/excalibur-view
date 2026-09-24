@@ -35,8 +35,8 @@ than ours, it says so.
 | The audit log | The server's database | No |
 
 There is no Excalibur cloud service. There is no account with us. There is no
-telemetry, no analytics, no crash reporting to us, and no licence check that
-phones home — a licence is a signed file your own server verifies offline.
+telemetry, no analytics, no crash reporting to us, and no license check that
+phones home — a license is a signed file your own server verifies offline.
 
 The program's own settings live under the signed-in user's profile
 (`%APPDATA%\Excalibur Hyperview`); the cache of downloaded drawings lives under
@@ -69,7 +69,7 @@ offers no setting that makes them.
 Two things can seal an installation, and **neither is a checkbox inside the
 program**:
 
-1. **A Sealed licence.** An `edition: sealed` licence seals the server and
+1. **A Sealed license.** An `edition: sealed` license seals the server and
    every seat that signs in to it. Nobody has to remember to switch anything
    on; nobody in the office can switch it off.
 2. **Machine policy.** Your administrator enables *Seal this computer* under
@@ -78,7 +78,7 @@ program**:
    `HKLM\Software\Policies\Excalibur\View` → `Sealed` (DWORD 1).
 
 Policy outranks everything. A computer sealed by policy stays sealed on an
-ordinary Office licence, on no licence at all, and while signed out — which
+ordinary Office license, on no license at all, and while signed out — which
 matters, because the computer you are most concerned about is the one that has
 never reached your server. **Nothing in the software unseals a machine that
 policy sealed**, and there is an automated test in our source that asserts it.
@@ -119,7 +119,7 @@ into every copy of the program.
   hashed with Argon2id, each with its own salt; the plaintext is never stored
   and never leaves the moment it is typed.
 - Three roles: **viewer** (read and export only), **estimator** (mark up,
-  measure, save), **administrator** (also people, chests, licences, settings).
+  measure, save), **administrator** (also people, chests, licenses, settings).
 - Sessions are bearer tokens, stored on the server as SHA-256 digests — what
   the client holds is not what the server keeps. They expire after 30 days of
   **no use**, and every use pushes that out, so a laptop left unused goes dead
@@ -136,7 +136,7 @@ Kept on your server, in its database, and never sent anywhere.
 
 **Recorded:** signing in; a sign-in refused; reaching or downloading a drawing
 set; uploading one; exporting a takeoff; adding or removing a person; changing
-what a person may do; changing a password; adding a licence; making or
+what a person may do; changing a password; adding a license; making or
 revoking a key for another program; changing a server setting.
 
 **Each line carries:** the time in UTC, the person's id, their email as it read
@@ -170,7 +170,7 @@ assessor should review it against your environment.
 | **3.5 Identification and Authentication** | Argon2id password hashing with per-password salts; hashed session tokens; separate program keys | Password policy; multi-factor at the OS or network layer — the software does not provide MFA |
 | **3.8 Media Protection** | Drawings stay on your server and in per-user caches; no cloud copy exists | Disk encryption; media handling; disposal; clearing the local cache on decommission |
 | **3.13 System and Communications Protection** | HTTPS to your own server; in Sealed, no outbound connection is made at all; no telemetry ever | TLS certificates on your server; network segmentation; boundary protection |
-| **3.14 System and Information Integrity** | Every release verified against a publisher key built into the program before installing; a licence verified offline | Patch management; malware protection; monitoring |
+| **3.14 System and Information Integrity** | Every release verified against a publisher key built into the program before installing; a license verified offline | Patch management; malware protection; monitoring |
 
 **Not provided, and you should plan for it elsewhere:** multi-factor
 authentication, FIPS 140-validated cryptography, encryption at rest for the
@@ -182,7 +182,7 @@ these, tell us — it helps us decide what to build next.
 | Where | What |
 |---|---|
 | Release signatures | Ed25519, verified against a key compiled into the program |
-| Licence signatures | Ed25519, domain-separated payload, verified offline on your server |
+| License signatures | Ed25519, domain-separated payload, verified offline on your server |
 | Passwords | Argon2id, per-password salt |
 | Session tokens | Random, stored as SHA-256 digests |
 | File identity | SHA-256 |
@@ -197,23 +197,23 @@ modules, say so before you buy.
 no account with us.
 
 **Can a user turn Sealed off?** No. It is set by a Group Policy machine policy
-under `HKLM\Software\Policies`, or by the licence. Neither is reachable from
+under `HKLM\Software\Policies`, or by the license. Neither is reachable from
 inside the program.
 
-**What happens if the licence expires on a sealed server?** Nothing is deleted
+**What happens if the license expires on a sealed server?** Nothing is deleted
 or locked away. Everyone can still open and export every drawing and markup;
 sharing new work through the server pauses. A sealed machine stays sealed
 regardless.
 
-**Does the software call home to check the licence?** No. The licence is a
+**Does the software call home to check the license?** No. The license is a
 signed file; your server verifies the signature offline, every time, against
 keys built into it.
 
 **How do we add seats, or renew?** By hand, and that is the trade. An ordinary
-Office server fetches its own renewal: buy three more seats and the new licence
+Office server fetches its own renewal: buy three more seats and the new license
 is on the server within the hour, because the server asks for it. A sealed
 server never asks anything of anybody, so nothing arrives by itself. You buy
-the seats, we sign a licence at the new count, and it reaches you as a file —
+the seats, we sign a license at the new count, and it reaches you as a file —
 by email, on a stick, however your shop takes files in. An administrator drops
 it on the server the same way the first one was installed.
 

@@ -34,7 +34,7 @@ pub fn document(name: &str) -> Value {
 }
 
 const DESCRIPTION: &str = "\
-Everything a Excalibur View desktop can do, any other program can do too.
+Everything an Excalibur View desktop can do, any other program can do too.
 
 Two things worth knowing before you integrate against this.
 
@@ -60,7 +60,7 @@ fn paths() -> Value {
     json!({
         "/health": {
             "get": {
-                "summary": "Is this a Excalibur View server, and which version does it speak?",
+                "summary": "Is this an Excalibur View server, and which version does it speak?",
                 "security": [],
                 "responses": ok("Health")
             }

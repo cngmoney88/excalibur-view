@@ -1180,8 +1180,9 @@ impl App {
                                             if ui
                                                 .small_button("Share one")
                                                 .on_hover_text(
-                                                    "Put a tool chest (.bpx) on the server, so \
-                                                     everybody in the office can use it.",
+                                                    "Put a tool chest on the server (.evtools, or a \
+                                                     Revu .bpx or .btx), so everybody in the office \
+                                                     can use it.",
                                                 )
                                                 .clicked()
                                             {
@@ -2649,7 +2650,7 @@ fn choosing(
         ui.label(
             RichText::new(if signing.looked {
                 "No Excalibur View server on this network yet. This is not your file server — \
-                 it is a Excalibur View one, and somebody has to set a machine up as it. \
+                 it is an Excalibur View one, and somebody has to set a machine up as it. \
                  Double-click Hyperview-Server.exe on whichever machine should hold \
                  the drawings, or type its address below if it is on another network."
             } else {
