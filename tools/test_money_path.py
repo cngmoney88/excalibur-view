@@ -186,6 +186,38 @@ class PushingIt(unittest.TestCase):
                                  capture_output=True, text=True).stdout
             self.assertIn("Publish 1 licence", log)
 
+    def test_a_push_that_failed_is_sent_next_time(self):
+        # A licence committed while GitHub was unreachable used to sit on the
+        # PC for good: the next run saw nothing new and pushed nothing.
+        with tempfile.TemporaryDirectory() as root:
+            remote = os.path.join(root, "remote.git")
+            repo = os.path.join(root, "site")
+            subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+            subprocess.run(["git", "clone", "-q", remote, repo], check=True, capture_output=True)
+            git = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True,
+                                            capture_output=True, text=True)
+            git("config", "user.email", "t@t")
+            git("config", "user.name", "t")
+            feed = os.path.join(repo, "static", "f")
+            os.makedirs(feed)
+            open(os.path.join(feed, ".keep"), "w").close()
+            git("add", "-A")
+            git("commit", "-q", "-m", "first")
+            git("push", "-q", "-u", "origin", "HEAD")
+
+            square.publish_into(a_licence(), feed, quiet=True)
+            gone = remote + ".away"
+            os.rename(remote, gone)  # GitHub is unreachable
+            with self.assertRaises(SystemExit):
+                square.push_the_feed(repo, "Publish 1 licence", quiet=True)
+            os.rename(gone, remote)  # and back
+
+            # Nothing new this time, but the licence from last time still goes.
+            self.assertTrue(square.push_the_feed(repo, "Publish 0 licences", quiet=True))
+            there = subprocess.run(["git", "--git-dir", remote, "log", "--oneline", "-1"],
+                                   capture_output=True, text=True).stdout
+            self.assertIn("Publish 1 licence", there)
+
     def test_the_commit_message_never_names_a_customer(self):
         # A commit message is forever and the repository is shared. Whatever
         # else goes wrong, who bought what is not written into git history.
