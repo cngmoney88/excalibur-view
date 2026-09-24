@@ -387,10 +387,24 @@ impl Client {
         role: Option<&str>,
         new_code: bool,
     ) -> Answer<Joining> {
+        self.change_joining_fully(how, role, new_code, None)
+    }
+
+    /// The same, and how many days the code should last. `Some(0)` means
+    /// forever, which has to be asked for rather than being what happens by
+    /// not choosing.
+    pub fn change_joining_fully(
+        &self,
+        how: Option<&str>,
+        role: Option<&str>,
+        new_code: bool,
+        days: Option<u32>,
+    ) -> Answer<Joining> {
         Self::read(self.post("/admin/joining").send_json(serde_json::json!({
             "how": how,
             "role": role,
             "new_code": new_code,
+            "days": days,
         })))
     }
 

@@ -117,7 +117,7 @@ impl Entry {
     }
 }
 
-fn now() -> String {
+pub fn now() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
         .unwrap_or_default()

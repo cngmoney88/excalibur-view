@@ -159,6 +159,8 @@ pub enum Ask {
     StopFleet,
     /// Throw the join code away and make a new one.
     NewJoinCode,
+    /// How many days the join code lasts from now. 0 means forever.
+    JoinCodeDays(u32),
     /// `stable` or `early`.
     UpdateChannel(String),
     ChangePassword {
@@ -1069,6 +1071,15 @@ pub fn start(repaint: egui::Context) -> Link {
                         },
                     },
 
+                    Ask::JoinCodeDays(days) => match connected(&client) {
+                        Err(message) => say(&told, Told::Trouble(message)),
+                        Ok(client) => {
+                            match client.change_joining_fully(None, None, false, Some(days)) {
+                                Ok(_) => office(client, &told),
+                                Err(e) => say(&told, Told::Trouble(e.to_string())),
+                            }
+                        }
+                    },
                     Ask::NewJoinCode => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.change_joining(Some("code"), None, true) {

@@ -377,6 +377,10 @@ pub mod settings {
     pub const JOINING: &str = "joining";
     pub const JOIN_CODE: &str = "join_code";
     pub const JOIN_ROLE: &str = "join_role";
+    /// When the join code stops working, as an RFC 3339 date and time.
+    /// Empty means never, which is what every server did before this and
+    /// what an administrator has to choose on purpose from now on.
+    pub const JOIN_UNTIL: &str = "join_until";
     /// This installation's own name for itself, made once and kept. Not a
     /// secret and not a key: it exists so that one server heard twice on a
     /// network is recognised as one server.
@@ -393,6 +397,61 @@ pub fn installation_id(server: &Server) -> String {
     let fresh = fresh_id("inst");
     let _ = server.store.set_setting(settings::INSTALLATION, &fresh);
     fresh
+}
+
+/// How many days a change asked for, if it asked.
+fn days_of(body: &ChangeJoining) -> Option<u32> {
+    body.days.filter(|d| *d > 0)
+}
+
+/// A date that many days from now, as the settings store it.
+fn in_days(days: u32) -> String {
+    let when = time::OffsetDateTime::now_utc() + time::Duration::days(days as i64);
+    when.format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+/// Whether the join code has run out, and when it does.
+///
+/// A join code is one server-wide secret that names nobody and is not used
+/// up. That was defensible while the only way to type it was to be standing
+/// in the building; with a public address it is the weakest thing about the
+/// server, because one code shared in one group chat in 2026 still works in
+/// 2028. So it can now be given a date, and after that date it is simply not
+/// a code any more.
+///
+/// Empty means never, which is what every existing server has. They are not
+/// broken by this and nothing changes under them.
+pub fn join_runs_out(server: &Server) -> Option<String> {
+    server
+        .store
+        .setting(settings::JOIN_UNTIL)
+        .ok()
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+}
+
+/// True when the code has a date on it and that date has gone by.
+pub fn join_has_run_out(server: &Server) -> bool {
+    let Some(until) = join_runs_out(server) else {
+        return false;
+    };
+    ran_out(&until, &crate::audit::now())
+}
+
+/// Kept apart from the clock so it can be tested without waiting a day.
+fn ran_out(until: &str, now: &str) -> bool {
+    // Both are RFC 3339 in UTC, which compares correctly as text. A date
+    // nobody can parse is treated as run out rather than as forever: the
+    // safe way round for a secret that lets somebody in.
+    match (until.trim(), now.trim()) {
+        ("", _) => false,
+        (until, now) if until.len() < 10 => {
+            let _ = now;
+            true
+        }
+        (until, now) => until < now,
+    }
 }
 
 /// How people get accounts, and the code if there is one.
@@ -2727,6 +2786,26 @@ async fn join(
     match how.as_str() {
         "open" => {}
         "code" => {
+            // A code with a date that has gone by is not a code. Checked
+            // before the code itself and answered the same way, so somebody
+            // guessing cannot tell a wrong code from an expired one.
+            if join_has_run_out(&server) {
+                server.patience.wrong(&from);
+                record(
+                    &server,
+                    crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, "")
+                        .saying("the join code has run out")
+                        .from(from.clone()),
+                );
+                return Err(Denied(
+                    StatusCode::FORBIDDEN,
+                    Problem::new(
+                        "wrong_code",
+                        "That join code is not right. Ask whoever set the server up \
+                         for the current one — it can be changed, so an old one stops working.",
+                    ),
+                ));
+            }
             // The same refusal whether the code is wrong or the server is not
             // taking anybody, so guessing tells nobody anything.
             if !auth::secret_matches(&body.code, &code) {
@@ -2817,7 +2896,13 @@ async fn read_joining(
 ) -> Answer<Json<hub::Joining>> {
     administrator(&server, &headers)?;
     let (how, code, role) = how_joining(&server);
-    Ok(Json(hub::Joining { how, code, role }))
+    Ok(Json(hub::Joining {
+        how,
+        code,
+        role,
+        until: join_runs_out(&server).unwrap_or_default(),
+        run_out: join_has_run_out(&server),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -2832,6 +2917,11 @@ pub struct ChangeJoining {
     /// somebody does when a person leaves.
     #[serde(default)]
     pub new_code: bool,
+    /// How many days the code should last from now. `Some(0)` means forever,
+    /// which is the old behaviour and now has to be asked for. Absent leaves
+    /// whatever is set alone.
+    #[serde(default)]
+    pub days: Option<u32>,
 }
 
 async fn change_joining(
@@ -2865,8 +2955,18 @@ async fn change_joining(
             ));
         }
     }
+    let mut until = join_runs_out(&server).unwrap_or_default();
     if body.new_code || (how == "code" && code.trim().is_empty()) {
         code = auth::readable_secret();
+        // A fresh code starts its clock again. Making a new code because
+        // somebody left, and having it inherit a date that has already gone
+        // by, would be a code that never worked.
+        if !until.is_empty() {
+            until = in_days(days_of(&body).unwrap_or(30));
+        }
+    }
+    if let Some(days) = body.days {
+        until = if days == 0 { String::new() } else { in_days(days) };
     }
 
     let keep = |key: &str, value: &str| -> Answer<()> {
@@ -2878,7 +2978,15 @@ async fn change_joining(
     keep(settings::JOINING, &how)?;
     keep(settings::JOIN_CODE, &code)?;
     keep(settings::JOIN_ROLE, &role)?;
-    Ok(Json(hub::Joining { how, code, role }))
+    keep(settings::JOIN_UNTIL, &until)?;
+    let run_out = !until.is_empty() && ran_out(&until, &crate::audit::now());
+    Ok(Json(hub::Joining {
+        how,
+        code,
+        role,
+        until,
+        run_out,
+    }))
 }
 
 // ---- the bits all three of those share ------------------------------------
@@ -3606,4 +3714,49 @@ pub fn mcp_sheets(server: &Server, id: &str) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+
+#[cfg(test)]
+mod a_join_code_that_runs_out {
+    //! One server-wide secret that names nobody and is never used up was
+    //! defensible while the only way to type it was to be standing in the
+    //! building. With a public address it is the weakest thing about the
+    //! server: one code shared in one group chat in 2026 still works in 2028.
+
+    use super::ran_out;
+
+    #[test]
+    fn no_date_means_it_never_runs_out() {
+        // Every server that already exists is in this state, and none of
+        // them may be broken by adding the feature.
+        assert!(!ran_out("", "2026-09-24T00:00:00Z"));
+        assert!(!ran_out("   ", "2099-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn a_date_in_the_future_is_still_good() {
+        assert!(!ran_out("2026-12-01T00:00:00Z", "2026-09-24T12:00:00Z"));
+    }
+
+    #[test]
+    fn a_date_that_has_gone_by_is_not() {
+        assert!(ran_out("2026-09-01T00:00:00Z", "2026-09-24T12:00:00Z"));
+    }
+
+    #[test]
+    fn the_same_instant_is_still_good() {
+        // A code that expires "in thirty days" should work for the whole of
+        // the thirtieth day rather than stopping at an arbitrary moment
+        // somebody cannot predict.
+        assert!(!ran_out("2026-09-24T12:00:00Z", "2026-09-24T12:00:00Z"));
+    }
+
+    #[test]
+    fn something_that_is_not_a_date_reads_as_run_out() {
+        // The safe way round. A setting nobody can parse must not become
+        // "forever" on a secret that lets people in.
+        assert!(ran_out("soon", "2026-09-24T00:00:00Z"));
+        assert!(ran_out("2026", "2026-09-24T00:00:00Z"));
+    }
 }
