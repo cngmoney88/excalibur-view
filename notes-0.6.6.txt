@@ -1,0 +1,30 @@
+Licences that arrive by themselves, and the right version on the server.
+
+LICENCES
+
+A licence is now signed the moment Square says an order is paid, by a service
+that is always up, and published where your office server already looks for
+it. This version trusts the key that service signs with. That key signs
+licences and nothing else: every update is still checked against the same
+key it always was, and nothing this version runs is trusted any more than
+before.
+
+Every licence you already have keeps working exactly as it did.
+
+ADDING USERS AND RENEWING
+
+Studio -> Office -> License -> Renew or add users now opens a page that
+already knows which licence is yours. Pay, and the same licence comes back
+with the new count or the new date, and your server picks it up by itself
+within half an hour. Nobody types a company name, so a purchase cannot land
+on the wrong licence because of how a name was spelled.
+
+On a Sealed computer, where the program opens no links, Copy license id on
+the same screen and paste it into excaliburct.com/add from any computer.
+
+THE SERVER'S VERSION
+
+The office server's name at the top of the window carried the version the
+server was on the first time this computer found it, and kept showing it
+after every update. It shows the name alone now. The version the server is
+really running is under Studio -> Office.
