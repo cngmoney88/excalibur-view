@@ -42,8 +42,13 @@ pub struct SigningIn {
     pub company: String,
     /// The join code, when they are joining somebody else's.
     pub code: String,
-    /// What the server calls itself, once the address has been checked.
+    /// What the server calls itself, once the address has been checked. The
+    /// name only: this is what the seat remembers the server as.
     pub found: Option<String>,
+    /// Which version it said it runs, shown beside the name while signing in
+    /// and never saved with it. Saved together, the version a seat first met
+    /// a server on was shown for good, however many times it updated since.
+    pub found_version: Option<String>,
     /// What that check said about it.
     pub claimed: bool,
     pub joining: String,
@@ -201,7 +206,8 @@ impl App {
                     if let Some(signing) = self.signing_in.as_mut() {
                         signing.waiting = false;
                         signing.error = None;
-                        signing.found = Some(format!("{name} · version {version}"));
+                        signing.found = Some(name.clone());
+                        signing.found_version = Some(version);
                         signing.base = base;
                         signing.claimed = claimed;
                         signing.joining = joining;
@@ -241,6 +247,7 @@ impl App {
                         // somebody typed "Mesa Fab" is the kind of small lie
                         // that makes a program feel untrustworthy.
                         signing.found = Some(company.clone());
+                        signing.found_version = None;
                         signing.company = company;
                         signing.join_code = join_code;
                         signing.step = Step::JustSetUp;
@@ -825,6 +832,7 @@ impl App {
         if let Some(base) = pick {
             signing.base = base;
             signing.found = None;
+            signing.found_version = None;
             check = true;
         }
         if look {
@@ -899,6 +907,7 @@ impl App {
                 signing.base = hosting.url.clone();
                 signing.error = None;
                 signing.found = None;
+                signing.found_version = None;
                 let standing = crate::host::keep_serving(&folder, port, &name);
                 signing.standing = Some(standing.says());
                 self.status = hosting.tell_the_office();
@@ -1012,7 +1021,11 @@ impl App {
                                 }
                                 ui.hyperlink_to(
                                     RichText::new(if licensed { "Renew or add users" } else { "Buy Office" }).size(11.0),
-                                    hub::site::BUY,
+                                    if licensed {
+                                        hub::site::add_url(license.license_id.as_deref())
+                                    } else {
+                                        hub::site::BUY.to_string()
+                                    },
                                 );
                             });
                         }
@@ -2367,8 +2380,13 @@ fn license_section(
             ui.hyperlink_to(
                 RichText::new(if license.state == "licensed" { "Renew or add users" } else { "Buy Office" }).size(11.0),
                 // The program's own link rather than the server's: a server
-                // from before the website moved names an old address.
-                hub::site::BUY,
+                // from before the website moved names an old address. For a
+                // licence it carries which one, so the purchase lands on it.
+                if license.state == "licensed" {
+                    hub::site::add_url(license.license_id.as_deref())
+                } else {
+                    hub::site::BUY.to_string()
+                },
             );
         }
         if let Some(id) = &license.license_id {
@@ -2559,9 +2577,10 @@ fn where_it_is(ui: &mut egui::Ui, theme: ui::chrome::Theme, signing: &SigningIn)
     ui.horizontal(|ui| {
         let (mark, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
         tick(ui.painter(), mark, theme.accent_text);
-        let said = match &signing.found {
-            Some(name) => format!("{name}  ·  {}", signing.base),
-            None => signing.base.clone(),
+        let said = match (&signing.found, &signing.found_version) {
+            (Some(name), Some(version)) => format!("{name} · version {version}  ·  {}", signing.base),
+            (Some(name), None) => format!("{name}  ·  {}", signing.base),
+            (None, _) => signing.base.clone(),
         };
         ui.label(RichText::new(said).color(theme.accent_text).size(11.0));
     });
@@ -2662,6 +2681,7 @@ fn choosing(
     );
     if address.changed() {
         signing.found = None;
+        signing.found_version = None;
     }
     if address.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
         && !signing.base.trim().is_empty()

@@ -885,13 +885,13 @@ impl App {
         if app.prefs.server.base.is_empty() && app.joined.set() {
             app.standing.base = app.joined.server.clone();
             if !app.joined.name.is_empty() {
-                app.standing.name = app.joined.name.clone();
+                app.standing.name = crate::server::plain_name(&app.joined.name);
             }
         }
         let remembered = app.prefs.server.clone();
         if !remembered.base.is_empty() && !remembered.token.is_empty() {
             app.standing.base = remembered.base.clone();
-            app.standing.name = remembered.name.clone();
+            app.standing.name = crate::server::plain_name(&remembered.name);
             app.ask(crate::server::Ask::Resume {
                 base: remembered.base,
                 token: remembered.token,

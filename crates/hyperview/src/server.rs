@@ -1418,6 +1418,20 @@ pub struct Remembered {
     pub reachable_at: Option<String>,
 }
 
+/// A server's name as a seat remembered it, without what older seats wrote
+/// after it.
+///
+/// Before 0.6.6 the connect window saved "Mesa fab Shop Server · version 0.6.3"
+/// as the server's name, so the version a seat first met a server on stayed on
+/// screen for good, however many times the server updated since. The name is
+/// everything before that marker; a name that never had one is left alone.
+pub fn plain_name(remembered: &str) -> String {
+    match remembered.find(" · version ") {
+        Some(at) => remembered[..at].trim_end().to_string(),
+        None => remembered.to_string(),
+    }
+}
+
 /// Who is signed in, as the window sees it.
 #[derive(Clone, Debug, Default)]
 pub struct Standing {
@@ -1463,6 +1477,15 @@ impl Standing {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_remembered_name_loses_the_version_older_seats_saved_with_it() {
+        assert_eq!(super::plain_name("Mesa fab Shop Server · version 0.6.3"), "Mesa fab Shop Server");
+        assert_eq!(super::plain_name("Mesa fab Shop Server"), "Mesa fab Shop Server");
+        assert_eq!(super::plain_name("Smith · Sons"), "Smith · Sons");
+        assert_eq!(super::plain_name(""), "");
+    }
+
     use super::*;
 
     #[test]
