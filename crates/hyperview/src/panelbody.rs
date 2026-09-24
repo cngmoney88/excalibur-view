@@ -1663,6 +1663,7 @@ impl App {
                 }
                 "Plugins.Add" => self.add_plugin(),
                 "Plugins.Manage" => self.managing_plugins = true,
+                "Plugins.SaveInput" => self.save_plugin_input(ctx),
                 other if other.starts_with("Plugin:") => self.start_plugin(other, ctx),
                 other => {
                     // Tools change what the canvas does.

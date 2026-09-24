@@ -547,6 +547,17 @@ impl Chrome {
         if ui.button("Manage Plugins…").clicked() {
             clicked = Some("Plugins.Manage".into());
         }
+        if ui
+            .button("Save This Sheet for a Plugin Test…")
+            .on_hover_text(
+                "Writes what a plugin would be handed for the sheet on screen — its words, \
+                 line-work, scale and markups — to a JSON file, for somebody writing a plugin \
+                 to test against.",
+            )
+            .clicked()
+        {
+            clicked = Some("Plugins.SaveInput".into());
+        }
         if let Some(fire) = clicked {
             self.fired.push(fire);
             ui.close();

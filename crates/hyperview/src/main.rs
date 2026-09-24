@@ -131,6 +131,34 @@ fn main() -> eframe::Result {
         let good = report.starts_with("Claude can use Excalibur View");
         std::process::exit(if good { 0 } else { 1 });
     }
+    // For somebody writing a plugin: `--plugin-check plugin.wasm [sheet.json]`
+    // runs it in the sandbox once and says whether it is ready to be signed.
+    // Nothing is installed.
+    if let Some(at) = arguments.iter().position(|a| a == "--plugin-check") {
+        let files: Vec<PathBuf> = arguments[at + 1..]
+            .iter()
+            .filter(|a| !a.to_string_lossy().starts_with("--"))
+            .map(PathBuf::from)
+            .collect();
+        let checkup = match files.first() {
+            Some(wasm) => hyperview::plugins::checkup(wasm, files.get(1).map(PathBuf::as_path)),
+            None => hyperview::plugins::Checkup {
+                passed: false,
+                report: "Usage: Hyperview.exe --plugin-check plugin.wasm [sheet.json]".into(),
+                written: None,
+            },
+        };
+        println!("{}", checkup.report);
+        if !arguments.iter().any(|a| a == "--quiet") {
+            rfd::MessageDialog::new()
+                .set_title("Excalibur View — plugin check")
+                .set_description(&checkup.report)
+                .set_level(if checkup.passed { rfd::MessageLevel::Info } else { rfd::MessageLevel::Warning })
+                .set_buttons(rfd::MessageButtons::Ok)
+                .show();
+        }
+        std::process::exit(if checkup.passed { 0 } else { 1 });
+    }
     // Started by "Restart now": the window that started it is still closing.
     let restarted = arguments.iter().any(|a| a == hyperview::install::RESTARTED);
     arguments.retain(|a| a != hyperview::install::RESTARTED);

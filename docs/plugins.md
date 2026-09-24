@@ -52,6 +52,49 @@ system, no network, no clock and no way to reach the program. It gets
 sixty billion instructions' worth of work and a gigabyte and a half of
 memory per run, and is thrown away after each.
 
+## Writing one somewhere else
+
+A plugin doesn't need this repository, only the contract:
+
+```toml
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+plugin-api = { git = "https://github.com/cngmoney88/excalibur-view", branch = "main", features = ["guest"] }
+serde_json = "1"
+```
+
+Keep `Cargo.lock` so the contract only moves when you move it.
+
+## Testing it before it is signed
+
+A plugin is two ordinary Rust functions, so most of its testing is ordinary
+`cargo test`. For real data, open a drawing in Excalibur View and use
+**Plugins → Save This Sheet for a Plugin Test…**: it writes the sheet on screen
+as the plugin would be handed it (words, line-work, scale, markups, the
+office's column names) to a JSON file, which a test reads with
+`serde_json::from_str::<plugin_api::Input>`.
+
+Then, to run the built module in the same sandbox and limits a signed one
+gets:
+
+```sh
+Hyperview.exe --plugin-check target/wasm32-unknown-unknown/release/my_plugin.wasm "S-201.json"
+```
+
+It reads the manifest, runs every command against the saved sheet (or
+against nothing, when no sheet is given), says whether it is ready to be
+signed, and writes each command's answer to `my_plugin-check.json` beside
+it. Nothing is installed and nothing appears in the Plugins menu.
+
+## Who signs it
+
+A plugin loads only when a key this program was built with signed exactly
+its bytes, the same rule as an update. A plugin written outside Excalibur is
+signed by us: send the `.wasm`, its id and its version to
+hello@excaliburct.com. What comes back is the `.hvplugin`.
+
 ## Building and signing
 
 ```sh
