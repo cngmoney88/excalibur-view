@@ -1915,3 +1915,157 @@ fn only_an_administrator_decides_who_is_on_a_job() {
         "an estimator put themselves on a job"
     );
 }
+
+// ---- inviting one person --------------------------------------------------
+
+/// The join code is one server-wide secret that names nobody, never expires
+/// and is not used up. An invitation is the opposite of all four, and these
+/// are the four tests that say so.
+#[test]
+fn an_invitation_gets_somebody_in_and_gives_them_the_role_it_says() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let invite = boss
+        .invite("newhand@mesafab.com", "New Hand", "estimator", None)
+        .expect("invite");
+    assert!(!invite.code.is_empty());
+    assert_eq!(invite.role, "estimator");
+
+    let mut joining = Client::new(&server.base);
+    let session = joining
+        .join(&hub::Join {
+            code: invite.code.clone(),
+            name: "New Hand".into(),
+            email: "newhand@mesafab.com".into(),
+            password: "girder-splice-camber-bolt-88".into(),
+        })
+        .expect("join with an invitation");
+    assert_eq!(session.user.role, hub::Role::Estimator);
+}
+
+#[test]
+fn an_invitation_works_once_and_then_never_again() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let invite = boss
+        .invite("newhand@mesafab.com", "New Hand", "estimator", None)
+        .expect("invite");
+
+    let mut first = Client::new(&server.base);
+    first
+        .join(&hub::Join {
+            code: invite.code.clone(),
+            name: "New Hand".into(),
+            email: "newhand@mesafab.com".into(),
+            password: "girder-splice-camber-bolt-88".into(),
+        })
+        .expect("the first use");
+
+    // Somebody who was forwarded the same message gets nothing.
+    let mut second = Client::new(&server.base);
+    assert!(
+        second
+            .join(&hub::Join {
+                code: invite.code,
+                name: "Somebody Else".into(),
+                email: "else@mesafab.com".into(),
+                password: "purlin-shim-weld-stud-21".into(),
+            })
+            .is_err(),
+        "an invitation was used twice"
+    );
+}
+
+#[test]
+fn an_invitation_is_for_the_address_it_was_made_out_to() {
+    // Otherwise one forwarded email is a spare account for whoever got it.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let invite = boss
+        .invite("newhand@mesafab.com", "New Hand", "estimator", None)
+        .expect("invite");
+
+    let mut wrong = Client::new(&server.base);
+    assert!(
+        wrong
+            .join(&hub::Join {
+                code: invite.code,
+                name: "Somebody Else".into(),
+                email: "else@mesafab.com".into(),
+                password: "purlin-shim-weld-stud-21".into(),
+            })
+            .is_err(),
+        "somebody else used an invitation made out to a colleague"
+    );
+}
+
+#[test]
+fn an_invitation_cannot_make_an_administrator() {
+    // One forwarded email away from handing out the keys.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    assert!(
+        boss.invite("newhand@mesafab.com", "New Hand", "admin", None).is_err(),
+        "an invitation was allowed to make an administrator"
+    );
+}
+
+#[test]
+fn only_an_administrator_can_invite() {
+    let server = start();
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+    assert!(hand.invite("newhand@mesafab.com", "New Hand", "estimator", None).is_err());
+}
+
+#[test]
+fn an_invitation_works_on_a_server_that_takes_nobody_otherwise() {
+    // The point of inviting: the front door is shut and this person was
+    // deliberately let in.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    boss.change_joining(Some("closed"), None, false).expect("close it");
+
+    let invite = boss
+        .invite("newhand@mesafab.com", "New Hand", "estimator", None)
+        .expect("invite");
+    let mut joining = Client::new(&server.base);
+    assert!(
+        joining
+            .join(&hub::Join {
+                code: invite.code,
+                name: "New Hand".into(),
+                email: "newhand@mesafab.com".into(),
+                password: "girder-splice-camber-bolt-88".into(),
+            })
+            .is_ok(),
+        "an invitation should work whatever the front door is set to"
+    );
+}
+
+#[test]
+fn a_used_invitation_stops_being_listed_and_one_can_be_thrown_away() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let keep = boss
+        .invite("one@mesafab.com", "One", "estimator", None)
+        .expect("invite");
+    let toss = boss
+        .invite("two@mesafab.com", "Two", "estimator", None)
+        .expect("invite");
+    assert_eq!(boss.invites().expect("list").len(), 2);
+
+    let left = boss.drop_invite(&toss.code).expect("drop");
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].code, keep.code);
+
+    let mut joining = Client::new(&server.base);
+    joining
+        .join(&hub::Join {
+            code: keep.code,
+            name: "One".into(),
+            email: "one@mesafab.com".into(),
+            password: "girder-splice-camber-bolt-88".into(),
+        })
+        .expect("join");
+    assert!(boss.invites().expect("list").is_empty(), "a used one was still listed");
+}

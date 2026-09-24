@@ -208,6 +208,8 @@ pub fn router(server: Shared) -> Router {
         .route("/setup", post(claim))
         .route("/join", post(join))
         .route("/admin/joining", get(read_joining).post(change_joining))
+        .route("/admin/invites", get(list_invites).post(make_invite))
+        .route("/admin/invites/:code", axum::routing::delete(drop_invite))
         .route("/me", get(me))
         .route("/me/password", post(change_password))
         .route("/signout", post(sign_out))
@@ -2840,7 +2842,47 @@ async fn join(
         ));
     }
 
+    // An invitation first, whatever the server's own setting is. It names
+    // one person, carries the role they get, runs out on a date and dies when
+    // it is used -- which is every weakness of the shared code, answered. A
+    // server that is otherwise closed still honours one, because somebody
+    // deliberately invited this person.
+    let mut invited: Option<crate::store::Invite> = None;
+    if let Ok(Some(invite)) = server.store.invite(body.code.trim()) {
+        // Used or expired is refused exactly like a wrong code. Somebody
+        // holding a dead invitation learns nothing about why.
+        let dead = invite.used.is_some() || ran_out(&invite.expires, &crate::audit::now());
+        if dead {
+            server.patience.wrong(&from);
+            record(
+                &server,
+                crate::audit::Entry::new(crate::audit::action::SIGN_IN_REFUSED, &invite.email)
+                    .saying(if invite.used.is_some() {
+                        "that invitation has already been used"
+                    } else {
+                        "that invitation has run out"
+                    })
+                    .from(from.clone()),
+            );
+            return Err(Denied(
+                StatusCode::FORBIDDEN,
+                Problem::new(
+                    "wrong_code",
+                    "That code is not right. Ask whoever set the server up for another one.",
+                ),
+            ));
+        }
+        server.patience.right(&from);
+        invited = Some(invite);
+    }
+
+    let role = match invited.as_ref() {
+        Some(invite) => invite.role.clone(),
+        None => role,
+    };
+
     match how.as_str() {
+        _ if invited.is_some() => {}
         "open" => {}
         "code" => {
             // A code with a date that has gone by is not a code. Checked
@@ -2908,6 +2950,16 @@ async fn join(
 
     let hashed =
         auth::hash_password(&body.password).map_err(|e| Denied::broke("set that password", e))?;
+    // An invitation made out to one address is for that address. Otherwise
+    // one forwarded email is a spare account for whoever got it.
+    if let Some(invite) = invited.as_ref() {
+        if !invite.email.trim().is_empty() && invite.email.trim().to_lowercase() != email {
+            return Err(Denied::wrong(format!(
+                "That invitation is for {}. Ask for one of your own.",
+                invite.email
+            )));
+        }
+    }
     let role = auth::role_from(&role);
     let id = fresh_id("usr");
     let created = now();
@@ -2943,8 +2995,140 @@ async fn join(
         ));
     }
 
+    // Used up, and only once. `use_invite` returns false when somebody got
+    // there first, which is what makes it single-use even if two people press
+    // at the same moment -- and if that happens the account has already been
+    // made, so the honest thing is to let them in and say so in the log
+    // rather than leave somebody with a password and no account.
+    if let Some(invite) = invited.as_ref() {
+        match server.store.use_invite(&invite.code, &id) {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!("{email} used an invitation that was already spent"),
+            Err(e) => tracing::error!("could not mark an invitation used: {e}"),
+        }
+        record(
+            &server,
+            crate::audit::Entry::new("invitation_used", &email)
+                .by(&id)
+                .saying(format!("invited as {}", auth::role_name(role))),
+        );
+    }
+
     tracing::info!("{email} made an account");
     Ok(Json(issue_session(&server, &id, &name, &email, role)?))
+}
+
+// ---- inviting one person --------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct NewInvite {
+    /// Who it is for. Kept, and checked when it is used, so a forwarded
+    /// invitation does not become a spare account for whoever got it.
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    /// What they will be: `viewer`, `estimator` or `admin`.
+    #[serde(default)]
+    pub role: String,
+    /// How many days it lasts. Thirty when not said.
+    #[serde(default)]
+    pub days: Option<u32>,
+}
+
+/// `POST /admin/invites` — one code, for one person, used once.
+///
+/// Nothing is emailed and nothing ever will be. Sending mail means an SMTP
+/// server, a sending reputation, a bounce nobody sees and a support call when
+/// a shop's spam filter eats it. An administrator already has a way to reach
+/// somebody they work with; what they need is something to send them.
+async fn make_invite(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<NewInvite>,
+) -> Answer<Json<hub::Invitation>> {
+    let who = administrator(&server, &headers)?;
+    let email = body.email.trim().to_lowercase();
+    check_email(&email)?;
+    let asked = auth::role_from(body.role.trim());
+    if asked == Role::Admin {
+        return Err(Denied::wrong(
+            "Invite them as an ordinary seat and promote them afterwards. An invitation              that makes an administrator is one forwarded email away from making somebody              else one.",
+        ));
+    }
+    let code = auth::readable_secret();
+    let days = body.days.filter(|d| *d > 0).unwrap_or(30);
+    let expires = in_days(days);
+    server
+        .store
+        .make_invite(
+            &code,
+            &email,
+            body.name.trim(),
+            auth::role_name(asked),
+            &who.id,
+            &expires,
+        )
+        .map_err(|e| Denied::broke("write that invitation down", e))?;
+    record(
+        &server,
+        crate::audit::Entry::new("invitation_made", &who.email)
+            .by(&who.id)
+            .about(email.clone())
+            .saying(format!("as {}", auth::role_name(asked))),
+    );
+    Ok(Json(hub::Invitation {
+        code,
+        email,
+        name: body.name.trim().to_string(),
+        role: auth::role_name(asked).to_string(),
+        expires,
+        used: false,
+    }))
+}
+
+/// `GET /admin/invites` — the ones nobody has used yet.
+async fn list_invites(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+) -> Answer<Json<Vec<hub::Invitation>>> {
+    administrator(&server, &headers)?;
+    let now = crate::audit::now();
+    let list = server
+        .store
+        .invites_outstanding()
+        .map_err(|e| Denied::broke("list the invitations", e))?
+        .into_iter()
+        .map(|i| hub::Invitation {
+            code: i.code,
+            email: i.email,
+            name: i.name,
+            role: i.role,
+            // An expired one reads as used rather than being hidden: an
+            // administrator wondering why somebody never joined should be
+            // able to see the thing that ran out.
+            used: ran_out(&i.expires, &now),
+            expires: i.expires,
+        })
+        .collect();
+    Ok(Json(list))
+}
+
+/// `DELETE /admin/invites/:code` — for one sent to the wrong person.
+async fn drop_invite(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+) -> Answer<Json<Vec<hub::Invitation>>> {
+    let who = administrator(&server, &headers)?;
+    server
+        .store
+        .drop_invite(&code)
+        .map_err(|e| Denied::broke("throw that invitation away", e))?;
+    record(
+        &server,
+        crate::audit::Entry::new("invitation_dropped", &who.email).by(&who.id),
+    );
+    list_invites(State(server), headers).await
 }
 
 async fn read_joining(

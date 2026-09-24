@@ -402,6 +402,22 @@ pub struct Remote {
     pub said: String,
 }
 
+/// One invitation: a code for one person, used once.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Invitation {
+    /// The secret. This is the whole of what gets sent to somebody.
+    pub code: String,
+    pub email: String,
+    #[serde(default)]
+    pub name: String,
+    pub role: String,
+    /// When it stops working, RFC 3339.
+    pub expires: String,
+    /// True when it has been used or has run out -- either way it is spent.
+    #[serde(default)]
+    pub used: bool,
+}
+
 fn yes() -> bool {
     true
 }

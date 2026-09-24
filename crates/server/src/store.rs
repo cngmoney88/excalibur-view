@@ -164,6 +164,30 @@ CREATE TABLE IF NOT EXISTS settings (
 --
 -- `person` is kept as the id and the email as it read at the time, so a row
 -- still says who did it after somebody leaves and their account is removed.
+-- An invitation: one code, for one person, used once.
+--
+-- The join code is one server-wide secret that names nobody, never expires
+-- and is not used up. An invitation is the opposite of all four: it names who
+-- it is for, it carries the role they will get, it stops working on a date,
+-- and using it kills it.
+--
+-- No email is sent, and none ever will be. Sending mail means an SMTP server,
+-- a sending reputation, a bounce nobody sees and a support call when a shop's
+-- spam filter eats it. An administrator already has a way to reach the person
+-- they are inviting -- they work together. What they need is something to
+-- send, not something to send it with.
+CREATE TABLE IF NOT EXISTS invites (
+    code        TEXT PRIMARY KEY,
+    email       TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    made        TEXT NOT NULL,
+    made_by     TEXT NOT NULL,
+    expires     TEXT NOT NULL,
+    used        TEXT,
+    used_by     TEXT
+);
+
 CREATE TABLE IF NOT EXISTS audit (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     at          TEXT NOT NULL,
@@ -191,6 +215,18 @@ CREATE TABLE IF NOT EXISTS keys (
     last_used   TEXT
 );
 "#;
+
+/// An invitation as it is written down.
+#[derive(Clone, Debug)]
+pub struct Invite {
+    pub code: String,
+    pub email: String,
+    pub name: String,
+    pub role: String,
+    pub expires: String,
+    /// When it was used, if it has been. A used invitation is dead.
+    pub used: Option<String>,
+}
 
 impl Store {
     pub fn open(database: &Path, blobs: &Path) -> Result<Store> {
@@ -265,6 +301,96 @@ impl Store {
 
     pub fn blob_exists(&self, digest: &str) -> bool {
         is_digest(digest) && self.blob_path(digest).exists()
+    }
+
+    // ---- invitations ------------------------------------------------------
+
+    /// Writes an invitation down. The code is the secret; everything else is
+    /// what it turns into.
+    pub fn make_invite(
+        &self,
+        code: &str,
+        email: &str,
+        name: &str,
+        role: &str,
+        by: &str,
+        expires: &str,
+    ) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "INSERT INTO invites (code, email, name, role, made, made_by, expires)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![code, email, name, role, crate::audit::now(), by, expires],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// An invitation by its code, whatever state it is in. The caller decides
+    /// what to do about used or expired, because the answer it gives somebody
+    /// guessing has to be the same in every case.
+    pub fn invite(&self, code: &str) -> Result<Option<Invite>> {
+        self.with(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT code, email, name, role, expires, used FROM invites WHERE code = ?1",
+                    params![code],
+                    |r| {
+                        Ok(Invite {
+                            code: r.get(0)?,
+                            email: r.get(1)?,
+                            name: r.get(2)?,
+                            role: r.get(3)?,
+                            expires: r.get(4)?,
+                            used: r.get(5)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// Marks one used. Returns false when somebody got there first, which is
+    /// what makes it single-use even if two people press at once.
+    pub fn use_invite(&self, code: &str, person: &str) -> Result<bool> {
+        self.with(|db| {
+            let changed = db.execute(
+                "UPDATE invites SET used = ?1, used_by = ?2
+                 WHERE code = ?3 AND used IS NULL",
+                params![crate::audit::now(), person, code],
+            )?;
+            Ok(changed == 1)
+        })
+    }
+
+    /// Every invitation that has not been used, newest first.
+    pub fn invites_outstanding(&self) -> Result<Vec<Invite>> {
+        self.with(|db| {
+            let mut statement = db.prepare(
+                "SELECT code, email, name, role, expires, used FROM invites
+                 WHERE used IS NULL ORDER BY made DESC",
+            )?;
+            let rows = statement.query_map([], |r| {
+                Ok(Invite {
+                    code: r.get(0)?,
+                    email: r.get(1)?,
+                    name: r.get(2)?,
+                    role: r.get(3)?,
+                    expires: r.get(4)?,
+                    used: r.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Throws one away before it is used, for an invitation sent to the wrong
+    /// person or to somebody who never joined.
+    pub fn drop_invite(&self, code: &str) -> Result<()> {
+        self.with(|db| {
+            db.execute("DELETE FROM invites WHERE code = ?1", params![code])?;
+            Ok(())
+        })
     }
 
     // ---- who is on a project ---------------------------------------------
