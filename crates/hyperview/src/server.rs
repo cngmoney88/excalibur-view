@@ -49,6 +49,10 @@ pub enum Ask {
         reachable_at: Option<String>,
     },
     SignOut,
+    /// How this server can be reached from a jobsite, and turning it on or off.
+    Remote,
+    RemoteOn { token: String, hostname: String },
+    RemoteOff,
     Projects,
     /// Everybody with an account on this server. Administrators only.
     People,
@@ -204,6 +208,8 @@ pub enum Told {
     },
     SignedIn(Box<Session>),
     SignedOut,
+    /// What the server says about reaching it from outside the shop.
+    RemoteIs(Box<hub::Remote>),
     Projects(Vec<Project>),
     /// Everybody with an account here.
     People(Vec<hub::User>),
@@ -458,6 +464,30 @@ pub fn start(repaint: egui::Context) -> Link {
                         say(&told, Told::SignedOut);
                     }
 
+                    Ask::Remote => match connected(&client) {
+                        // Asked whenever the Office panel opens. A server
+                        // that cannot answer just now is not worth a message
+                        // box -- the section simply does not appear.
+                        Err(_) => {}
+                        Ok(client) => match client.remote() {
+                            Ok(remote) => say(&told, Told::RemoteIs(Box::new(remote))),
+                            Err(_) => {}
+                        },
+                    },
+                    Ask::RemoteOn { token, hostname } => match connected(&client) {
+                        Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        Ok(client) => match client.remote_on(&token, &hostname) {
+                            Ok(remote) => say(&told, Told::RemoteIs(Box::new(remote))),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
+                    Ask::RemoteOff => match connected(&client) {
+                        Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        Ok(client) => match client.remote_off() {
+                            Ok(remote) => say(&told, Told::RemoteIs(Box::new(remote))),
+                            Err(e) => say(&told, Told::Trouble(e.to_string())),
+                        },
+                    },
                     Ask::Projects => match connected(&client) {
                         Err(message) => say(&told, Told::Trouble(message)),
                         Ok(client) => match client.projects() {

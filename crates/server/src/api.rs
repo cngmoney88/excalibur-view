@@ -685,30 +685,22 @@ async fn read_fleet(
     }))
 }
 
-/// What the Office panel shows about reaching this server from a jobsite.
-#[derive(serde::Serialize)]
-pub struct Remote {
-    #[serde(flatten)]
-    pub state: crate::tunnel::State,
-    /// The sentence to put on screen. Worked out here so every client says
-    /// the same thing and nobody has to keep a copy of the wording.
-    pub said: String,
-    /// The hostname held, if one is. The token is never sent back: it is a
-    /// secret this server keeps, and a screen that can show it is a screen
-    /// somebody can photograph.
-    pub hostname: Option<String>,
-}
-
-fn remote_now(server: &Server) -> Remote {
+fn remote_now(server: &Server) -> hub::Remote {
+    use crate::tunnel::State;
     let state = server.tunnel.state_now();
-    Remote {
-        said: state.in_words(),
-        hostname: crate::tunnel::held(&server.store).map(|(_, host)| host),
-        state,
+    let said = state.in_words();
+    let hostname = crate::tunnel::held(&server.store).map(|(_, host)| host);
+    hub::Remote {
+        off: matches!(state, State::Off),
+        sealed: matches!(state, State::Sealed),
+        starting: matches!(state, State::Starting),
+        on: matches!(state, State::On { .. }),
+        hostname,
+        said,
     }
 }
 
-async fn read_remote(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Remote>> {
+async fn read_remote(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<hub::Remote>> {
     administrator(&server, &headers)?;
     Ok(Json(remote_now(&server)))
 }
@@ -723,7 +715,7 @@ async fn change_remote(
     State(server): State<Shared>,
     headers: HeaderMap,
     Json(body): Json<ChangeRemote>,
-) -> Answer<Json<Remote>> {
+) -> Answer<Json<hub::Remote>> {
     let who = administrator(&server, &headers)?;
     // A sealed server refuses before anything is stored, so a token never
     // even lands on disk somewhere it could not be used.
@@ -754,7 +746,7 @@ async fn change_remote(
 async fn turn_remote_off(
     State(server): State<Shared>,
     headers: HeaderMap,
-) -> Answer<Json<Remote>> {
+) -> Answer<Json<hub::Remote>> {
     let who = administrator(&server, &headers)?;
     server.tunnel.stop();
     crate::tunnel::forget(&server.store)

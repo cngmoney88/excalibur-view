@@ -77,6 +77,12 @@ pub struct OfficePanel {
     pub fleet_note: Option<String>,
     pub fleet_key: Option<String>,
     pub fleet_address: String,
+    /// What the server last said about reaching it from a jobsite.
+    pub remote: Option<hub::Remote>,
+    /// The two boxes: the token is cleared the moment it is sent.
+    pub remote_token: String,
+    pub remote_hostname: String,
+    pub remote_note: Option<String>,
     /// Asked for once, the first time the Office section is opened.
     pub asked: bool,
     pub current_password: String,
@@ -145,6 +151,11 @@ struct PanelActions {
     password: Option<(String, String)>,
     watch_fleet: bool,
     stop_fleet: bool,
+    /// (token, hostname) -- turning remote access on.
+    remote_on: Option<(String, String)>,
+    remote_off: bool,
+    /// Ask the server how the tunnel is doing.
+    remote_look: bool,
     make_key: Option<String>,
     revoke_key: Option<String>,
     add_license: bool,
@@ -319,6 +330,13 @@ impl App {
                     sent,
                 } => self.take_sync(set, revision, markups, sent),
                 Told::Pushed { set, sent } => self.take_push(set, sent),
+                Told::RemoteIs(remote) => {
+                    self.office.remote_note = None;
+                    if let Some(host) = remote.hostname.clone() {
+                        self.office.remote_hostname = host;
+                    }
+                    self.office.remote = Some(*remote);
+                }
                 Told::Chests(list) => {
                     // What the office shares, every seat has: a shared chest
                     // this seat has not got is fetched now, once. Nobody has
@@ -1344,6 +1362,7 @@ impl App {
         if actions.office {
             self.ask(Ask::Office);
             self.ask(Ask::License);
+            self.ask(Ask::Remote);
         }
         if actions.add_license {
             self.pick_license();
@@ -1381,6 +1400,22 @@ impl App {
             self.office.fleet_note = None;
             self.office.fleet_key = None;
             self.ask(Ask::StopFleet);
+        }
+        if let Some((token, hostname)) = actions.remote_on {
+            self.office.remote_note = Some("Starting…".into());
+            // The token leaves the boxes the moment it is sent. It is a
+            // secret and there is no reason for it to sit on screen behind
+            // whatever somebody opens next.
+            self.office.remote_token.clear();
+            self.ask(Ask::RemoteOn { token, hostname });
+        }
+        if actions.remote_off {
+            self.office.remote_note = None;
+            self.office.remote_token.clear();
+            self.ask(Ask::RemoteOff);
+        }
+        if actions.remote_look {
+            self.ask(Ask::Remote);
         }
         if let Some(name) = actions.make_key {
             self.ask(Ask::MakeIntegrationKey(name));
@@ -1986,6 +2021,75 @@ fn office_section(
                         ui.ctx().copy_text(key.clone());
                     }
                 });
+            }
+
+            // Reaching this server from a jobsite.
+            ui.add_space(10.0);
+            ui.label(RichText::new("Remote access").strong().size(12.0));
+            match office.remote.as_ref() {
+                Some(remote) if remote.sealed => {
+                    // Not a button that fails. This server was bought to
+                    // refuse outward connections and this is one of them.
+                    ui.label(RichText::new(&remote.said).color(theme.faint).size(10.0));
+                }
+                Some(remote) if remote.on || remote.starting => {
+                    ui.label(RichText::new(&remote.said).color(theme.faint).size(10.0));
+                    if let Some(address) = remote.hostname.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&address).monospace().size(11.0));
+                            if ui.small_button("Copy").clicked() {
+                                ui.ctx().copy_text(address.clone());
+                            }
+                        });
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("Turn off").clicked() {
+                            actions.remote_off = true;
+                        }
+                        if ui.small_button("Check again").clicked() {
+                            actions.remote_look = true;
+                        }
+                    });
+                }
+                Some(remote) => {
+                    ui.label(
+                        RichText::new(
+                            "Seats find this server on the shop network by themselves. From a \
+                             truck they cannot, because a broadcast does not cross a router. \
+                             A Cloudflare tunnel fixes that, and it is yours: your account, \
+                             your hostname, your token. Nothing is opened on your firewall.",
+                        )
+                        .color(theme.faint)
+                        .size(10.0),
+                    );
+                    if !remote.said.is_empty() && !remote.off {
+                        ui.label(RichText::new(&remote.said).color(theme.warn).size(10.0));
+                    }
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Hostname").size(10.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut office.remote_hostname)
+                            .hint_text("drawings.yourshop.com")
+                            .desired_width(240.0),
+                    );
+                    ui.label(RichText::new("Tunnel token").size(10.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut office.remote_token)
+                            .password(true)
+                            .hint_text("the long one Cloudflare gave you")
+                            .desired_width(240.0),
+                    );
+                    if ui.small_button("Turn on").clicked() {
+                        actions.remote_on = Some((
+                            office.remote_token.clone(),
+                            office.remote_hostname.clone(),
+                        ));
+                    }
+                }
+                None => {}
+            }
+            if let Some(note) = &office.remote_note {
+                ui.label(RichText::new(note).color(theme.faint).size(10.0));
             }
 
             // Other programs: FabWire and anything else that uses the API.

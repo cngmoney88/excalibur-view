@@ -250,6 +250,25 @@ impl Client {
         }
     }
 
+    // ---- reaching this server from a jobsite -----------------------------
+
+    pub fn remote(&self) -> Answer<crate::Remote> {
+        Self::read(self.get("/admin/remote").call())
+    }
+
+    pub fn remote_on(&self, token: &str, hostname: &str) -> Answer<crate::Remote> {
+        Self::read(self.post("/admin/remote").send_json(serde_json::json!({
+            "token": token,
+            "hostname": hostname,
+        })))
+    }
+
+    pub fn remote_off(&self) -> Answer<crate::Remote> {
+        Self::read(
+            Attempt::once(self.sign(self.agent.delete(&self.url("/admin/remote")))).call(),
+        )
+    }
+
     // ---- is it there, and who am I ---------------------------------------
 
     /// Asks a server whether it is a Hyperview server at all, and whether this

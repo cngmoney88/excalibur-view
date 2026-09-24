@@ -373,6 +373,35 @@ pub struct Health {
     pub reachable_at: Option<String>,
 }
 
+/// What an administrator is told about reaching this server from a jobsite.
+///
+/// Flattened booleans rather than a tagged enum on purpose: a panel asks
+/// "is it on?" and a client built against an older server must not fall over
+/// because a newer one invented a state it has never heard of.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct Remote {
+    /// Nobody has turned it on. The ordinary state, and not a problem.
+    #[serde(default)]
+    pub off: bool,
+    /// Sealed, and refusing -- which is what the edition is for.
+    #[serde(default)]
+    pub sealed: bool,
+    #[serde(default)]
+    pub starting: bool,
+    /// On, and the address answered when the server asked for it from the
+    /// outside. A connector that started is not the same thing.
+    #[serde(default)]
+    pub on: bool,
+    /// The hostname, when there is one. Never the token: a screen that can
+    /// show a secret is a screen somebody can photograph.
+    #[serde(default)]
+    pub hostname: Option<String>,
+    /// The sentence to put on screen, worked out by the server so every
+    /// client says the same thing.
+    #[serde(default)]
+    pub said: String,
+}
+
 fn yes() -> bool {
     true
 }

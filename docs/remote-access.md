@@ -107,10 +107,21 @@ from their Cloudflare dashboard without asking anybody.
 
 ## Build order
 
-1. Rate limiting on sign-in and joining, and a join code that can expire.
-2. The connector: fetch, verify, run, restart, report.
-3. The Office panel: token in, address out, and a sealed server saying why not.
-4. A seat that falls back to the public address when the broadcast finds
-   nothing.
+1. ~~Rate limiting on sign-in and joining, and a join code that can expire.~~
+   Done, except the expiring code.
+2. ~~The connector: fetch, verify, run, restart, report.~~ Done.
+3. ~~The Office panel: token in, address out, and a sealed server saying why
+   not.~~ Done.
+4. ~~A seat that falls back to the public address when the broadcast finds
+   nothing.~~ Done.
 
-One and two are independent. Three needs two. Four needs three.
+What is left of item one: **the join code still never expires.** An unexpiring
+server-wide secret was defensible when the only way to type it was to be
+standing in the building. It is the weakest thing about a server with a public
+address, and it is the next thing to do here.
+
+Nobody has run this against a real Cloudflare tunnel yet. Everything above is
+built and tested, including the parts that refuse — a digest that does not
+match, a sealed server, a hostname with `https://` typed into it — but a shop's
+own tunnel has never been turned on end to end. That is the first thing to do
+with a real account, and it is worth doing before it is sold to anybody.

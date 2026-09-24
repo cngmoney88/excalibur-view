@@ -621,3 +621,67 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod what_the_panel_is_told {
+    //! The shape the Office panel reads, rather than the state machine
+    //! underneath it. A panel built against an older server must not fall
+    //! over because a newer one invented a state it has never heard of, which
+    //! is why these are flat booleans and not a tagged enum.
+
+    use super::State;
+
+    fn as_panel(state: &State) -> (bool, bool, bool, bool) {
+        (
+            matches!(state, State::Off),
+            matches!(state, State::Sealed),
+            matches!(state, State::Starting),
+            matches!(state, State::On { .. }),
+        )
+    }
+
+    #[test]
+    fn exactly_one_of_them_is_ever_true() {
+        for state in [
+            State::Off,
+            State::Sealed,
+            State::Starting,
+            State::On { address: "a.b.com".into() },
+        ] {
+            let (off, sealed, starting, on) = as_panel(&state);
+            let how_many = [off, sealed, starting, on].iter().filter(|x| **x).count();
+            assert_eq!(how_many, 1, "{state:?} lit {how_many} lamps");
+        }
+    }
+
+    #[test]
+    fn trouble_and_unreachable_light_none_of_them() {
+        // Deliberate: both are "not working", and the panel shows the reason
+        // rather than a lamp. A panel that treated either as On would tell
+        // somebody remote access works when it does not.
+        for state in [
+            State::Trouble { why: "it would not start".into() },
+            State::Unreachable { address: "a.b.com".into(), why: "timed out".into() },
+        ] {
+            let (off, sealed, starting, on) = as_panel(&state);
+            assert!(!on, "{state:?} must never read as working");
+            assert!(!off && !sealed && !starting, "{state:?}");
+            assert!(!state.in_words().is_empty(), "and it must say why");
+        }
+    }
+
+    #[test]
+    fn unreachable_says_where_to_go_and_look() {
+        // The failure that actually happens: the connector runs, and the
+        // hostname in Cloudflare points somewhere else. Nothing in this
+        // program can fix that, so the message has to send them to the place
+        // that can.
+        let said = State::Unreachable {
+            address: "drawings.mesafab.com".into(),
+            why: "timed out".into(),
+        }
+        .in_words();
+        assert!(said.contains("drawings.mesafab.com"));
+        assert!(said.contains("Cloudflare"), "{said}");
+    }
+}
