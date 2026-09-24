@@ -1,0 +1,37 @@
+Steel models, plugins you can sign without the release key, and change notices for FabWire.
+
+OPEN A STEEL MODEL
+
+File -> Open Model (IFC)... opens a detailer's model from Tekla, SDS2 or
+anything else that writes IFC, and totals it the way an estimator does:
+pieces, feet, pounds and tons by profile, every part with its mark and
+assembly, and the bolts by size. The weights are the model's own, from its
+base quantities or the detailing program's, and a part the model gives no
+weight for is named and left out of the total rather than counted as nothing.
+Save either list as CSV. Dropping an .ifc on the window opens it the same way.
+Drawing the model in 3D comes next.
+
+COMBINING
+
+A combined set gets one bookmark per file it came from, named after the file.
+
+PLUGINS
+
+Plugins can be signed with a key made for plugins alone, so the key that
+signs releases stays put away. Plugins already signed keep working.
+Plugins -> Save This Drawing for a Plugin Test... saves every sheet, for a
+command that looks at the whole drawing.
+
+CHANGE NOTICES
+
+Studio -> Office -> Change notices. Give it FabWire's address and the office
+server tells FabWire whenever a drawing set's markups change, instead of
+FabWire asking over and over. Each notice says which set and job changed,
+signed so FabWire knows it came from your server. No drawing or markup goes
+with it. A sealed server sends them only inside your network.
+
+ALSO, FROM 0.6.7
+
+Combine in Excalibur View from Explorer's right-click menu, clouds and
+callouts from a Revu chest that draw as themselves, and a chest shared with
+Share one that names the markups list's columns.
