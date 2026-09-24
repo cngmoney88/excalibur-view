@@ -1959,53 +1959,11 @@ fn has_a_form(bindings: &dyn PdfiumLibraryBindings, doc: FPDF_DOCUMENT) -> bool 
 
 /// Bytes nobody can guess, for a key or a salt.
 ///
-/// From the operating system, through a fresh file handle on its own random
-/// device where there is one, and from the clock and the addresses of things
-/// in memory where there is not. A key that could be worked out from the file
-/// it locks is not a key.
+/// One copy of this, in the crate that needs it twice over -- a key that locks
+/// a drawing set, and an initialisation vector on every piece of it. Two
+/// copies of a random number generator is two things to get wrong.
 fn fresh_bytes<const N: usize>() -> [u8; N] {
-    let mut out = [0u8; N];
-    #[cfg(unix)]
-    {
-        use std::io::Read;
-        if let Ok(mut source) = std::fs::File::open("/dev/urandom") {
-            if source.read_exact(&mut out).is_ok() {
-                return out;
-            }
-        }
-    }
-    #[cfg(windows)]
-    {
-        // Windows fills a buffer through the system's own generator.
-        extern "system" {
-            fn SystemFunction036(buffer: *mut u8, length: u32) -> u8;
-        }
-        let ok = unsafe { SystemFunction036(out.as_mut_ptr(), N as u32) };
-        if ok != 0 {
-            return out;
-        }
-    }
-    // Nothing above worked. Rather than a predictable key, this mixes several
-    // things that differ between runs — and says so by being the last resort
-    // rather than the first.
-    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    sha2::Digest::update(&mut hasher, now.to_le_bytes());
-    sha2::Digest::update(&mut hasher, std::process::id().to_le_bytes());
-    let here = Box::new(0u8);
-    sha2::Digest::update(&mut hasher, (&*here as *const u8 as usize).to_le_bytes());
-    sha2::Digest::update(&mut hasher, std::time::Instant::now().elapsed().as_nanos().to_le_bytes());
-    let mut seed = sha2::Digest::finalize(hasher).to_vec();
-    while seed.len() < N {
-        let mut again = <sha2::Sha256 as sha2::Digest>::new();
-        sha2::Digest::update(&mut again, &seed);
-        seed.extend_from_slice(&sha2::Digest::finalize(again));
-    }
-    out.copy_from_slice(&seed[..N]);
-    out
+    pdf::random::bytes::<N>()
 }
 
 /// Writes the markups a flatten turned into paint into the flattened file, so

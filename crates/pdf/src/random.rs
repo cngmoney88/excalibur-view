@@ -25,6 +25,13 @@ pub fn bytes<const N: usize>() -> [u8; N] {
     #[cfg(windows)]
     {
         // Windows fills a buffer through the system's own generator.
+        //
+        // The `link` attribute is not optional and its absence is not
+        // obvious: this crate pulls in nothing else from advapi32, so
+        // without it the symbol is unresolved and the link fails -- not
+        // here, but in whatever example or binary happens to depend on this
+        // crate, with an error naming a file nobody has heard of.
+        #[link(name = "advapi32")]
         extern "system" {
             fn SystemFunction036(buffer: *mut u8, length: u32) -> u8;
         }
