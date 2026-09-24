@@ -31,6 +31,7 @@ pub mod projects;
 pub mod quantities;
 pub mod run;
 pub mod store;
+pub mod tunnel;
 pub mod updates;
 pub mod winsvc;
 
