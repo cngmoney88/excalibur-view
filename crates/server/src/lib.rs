@@ -54,6 +54,18 @@ pub fn trusted() -> hub::update::Trusted {
     hub::update::Trusted::pinned(KEYS)
 }
 
+/// The keys a licence may be signed with: every release key, and the keys
+/// made for licences alone.
+///
+/// Kept apart from [`trusted`] on purpose. A licence key lives where it can
+/// sign at three in the morning without anybody, and that is only safe because
+/// nothing but a licence is ever checked against it.
+pub fn license_trust() -> hub::update::Trusted {
+    let mut trust = hub::update::Trusted::pinned(KEYS);
+    trust.keys.extend(hub::update::Trusted::pinned(LICENSE_KEYS).keys);
+    trust
+}
+
 /// The same file the program compiles, read in rather than copied, so the
 /// server and the seats can never disagree about whose signature counts. A
 /// second list that somebody had to remember to update at release time is how
@@ -63,4 +75,4 @@ mod pinned {
     include!("../../hyperview/src/trust.rs");
 }
 
-pub use pinned::{HOME_CHANNEL, HOME_FEED, KEYS, LICENSE_FEED};
+pub use pinned::{HOME_CHANNEL, HOME_FEED, KEYS, LICENSE_FEED, LICENSE_KEYS};

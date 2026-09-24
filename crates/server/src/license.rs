@@ -94,7 +94,7 @@ pub fn begin(server: &Server) {
 /// that would otherwise reach the outside world knows before it tries.
 /// Called as the server opens and again whenever a license is installed.
 pub fn settle_sealed(server: &Server) {
-    let edition = held(server, &crate::trusted()).map(|l| l.edition);
+    let edition = held(server, &crate::license_trust()).map(|l| l.edition);
     hub::sealed::license_says(edition.map(|e| e.name()));
 }
 
@@ -117,7 +117,7 @@ pub fn begin_at(server: &Server, now: &str, founding_before: &str) {
 /// Checks a license file and keeps it. The error is a sentence for whoever
 /// chose the file.
 pub fn install(server: &Server, text: &str) -> Result<License, String> {
-    install_with(server, text, &crate::trusted())
+    install_with(server, text, &crate::license_trust())
 }
 
 fn install_with(server: &Server, text: &str, trusted: &Trusted) -> Result<License, String> {
@@ -161,7 +161,7 @@ pub fn renewal_url(server: &Server) -> Option<String> {
     if hub::sealed::is_sealed() {
         return None;
     }
-    let held = held(server, &crate::trusted())?;
+    let held = held(server, &crate::license_trust())?;
     Some(format!("{base}/{}.evlicense", name_for(&held.id)))
 }
 
@@ -203,9 +203,9 @@ pub fn is_a_renewal(held: &License, fresh: &License) -> bool {
 /// checked today is a shop that carries on with the one it has.
 pub fn look_for_renewal(server: &Server) -> Option<String> {
     let url = renewal_url(server)?;
-    let held = held(server, &crate::trusted())?;
+    let held = held(server, &crate::license_trust())?;
     let text = hub::web::fetch_small("Checking for a renewed license", &url).ok()?;
-    let fresh = License::read(&text, &crate::trusted()).ok()?;
+    let fresh = License::read(&text, &crate::license_trust()).ok()?;
     if !is_a_renewal(&held, &fresh) {
         return None;
     }
@@ -227,7 +227,7 @@ fn held(server: &Server, trusted: &Trusted) -> Option<License> {
 }
 
 pub fn state(server: &Server) -> State {
-    state_at(server, &now(), &crate::trusted())
+    state_at(server, &now(), &crate::license_trust())
 }
 
 pub fn state_at(server: &Server, now: &str, trusted: &Trusted) -> State {
@@ -808,6 +808,53 @@ mod renewal_tests {
         assert_eq!(
             name_for("evl_abc123"),
             "19431c5846060c7cb52d58f6af8352ed35243c827a01b2703ca4c850160aaebd"
+        );
+    }
+
+    /// A licence the always-on licensing service signed, byte for byte as it
+    /// serves it, with a key made for licences alone. If this stops checking
+    /// out, a customer who paid is handed a file their server refuses.
+    const CLOUD_SIGNED: &str = r#"{
+  "id": "evl_cloud0000001",
+  "company": "Ünïcode Fab & Co, LLC",
+  "edition": "sealed",
+  "users": 7,
+  "updates_through": "2027-09-24",
+  "issued": "2026-09-24",
+  "note": "Added users",
+  "key": "excalibur-licences-test",
+  "signature": "b07d4a2472bb98d87fe6b098936d58a627ebeed5959e0c66d6d836eae0e94bd3ebacc4c09052fa2127855fd3a9fc74717045508bac6cb38f48a956d74e5c1506"
+}
+"#;
+
+    #[test]
+    fn a_licence_the_licensing_service_signed_checks_out() {
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let trusted = Trusted { keys: vec![("excalibur-licences-test".into(), key.verifying_key().to_bytes())] };
+        let license = License::read(CLOUD_SIGNED, &trusted).unwrap();
+        assert_eq!(license.company, "Ünïcode Fab & Co, LLC");
+        assert_eq!(license.users, 7);
+        assert_eq!(license.edition, Edition::Sealed);
+        let tampered = CLOUD_SIGNED.replace("\"users\": 7", "\"users\": 70");
+        assert_ne!(tampered, CLOUD_SIGNED);
+        assert!(License::read(&tampered, &trusted).is_err());
+    }
+
+    #[test]
+    fn a_licence_key_signs_licences_and_never_releases() {
+        let licensing = crate::license_trust();
+        let releases = crate::trusted();
+        for (name, _) in crate::LICENSE_KEYS {
+            assert!(licensing.key(name).is_some(), "{name} signs licences");
+            assert!(releases.key(name).is_none(), "{name} must never be able to sign a release");
+        }
+        for (name, _) in crate::KEYS {
+            assert!(licensing.key(name).is_some(), "licences signed on the PC with {name} still check out");
+        }
+        assert_eq!(
+            licensing.keys.len(),
+            crate::KEYS.len() + crate::LICENSE_KEYS.len(),
+            "every key in both lists is well formed"
         );
     }
 }
