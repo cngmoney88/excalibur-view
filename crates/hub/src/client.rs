@@ -471,6 +471,27 @@ impl Client {
         Self::read(self.get("/projects").call())
     }
 
+    /// One project by its id. Refused as "not found" when the caller is not
+    /// on it, which is the same answer they would get for one that does not
+    /// exist -- so nobody learns a job exists by being refused it.
+    pub fn project(&self, id: &str) -> Answer<Project> {
+        Self::read(self.get(&format!("/projects/{id}")).call())
+    }
+
+    /// Who is on a project. Empty means nobody has been named, which means
+    /// it is everybody's.
+    pub fn who_is_on(&self, project: &str) -> Answer<Vec<String>> {
+        Self::read(self.get(&format!("/projects/{project}/people")).call())
+    }
+
+    /// Puts somebody on a project, or takes them off. Administrators only.
+    pub fn change_who_is_on(&self, project: &str, person: &str, on: bool) -> Answer<Vec<String>> {
+        Self::read(
+            self.post(&format!("/projects/{project}/people"))
+                .send_json(serde_json::json!({ "person": person, "on": on })),
+        )
+    }
+
     pub fn create_project(&self, number: &str, name: &str) -> Answer<Project> {
         Self::read(self.post("/projects").send_json(NewProject {
             number: number.to_string(),
