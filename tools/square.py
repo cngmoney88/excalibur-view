@@ -64,17 +64,17 @@ CHEST_BUNDLE_PRICE = 49900
 # is worth more than the tidier name.
 CHESTS = [
     ("steel", "Structural Steel and Misc Metals",
-     "3,439 tools in 27 sets. Shapes, plate, bolts, welds and connections, off the AISC Shapes Database."),
+     "3,439 tools in 27 sets. 2,485 shapes with their unit weights, plus joists and deck, connections, bolts and welds, and misc metals."),
     ("concrete", "Concrete and Earthwork",
-     "523 tools in 18 sets. Rebar, formwork, placement, finishing, excavation and haul."),
+     "523 tools in 18 sets. Footings to flatwork, formwork, rebar and mesh, finishes, earthwork, trenching, paving and haul."),
     ("gc", "General Contractor",
-     "491 tools in 16 sets. Sitework, demolition, waste and the general conditions."),
+     "491 tools in 16 sets. General conditions, demolition, openings, drywall, finishes, roofing, specialties and punch-walk field issues."),
     ("plumbing", "Plumbing",
-     "392 tools in 12 sets. Pipe, fittings, fixtures and hangers."),
+     "392 tools in 12 sets. Water, waste, storm, gas and fire protection piping, fittings, valves, fixtures and hangers."),
     ("electrical", "Electrical",
-     "385 tools in 10 sets. Conduit, wire, devices and gear."),
+     "385 tools in 10 sets. Conduit, wire, tray, devices, lighting, gear, grounding, fire alarm and low voltage."),
     ("mechanical", "Mechanical",
-     "364 tools in 12 sets. Duct, equipment, and the gauges that go with them."),
+     "364 tools in 12 sets. Duct by gauge with weights, fittings, dampers, air devices, terminal units, equipment and piping."),
 ]
 CHEST_BUNDLE = ("all", "All six trade chests",
                 "5,594 tools. Every trade, one price.")
@@ -572,6 +572,25 @@ def answers_in(order):
     walk(order.get("metadata") or {})
     for key in ("custom_fields", "fulfillments", "line_items", "source", "checkout_options"):
         walk(order.get(key))
+
+    # A payment link's custom fields come back as one note on the order's
+    # fulfillment, a line per field: "Company name, as it should read on the
+    # license: Acme Steel". Seen on a real order in September 2026.
+    def notes(thing):
+        if isinstance(thing, list):
+            for v in thing:
+                notes(v)
+        elif isinstance(thing, dict):
+            for k, v in thing.items():
+                if k == "note" and isinstance(v, str):
+                    for line in v.splitlines():
+                        m = re.match(r"^([^:]{2,200}):\s*(.+)$", line.strip())
+                        if m:
+                            found.setdefault(m.group(1).strip().lower(), m.group(2).strip())
+                else:
+                    notes(v)
+
+    notes(order.get("fulfillments"))
     return found
 
 
@@ -1153,22 +1172,39 @@ def cloud_is_issuing(site):
     service on Cloudflare, whether or not this PC is on. This script stays as
     the manual fallback, and it must not sign what the service already has,
     or a shop that bought three seats would be given six.
+
+    True or False when the service answered; None when it could not be asked.
+    It sends a name of its own, because Cloudflare turns away Python's default
+    one, and a refusal read as "not issuing" would sign everything twice.
     """
+    request = urllib.request.Request(site.rstrip("/") + "/api/licence/health",
+                                     headers={"User-Agent": "excalibur-square", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(site.rstrip("/") + "/api/licence/health", timeout=15) as r:
+        with urllib.request.urlopen(request, timeout=15) as r:
             return bool(json.load(r).get("issuing"))
+    except urllib.error.HTTPError as e:
+        # No service there at all: this PC is the only thing that signs.
+        return False if e.code == 404 else None
     except Exception:
-        return False
+        return None
 
 
 def refuse_if_the_cloud_is_issuing(a):
     if getattr(a, "force_local", False) or getattr(a, "sandbox", False):
         return
-    if cloud_is_issuing(a.site):
+    issuing = cloud_is_issuing(a.site)
+    admin = a.site.rstrip("/") + "/api/licence/admin"
+    if issuing:
         raise SystemExit(
             "The licence service on the website is issuing licences on its own, so this does not.\n"
-            "Anything that needs a person is on its admin page: " + a.site.rstrip("/") + "/api/licence/admin\n"
+            "Anything that needs a person is on its admin page: " + admin + "\n"
             "(--force-local signs here anyway. Only for when the service is down and a customer is waiting.)"
+        )
+    if issuing is None:
+        raise SystemExit(
+            "Could not ask the license service whether it is issuing, so this does not sign,\n"
+            "in case it is and the customer would be given their seats twice. Look at " + admin + "\n"
+            "(--force-local signs here anyway, once you are sure the service has not.)"
         )
 
 
