@@ -177,7 +177,7 @@ pub(crate) fn sharing(server: &Server) -> Answer<()> {
     crate::license::sharing(server).map_err(Denied::license_needed)
 }
 
-fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who> {
+pub(crate) fn administrator(server: &Server, headers: &HeaderMap) -> Answer<Who> {
     let who = caller(server, headers)?;
     if !who.role.may_administer() {
         return Err(Denied::forbidden("administer this server"));
@@ -220,6 +220,10 @@ pub fn router(server: Shared) -> Router {
         .route("/admin/remote", get(read_remote).post(change_remote).delete(turn_remote_off))
         .route("/projects", get(crate::projects::list).post(crate::projects::create))
         .route("/projects/:id", get(crate::projects::one))
+        .route(
+            "/projects/:id/people",
+            get(crate::projects::who_is_on).post(crate::projects::change_who_is_on),
+        )
         .route("/projects/:id/archive", post(crate::projects::archive))
         .route("/projects/:id/stamp", get(crate::projects::stamp))
         .route("/projects/:id/sets", get(sets_of))
@@ -867,6 +871,48 @@ pub(crate) fn set_from_row(r: &rusqlite::Row) -> rusqlite::Result<DrawingSet> {
     })
 }
 
+/// The one gate for a project and everything hanging off it.
+///
+/// Every route that reaches a project, a set, a sheet, a markup or a takeoff
+/// goes through this or through [`may_reach_set`]. The rule lives in the
+/// store so a listing and a direct fetch can never disagree -- and the answer
+/// when somebody may not is the same "not found" they would get for a project
+/// that does not exist, so nobody learns a job exists by being refused it.
+pub(crate) fn may_reach_project(server: &Server, who: &Who, project: &str) -> Answer<()> {
+    let allowed = server
+        .store
+        .may_see(project, &who.id, who.role == Role::Admin)
+        .map_err(|e| Denied::broke("check who is on that project", e))?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(Denied::missing("project"))
+    }
+}
+
+/// The same, for anything named by a drawing set: the set's own project
+/// decides.
+pub(crate) fn may_reach_set(server: &Server, who: &Who, set: &str) -> Answer<()> {
+    let project = server
+        .store
+        .with(|db| {
+            Ok(db
+                .query_row(
+                    "SELECT project FROM sets WHERE id = ?1",
+                    params![set],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+        .map_err(|e| Denied::broke("find that drawing set", e))?;
+    match project {
+        // A set nobody can find is refused the same way as one somebody may
+        // not have, so the two are indistinguishable from outside.
+        None => Err(Denied::missing("drawing set")),
+        Some(project) => may_reach_project(server, who, &project),
+    }
+}
+
 pub(crate) fn read_set(db: &Connection, id: &str) -> rusqlite::Result<Option<DrawingSet>> {
     db.query_row(
         &format!("SELECT {SET_COLUMNS} FROM sets WHERE id = ?1"),
@@ -889,7 +935,8 @@ async fn sets_of(
     Path(project): Path<String>,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<Vec<DrawingSet>>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_project(&server, &who, &project)?;
     let list = server
         .store
         .with(|db| {
@@ -915,7 +962,8 @@ async fn one_set(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<DrawingSet>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let found = server
         .store
         .with(|db| Ok(read_set(db, &id)?))
@@ -1117,6 +1165,7 @@ async fn set_file(
     Path(id): Path<String>,
 ) -> Answer<Response> {
     let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let found = server
         .store
         .with(|db| Ok(read_set(db, &id)?))
@@ -1195,7 +1244,8 @@ async fn sheets_of(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<Vec<Sheet>>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let list = server
         .store
         .with(|db| Ok(sheets_for(db, &id)?))
@@ -1254,7 +1304,8 @@ async fn markups_of(
     Path(id): Path<String>,
     Query(since): Query<Since>,
 ) -> Answer<Json<MarkupPage>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let page = server
         .store
         .with(|db| {
@@ -1278,6 +1329,7 @@ async fn add_markups(
 ) -> Answer<Json<MarkupPage>> {
     use base64::Engine;
     let who = writer(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
 
     // Everything is parsed and checked before anything is written, so a batch
     // with one bad markup in it does not leave half of itself in the file.
@@ -1435,7 +1487,8 @@ async fn takeoff_of(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<Takeoff>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let (revision, markups, sheets) = gather(&server, &id)?;
     let result = quantities::takeoff(&id, revision, &markups, &sheets)
         .map_err(|e| Denied::broke("work out that takeoff", e))?;
@@ -1448,6 +1501,7 @@ async fn takeoff_csv(
     Path(id): Path<String>,
 ) -> Answer<Response> {
     let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let (_, markups, sheets) = gather(&server, &id)?;
     // A takeoff leaving the server is the thing an estimator takes to another
     // job, and it was the one export nobody could see had happened.
@@ -1739,7 +1793,8 @@ async fn set_markuplist(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<serde_json::Value>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let user = office_columns(&server);
     Ok(Json(markuplist_of(&server, &id, &user)?))
 }
@@ -1758,7 +1813,8 @@ async fn project_markuplist(
     Path(project): Path<String>,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<serde_json::Value>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    may_reach_project(&server, &who, &project)?;
     type Listed = (String, String, Option<String>, i64);
     let (sets, stamp): (Vec<Listed>, Option<crate::projects::Stamp>) = server
         .store
@@ -2521,6 +2577,7 @@ async fn copy_set(
     Json(asked): Json<CopyAsked>,
 ) -> Answer<Json<DrawingSet>> {
     let who = writer(&server, &headers)?;
+    may_reach_set(&server, &who, &id)?;
     let made = server
         .store
         .with(|db| {

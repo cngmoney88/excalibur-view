@@ -87,17 +87,27 @@ pub async fn list(
     headers: HeaderMap,
     Query(everything): Query<Everything>,
 ) -> Answer<Json<Vec<Project>>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    let everybodys = who.role == hub::Role::Admin;
     let list = server
         .store
         .with(|db| {
+            // A project with nobody named on it is everybody's, which is how
+            // every server worked before this and how most shops want it.
+            // Once one name goes on, it is for the people named on it.
+            // Administrators see the lot: somebody has to be able to find a
+            // job that the only person on it left the company over.
             let mut statement = db.prepare(&format!(
                 "SELECT {PROJECT_COLUMNS} FROM projects p
-                 WHERE ?1 OR p.archived IS NULL
+                 WHERE (?1 OR p.archived IS NULL)
+                   AND (?2
+                        OR NOT EXISTS (SELECT 1 FROM project_people m WHERE m.project = p.id)
+                        OR EXISTS (SELECT 1 FROM project_people m
+                                   WHERE m.project = p.id AND m.person = ?3))
                  ORDER BY p.number"
             ))?;
             let rows = statement
-                .query_map(params![everything.all], project_from_row)?
+                .query_map(params![everything.all, everybodys, who.id], project_from_row)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })
@@ -162,13 +172,101 @@ pub async fn one(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<Project>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    // Checked here as well as in the listing, and with the same rule. A
+    // project somebody cannot see in a list but can open by guessing its id
+    // is not access control, it is a tidier list -- and the answer is the
+    // same "not found" either way, so nobody learns a project exists by
+    // being refused it.
+    let mine = server
+        .store
+        .may_see(&id, &who.id, who.role == hub::Role::Admin)
+        .map_err(|e| Denied::broke("read that project", e))?;
+    if !mine {
+        return Err(Denied::missing("project"));
+    }
     server
         .store
         .with(|db| Ok(read_project(db, &id)?))
         .map_err(|e| Denied::broke("read that project", e))?
         .map(Json)
         .ok_or_else(|| Denied::missing("project"))
+}
+
+/// `GET /projects/:id/people` — who is on it. Empty means everybody.
+pub async fn who_is_on(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Answer<Json<Vec<String>>> {
+    let who = caller(&server, &headers)?;
+    let mine = server
+        .store
+        .may_see(&id, &who.id, who.role == hub::Role::Admin)
+        .map_err(|e| Denied::broke("read that project", e))?;
+    if !mine {
+        return Err(Denied::missing("project"));
+    }
+    server
+        .store
+        .people_on(&id)
+        .map(Json)
+        .map_err(|e| Denied::broke("read who is on that project", e))
+}
+
+#[derive(Deserialize)]
+pub struct WhoOnProject {
+    pub person: String,
+    /// True puts them on, false takes them off.
+    #[serde(default = "yes")]
+    pub on: bool,
+}
+
+/// `POST /projects/:id/people` — put somebody on a job, or take them off.
+///
+/// Administrators only. Deciding who sees which job is the sort of thing that
+/// should not be doable by whoever happens to be on the job already.
+pub async fn change_who_is_on(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<WhoOnProject>,
+) -> Answer<Json<Vec<String>>> {
+    let who = crate::api::administrator(&server, &headers)?;
+    let person = body.person.trim().to_string();
+    if person.is_empty() {
+        return Err(Denied::wrong("Say who."));
+    }
+    if body.on {
+        server
+            .store
+            .put_on_project(&id, &person, &who.id)
+            .map_err(|e| Denied::broke("put somebody on that project", e))?;
+    } else {
+        server
+            .store
+            .take_off_project(&id, &person)
+            .map_err(|e| Denied::broke("take somebody off that project", e))?;
+    }
+    let now = server
+        .store
+        .people_on(&id)
+        .map_err(|e| Denied::broke("read who is on that project", e))?;
+    // Worth a line, because this decides who can see a job and somebody will
+    // one day ask when a project stopped appearing for them.
+    let _ = server.store.audit(
+        &crate::audit::Entry::new(
+            if body.on { "project_person_added" } else { "project_person_removed" },
+            &who.email,
+        )
+        .by(&who.id)
+        .about(id.clone())
+        .saying(person.clone()),
+    );
+    if now.is_empty() {
+        tracing::info!("{id} has nobody named on it now, so it is everybody's again");
+    }
+    Ok(Json(now))
 }
 
 #[derive(Deserialize)]
@@ -188,7 +286,8 @@ pub async fn archive(
     Path(id): Path<String>,
     Json(body): Json<Archiving>,
 ) -> Answer<Json<Project>> {
-    writer(&server, &headers)?;
+    let who = writer(&server, &headers)?;
+    crate::api::may_reach_project(&server, &who, &id)?;
     server
         .store
         .with(|db| {
@@ -230,7 +329,8 @@ pub async fn stamp(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Answer<Json<Stamp>> {
-    caller(&server, &headers)?;
+    let who = caller(&server, &headers)?;
+    crate::api::may_reach_project(&server, &who, &id)?;
     server
         .store
         .with(|db| stamp_of(db, &id))

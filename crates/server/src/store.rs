@@ -45,6 +45,24 @@ CREATE TABLE IF NOT EXISTS projects (
     created     TEXT NOT NULL
 );
 
+-- Who is on a project, when a project has been given a list at all.
+--
+-- The rule this table exists to make possible: **a project with nobody on it
+-- is everybody's**. One shop is one room until somebody says otherwise, which
+-- is how every server has worked until now and how most shops want it. The
+-- moment one name goes on a project, that project is for the people named on
+-- it, and it stops being listed for anybody else.
+--
+-- Administrators see everything regardless. Somebody has to be able to find a
+-- job that the only person on it left the company over.
+CREATE TABLE IF NOT EXISTS project_people (
+    project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    person      TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+    added       TEXT NOT NULL,
+    added_by    TEXT NOT NULL,
+    PRIMARY KEY (project, person)
+);
+
 CREATE TABLE IF NOT EXISTS sets (
     id          TEXT PRIMARY KEY,
     project     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -247,6 +265,73 @@ impl Store {
 
     pub fn blob_exists(&self, digest: &str) -> bool {
         is_digest(digest) && self.blob_path(digest).exists()
+    }
+
+    // ---- who is on a project ---------------------------------------------
+
+    /// Everybody named on a project. Empty means nobody has been named, which
+    /// means it is everybody's.
+    pub fn people_on(&self, project: &str) -> Result<Vec<String>> {
+        self.with(|db| {
+            let mut statement =
+                db.prepare("SELECT person FROM project_people WHERE project = ?1 ORDER BY added")?;
+            let rows = statement.query_map(params![project], |r| r.get::<_, String>(0))?;
+            Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+        })
+    }
+
+    /// Puts somebody on a project. Doing it twice is not an error.
+    pub fn put_on_project(&self, project: &str, person: &str, by: &str) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "INSERT INTO project_people (project, person, added, added_by)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(project, person) DO NOTHING",
+                params![project, person, crate::audit::now(), by],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Takes somebody off. Taking the last person off makes the project
+    /// everybody's again, which is the same rule read backwards and is worth
+    /// knowing before doing it.
+    pub fn take_off_project(&self, project: &str, person: &str) -> Result<()> {
+        self.with(|db| {
+            db.execute(
+                "DELETE FROM project_people WHERE project = ?1 AND person = ?2",
+                params![project, person],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Whether this person may see this project.
+    ///
+    /// The one place the rule lives, so a listing and a direct fetch can
+    /// never disagree -- which is the failure that matters, because a project
+    /// somebody cannot see in a list but can open by guessing its id is not
+    /// access control, it is a tidier list.
+    pub fn may_see(&self, project: &str, person: &str, is_admin: bool) -> Result<bool> {
+        if is_admin {
+            return Ok(true);
+        }
+        self.with(|db| {
+            let named: i64 = db.query_row(
+                "SELECT COUNT(*) FROM project_people WHERE project = ?1",
+                params![project],
+                |r| r.get(0),
+            )?;
+            if named == 0 {
+                return Ok(true);
+            }
+            let mine: i64 = db.query_row(
+                "SELECT COUNT(*) FROM project_people WHERE project = ?1 AND person = ?2",
+                params![project, person],
+                |r| r.get(0),
+            )?;
+            Ok(mine > 0)
+        })
     }
 
     // ---- settings --------------------------------------------------------

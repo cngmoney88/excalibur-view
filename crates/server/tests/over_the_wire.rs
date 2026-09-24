@@ -1758,3 +1758,160 @@ fn a_refused_sign_in_is_recorded_even_when_the_address_is_unknown() {
     assert!(text.contains("no account with that address"), "{text}");
     assert!(text.contains("nobody@example.com"), "{text}");
 }
+
+// ---- who can see which job ------------------------------------------------
+
+/// A shop is one room until somebody says otherwise.
+///
+/// That is how every server has worked and how most shops want it, so the
+/// tests that matter most here are the ones about *not* changing anything
+/// for a shop that never uses this.
+#[test]
+fn a_project_with_nobody_named_on_it_is_everybodys() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    assert!(boss.who_is_on(&project.id).expect("who").is_empty());
+
+    let seen = hand.projects().expect("list");
+    assert!(
+        seen.iter().any(|p| p.id == project.id),
+        "a project nobody was named on should be everybody's"
+    );
+    assert!(hand.project(&project.id).is_ok(), "and openable");
+}
+
+#[test]
+fn naming_one_person_takes_it_away_from_everybody_else() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let boss_id = boss.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &boss_id, true).expect("put on");
+
+    let seen = hand.projects().expect("list");
+    assert!(
+        !seen.iter().any(|p| p.id == project.id),
+        "somebody not on the job should not see it listed"
+    );
+}
+
+#[test]
+fn a_job_somebody_cannot_see_cannot_be_opened_by_guessing_its_id() {
+    // The failure that matters. Filtering a list and leaving the direct
+    // fetch open is not access control, it is a tidier list -- and the id is
+    // in every link anybody was ever sent.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let boss_id = boss.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &boss_id, true).expect("put on");
+
+    assert!(hand.project(&project.id).is_err(), "opened by id anyway");
+    assert!(hand.sets(&project.id).is_err(), "its sets were listed anyway");
+    assert!(hand.who_is_on(&project.id).is_err(), "it said who was on it");
+}
+
+#[test]
+fn the_drawings_on_a_job_go_with_it() {
+    // A set is reached by its own id, not the project's, so the project
+    // filter alone would leave every drawing openable by anybody.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let set = boss
+        .upload_set(&project.id, "Issue for bid", "S-101.pdf", &a_drawing())
+        .expect("upload");
+
+    // Everybody's, so far.
+    assert!(hand.set(&set.id).is_ok());
+    assert!(hand.sheets(&set.id).is_ok());
+    assert!(hand.markups(&set.id, 0).is_ok());
+
+    let boss_id = boss.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &boss_id, true).expect("put on");
+
+    assert!(hand.set(&set.id).is_err(), "the set was still readable");
+    assert!(hand.sheets(&set.id).is_err(), "its sheets were still readable");
+    assert!(hand.markups(&set.id, 0).is_err(), "its markups were still readable");
+    assert!(hand.takeoff(&set.id).is_err(), "its takeoff was still readable");
+}
+
+#[test]
+fn being_put_on_a_job_gives_it_back() {
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let boss_id = boss.me().expect("me").id;
+    let hand_id = hand.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &boss_id, true).expect("put on");
+    assert!(hand.project(&project.id).is_err());
+
+    boss.change_who_is_on(&project.id, &hand_id, true).expect("put on");
+    assert!(hand.project(&project.id).is_ok(), "they were put on the job");
+}
+
+#[test]
+fn taking_the_last_person_off_makes_it_everybodys_again() {
+    // The rule read backwards, and worth knowing before doing it: an empty
+    // list does not mean "nobody", it means "no list".
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let boss_id = boss.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &boss_id, true).expect("put on");
+    assert!(hand.project(&project.id).is_err());
+
+    boss.change_who_is_on(&project.id, &boss_id, false).expect("take off");
+    assert!(
+        hand.project(&project.id).is_ok(),
+        "with nobody named it is everybody's again"
+    );
+}
+
+#[test]
+fn an_administrator_sees_a_job_they_are_not_on() {
+    // Somebody has to be able to find a job that the only person on it left
+    // the company over.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let hand_id = hand.me().expect("me").id;
+    boss.change_who_is_on(&project.id, &hand_id, true).expect("put on");
+
+    assert!(
+        boss.project(&project.id).is_ok(),
+        "an administrator was shut out of a job on their own server"
+    );
+    assert!(boss.projects().expect("list").iter().any(|p| p.id == project.id));
+}
+
+#[test]
+fn only_an_administrator_decides_who_is_on_a_job() {
+    // Not whoever happens to be on it already: that is how a list quietly
+    // becomes a club.
+    let server = start();
+    let boss = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let hand = signed_in(&server, "est@mesafab.com", "camber-weld-joist-plate-19");
+
+    let project = boss.create_project("6742", "Fox West").expect("project");
+    let hand_id = hand.me().expect("me").id;
+    assert!(
+        hand.change_who_is_on(&project.id, &hand_id, true).is_err(),
+        "an estimator put themselves on a job"
+    );
+}
