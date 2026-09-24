@@ -149,7 +149,7 @@ fn explain(trouble: &str) -> String {
     let lower = trouble.to_lowercase();
     if lower.contains("in use") || lower.contains("addrinuse") {
         return format!(
-            "Something is already using port {}. That is usually a Excalibur View server \
+            "Something is already using port {}. That is usually an Excalibur View server \
              already running on this computer — if it is, it is the one everybody should be \
              using, and there is nothing to set up. Otherwise pick another port.",
             hyperview_server::config::DEFAULT_PORT

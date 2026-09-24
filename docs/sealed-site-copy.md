@@ -61,9 +61,9 @@ seat and $200 a year now.
 
 Somewhere near the buy button:
 
-> A sealed office never fetches its own licence renewal, because it never
+> A sealed office never fetches its own license renewal, because it never
 > reaches out — that is the edition working as intended. Buy seats and the
-> new licence comes to you as a file.
+> new license comes to you as a file.
 
 It is written up in full in `docs/sealed.md` under "How do we add seats, or
 renew?". Better a customer reads it before buying than finds out in a

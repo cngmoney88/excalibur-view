@@ -1,4 +1,4 @@
-# Getting a licence back, without asking anybody
+# Getting a license back, without asking anybody
 
 Somebody loses the email with their `.evlicense` in it. Today that means
 reissuing it by hand, which means they wait on Creede's inbox — over a weekend,
@@ -10,13 +10,13 @@ nothing running anywhere.
 
 ## What the customer has
 
-Not the licence id — that was in the file they lost. What they still have is the
+Not the license id — that was in the file they lost. What they still have is the
 **Square receipt**, in their own inbox, with a payment id on it. It is long,
 random, and theirs.
 
 ## How it works
 
-`square.py` already publishes every licence under `SHA-256(id)`, which is how a
+`square.py` already publishes every license under `SHA-256(id)`, which is how a
 server fetches its own renewal. It now publishes a second copy under
 `SHA-256("receipt:" + payment id)`.
 
@@ -39,7 +39,7 @@ do when it does not work.
 ```html
 <label for="receipt">The payment ID from your Square receipt</label>
 <input id="receipt" autocomplete="off" spellcheck="false">
-<button id="fetch">Get my licence</button>
+<button id="fetch">Get my license</button>
 <p id="said" role="status"></p>
 
 <script>
@@ -53,7 +53,7 @@ document.getElementById("fetch").addEventListener("click", async () => {
   const name = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, "0")).join("");
   const response = await fetch(`/f/${name}.evlicense`, { cache: "no-store" });
   if (!response.ok) {
-    said.textContent = "No licence at that ID. Check you copied the whole thing, "
+    said.textContent = "No license at that ID. Check you copied the whole thing, "
       + "or email hello@excaliburct.com and we will sort it out.";
     return;
   }
@@ -63,7 +63,7 @@ document.getElementById("fetch").addEventListener("click", async () => {
   link.download = "excalibur-view.evlicense";
   link.click();
   URL.revokeObjectURL(link.href);
-  said.textContent = "Downloaded. Double-click it, or drop it on the Licence screen.";
+  said.textContent = "Downloaded. Double-click it, or drop it on the License screen.";
 });
 </script>
 ```
@@ -73,8 +73,8 @@ document.getElementById("fetch").addEventListener("click", async () => {
 ## What it does not do
 
 It does not prove who is asking. Anybody holding that payment id can fetch that
-licence — which is the same as anybody holding the email it was sent in. A
-licence is not a secret worth more than the receipt that bought it, and the
+license — which is the same as anybody holding the email it was sent in. A
+license is not a secret worth more than the receipt that bought it, and the
 alternative is an account system, which is a service to run, a password to
 reset, and a seat phoning home. That trade is written down in the punch list
 and this is the cheap half of it.

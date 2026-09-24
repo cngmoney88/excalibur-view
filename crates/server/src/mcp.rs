@@ -253,7 +253,7 @@ fn call(server: &crate::api::Server, headers: &HeaderMap, body: &Value) -> Resul
     // person whose token it is would get, and nothing else.
     crate::api::mcp_caller(server, headers)
         .map_err(|_| Trouble::refused(
-            "this server does not know who is asking. Put a Excalibur View access token \
+            "this server does not know who is asking. Put an Excalibur View access token \
              in an Authorization: Bearer header.",
         ))?;
 
