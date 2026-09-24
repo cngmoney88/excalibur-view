@@ -31,6 +31,8 @@ pub struct Server {
     /// How many wrong guesses this server has sat through, and from whom.
     /// Empty on every start, which is deliberate -- see `patience`.
     pub patience: crate::patience::Patience,
+    /// The shop's own tunnel, when they have turned one on.
+    pub tunnel: crate::tunnel::Tunnel,
 }
 
 impl Server {
@@ -40,6 +42,7 @@ impl Server {
             config,
             updates: crate::updates::Watch::default(),
             patience: crate::patience::Patience::default(),
+            tunnel: crate::tunnel::Tunnel::default(),
         };
         crate::license::begin(&server);
         server
@@ -214,6 +217,7 @@ pub fn router(server: Shared) -> Router {
         .route("/projects/:id/markuplist", get(project_markuplist))
         .route("/admin/updates", get(read_updates).post(change_updates))
         .route("/admin/fleet", get(read_fleet).post(change_fleet))
+        .route("/admin/remote", get(read_remote).post(change_remote).delete(turn_remote_off))
         .route("/projects", get(crate::projects::list).post(crate::projects::create))
         .route("/projects/:id", get(crate::projects::one))
         .route("/projects/:id/archive", post(crate::projects::archive))
@@ -338,6 +342,14 @@ async fn health(State(server): State<Shared>) -> Json<Health> {
         name: installation_name(&server),
         claimed,
         joining: if claimed { how_joining(&server).0 } else { String::new() },
+        // Only when it has been checked from the outside. Handing a seat an
+        // address that does not answer is worse than handing it nothing: it
+        // would try the broken one in a truck and conclude the server is
+        // down.
+        reachable_at: match server.tunnel.state_now() {
+            crate::tunnel::State::On { address } => Some(address),
+            _ => None,
+        },
     })
 }
 
@@ -671,6 +683,87 @@ async fn read_fleet(
         on: crate::fleet::fleet_is_on(&server),
         key: None,
     }))
+}
+
+/// What the Office panel shows about reaching this server from a jobsite.
+#[derive(serde::Serialize)]
+pub struct Remote {
+    #[serde(flatten)]
+    pub state: crate::tunnel::State,
+    /// The sentence to put on screen. Worked out here so every client says
+    /// the same thing and nobody has to keep a copy of the wording.
+    pub said: String,
+    /// The hostname held, if one is. The token is never sent back: it is a
+    /// secret this server keeps, and a screen that can show it is a screen
+    /// somebody can photograph.
+    pub hostname: Option<String>,
+}
+
+fn remote_now(server: &Server) -> Remote {
+    let state = server.tunnel.state_now();
+    Remote {
+        said: state.in_words(),
+        hostname: crate::tunnel::held(&server.store).map(|(_, host)| host),
+        state,
+    }
+}
+
+async fn read_remote(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<Remote>> {
+    administrator(&server, &headers)?;
+    Ok(Json(remote_now(&server)))
+}
+
+#[derive(Deserialize)]
+pub struct ChangeRemote {
+    pub token: String,
+    pub hostname: String,
+}
+
+async fn change_remote(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<ChangeRemote>,
+) -> Answer<Json<Remote>> {
+    let who = administrator(&server, &headers)?;
+    // A sealed server refuses before anything is stored, so a token never
+    // even lands on disk somewhere it could not be used.
+    if hub::sealed::is_sealed() {
+        return Err(Denied::wrong(
+            "This server is sealed, so it makes no outward connections at all \u{2014} including this one. That is what the Sealed edition is.",
+        ));
+    }
+    let token = crate::tunnel::a_token(&body.token).map_err(|e| Denied::wrong(e))?;
+    let hostname =
+        crate::tunnel::a_hostname(&body.hostname).map_err(|e| Denied::wrong(e))?;
+    crate::tunnel::remember(&server.store, &token, &hostname)
+        .map_err(|e| Denied::broke("keep the tunnel settings", e))?;
+    // Whatever was running before belongs to the old token.
+    server.tunnel.stop();
+    crate::tunnel::start(&server.tunnel, &server.config.data, token, hostname.clone());
+    // Recorded without the token. An audit line is read by people and kept
+    // forever; the secret is not part of what happened.
+    let _ = server.store.audit(
+        &crate::audit::Entry::new("remote_access_on", &who.email)
+            .by(&who.id)
+            .about(hostname.clone()),
+    );
+    tracing::info!("{} turned remote access on at {hostname}", who.email);
+    Ok(Json(remote_now(&server)))
+}
+
+async fn turn_remote_off(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+) -> Answer<Json<Remote>> {
+    let who = administrator(&server, &headers)?;
+    server.tunnel.stop();
+    crate::tunnel::forget(&server.store)
+        .map_err(|e| Denied::broke("forget the tunnel settings", e))?;
+    let _ = server.store.audit(
+        &crate::audit::Entry::new("remote_access_off", &who.email).by(&who.id),
+    );
+    tracing::info!("{} turned remote access off", who.email);
+    Ok(Json(remote_now(&server)))
 }
 
 #[derive(Deserialize)]

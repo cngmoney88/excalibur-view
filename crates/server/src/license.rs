@@ -487,7 +487,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let config = Config { data: dir.clone(), ..Config::default() };
         let store = Store::open(&config.database(), &config.blobs()).unwrap();
-        (Server { store, config, updates: Default::default(), patience: Default::default() }, dir)
+        (
+            Server {
+                store,
+                config,
+                updates: Default::default(),
+                patience: Default::default(),
+                tunnel: Default::default(),
+            },
+            dir,
+        )
     }
 
     const FOREVER_THROUGH: &str = hub::license::FOREVER;

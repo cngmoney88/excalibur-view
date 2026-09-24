@@ -44,6 +44,9 @@ pub enum Ask {
     Resume {
         base: String,
         token: String,
+        /// Where the same server answers from outside the shop, if it ever
+        /// said. Tried only when the shop's own address does not answer.
+        reachable_at: Option<String>,
     },
     SignOut,
     Projects,
@@ -174,6 +177,9 @@ pub enum Told {
         base: String,
         name: String,
         version: String,
+        /// Where the same server answers from outside the shop, when it has
+        /// turned remote access on and checked that the address works.
+        reachable_at: Option<String>,
         /// False on a server nobody has set up yet, which is the one to offer
         /// to set up rather than to ask somebody to sign in to.
         claimed: bool,
@@ -335,6 +341,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                     version: health.version,
                                     claimed: health.claimed,
                                     joining: health.joining,
+                                    reachable_at: health.reachable_at,
                                 },
                             ),
                             Err(e) => say(&told, Told::Trouble(e.to_string())),
@@ -395,13 +402,44 @@ pub fn start(repaint: egui::Context) -> Link {
                         }
                     }
 
-                    Ask::Resume { base, token } => {
-                        let fresh = Client::new(&base).with_token(&token);
-                        // A kept token is checked before it is trusted, so a
-                        // week-old one fails here rather than in the middle of
-                        // saving somebody's takeoff.
-                        match fresh.me() {
-                            Ok(user) => {
+                    Ask::Resume { base, token, reachable_at } => {
+                        // The shop's own address first, always: it is faster,
+                        // it is on their own network, and the drawings never
+                        // leave the building. The public one is what a truck
+                        // falls back to, not what an office uses.
+                        let mut tried = vec![base.clone()];
+                        if let Some(outside) = reachable_at {
+                            let outside = if outside.contains("://") {
+                                outside
+                            } else {
+                                format!("https://{outside}")
+                            };
+                            if outside != base {
+                                tried.push(outside);
+                            }
+                        }
+                        let mut resumed = None;
+                        for address in &tried {
+                            let fresh = Client::new(address).with_token(&token);
+                            // A kept token is checked before it is trusted,
+                            // so a week-old one fails here rather than in the
+                            // middle of saving somebody's takeoff.
+                            if let Ok(user) = fresh.me() {
+                                resumed = Some((fresh, user, address.clone()));
+                                break;
+                            }
+                        }
+                        match resumed {
+                            Some((fresh, user, address)) => {
+                                if address != base {
+                                    // Worth a line in the log: somebody
+                                    // wondering why the office feels slow
+                                    // should be able to find out that they
+                                    // are coming in from outside.
+                                    eprintln!(
+                                        "the shop network did not answer; reached {address} instead"
+                                    );
+                                }
                                 let session = Session {
                                     token,
                                     expires_in: 0,
@@ -411,7 +449,7 @@ pub fn start(repaint: egui::Context) -> Link {
                                 client = Some(fresh);
                                 say(&told, Told::SignedIn(Box::new(session)));
                             }
-                            Err(_) => say(&told, Told::SignedOut),
+                            None => say(&told, Told::SignedOut),
                         }
                     }
 
@@ -1329,6 +1367,14 @@ pub struct Remembered {
     pub token: String,
     pub name: String,
     pub user: String,
+    /// Where the same server answers from outside the shop, when it told us.
+    ///
+    /// This is the whole of the jobsite feature as a seat sees it: somebody
+    /// who used Excalibur View in the office opens it in a truck and it
+    /// works. They never type an address, because the server mentioned this
+    /// one while they were on its own network.
+    #[serde(default)]
+    pub reachable_at: Option<String>,
 }
 
 /// Who is signed in, as the window sees it.
@@ -1337,6 +1383,10 @@ pub struct Standing {
     pub base: String,
     /// What the company calls this installation.
     pub name: String,
+    /// Where this server also answers from outside the shop, when it has
+    /// said so. Learned from the health answer and kept with the rest of
+    /// what a seat remembers about its server.
+    pub reachable_at: Option<String>,
     pub who: Option<Arc<User>>,
     pub projects: Vec<Project>,
     pub sets: Vec<DrawingSet>,
@@ -1394,6 +1444,7 @@ mod tests {
             token: "abc123".into(),
             name: "Mesa Fab".into(),
             user: "Creede".into(),
+            reachable_at: None,
         };
         let text = serde_json::to_string(&remembered).unwrap();
         assert!(!text.contains("password"));
@@ -1401,6 +1452,39 @@ mod tests {
         assert_eq!(back, remembered);
     }
 
+
+    #[test]
+    fn a_seat_only_falls_back_to_an_address_the_server_gave_it() {
+        // Nobody types this. A seat learns the outside address while it is on
+        // the inside, from the server's own health answer, or it has none --
+        // which is the ordinary case and not a problem.
+        let plain = Remembered {
+            base: "http://192.168.1.20:8714".into(),
+            token: "abc123".into(),
+            name: "Mesa Fab".into(),
+            user: "Creede".into(),
+            reachable_at: None,
+        };
+        assert!(plain.reachable_at.is_none());
+
+        // And one that was given one keeps it across a restart, or the
+        // estimator in the truck is back to typing addresses.
+        let away = Remembered {
+            reachable_at: Some("drawings.mesafab.com".into()),
+            ..plain.clone()
+        };
+        let back: Remembered = serde_json::from_str(&serde_json::to_string(&away).unwrap()).unwrap();
+        assert_eq!(back.reachable_at.as_deref(), Some("drawings.mesafab.com"));
+    }
+
+    #[test]
+    fn an_older_server_that_says_nothing_about_an_outside_address_still_reads() {
+        // Most servers have not turned remote access on, and older ones do
+        // not know the field exists. Neither may stop a seat signing in.
+        let text = r#"{"base":"http://192.168.1.20:8714","token":"t","name":"Mesa Fab","user":"Creede"}"#;
+        let remembered: Remembered = serde_json::from_str(text).unwrap();
+        assert!(remembered.reachable_at.is_none());
+    }
     #[test]
     fn nobody_is_signed_in_to_begin_with() {
         assert!(!Standing::default().signed_in());

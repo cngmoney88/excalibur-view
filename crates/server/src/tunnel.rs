@@ -131,6 +131,9 @@ pub struct Tunnel {
 #[derive(Default)]
 struct Inner {
     state: Option<State>,
+    /// Whether an administrator wants it on. Turning it off has to stop the
+    /// restart loop as well as the process, or it comes straight back.
+    wanted: bool,
     /// The running connector, so it can be stopped and so a restart knows
     /// whether one is already up.
     child: Option<std::process::Child>,
@@ -161,6 +164,25 @@ impl Tunnel {
         }
     }
 
+    /// Keeps hold of the running connector, so stopping actually stops it.
+    fn hold(&self, child: std::process::Child) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.child = Some(child);
+        }
+    }
+
+    fn want(&self) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.wanted = true;
+        }
+    }
+
+    /// False once somebody has turned it off, which is how the restart loop
+    /// knows to stop rather than fighting them.
+    fn wanted(&self) -> bool {
+        self.inner.lock().map(|i| i.wanted).unwrap_or(false)
+    }
+
     /// True when a connector of ours is running right now.
     pub fn running(&self) -> bool {
         let Ok(mut inner) = self.inner.lock() else {
@@ -175,6 +197,7 @@ impl Tunnel {
     /// Stops the connector. Safe to call when nothing is running.
     pub fn stop(&self) {
         if let Ok(mut inner) = self.inner.lock() {
+            inner.wanted = false;
             if let Some(mut child) = inner.child.take() {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -182,6 +205,130 @@ impl Tunnel {
             inner.state = Some(State::Off);
         }
     }
+}
+
+/// Starts the connector, in the background, and keeps it up.
+///
+/// Fetching can take a while on a slow line, so none of this happens on the
+/// request that turned it on: that returns `Starting` and the panel watches.
+///
+/// The restart loop is deliberately patient rather than eager. A connector
+/// that cannot start -- a revoked token, a tunnel deleted in the dashboard --
+/// must not turn into a machine hammering Cloudflare all night, so the wait
+/// between goes grows and the reason stays on screen.
+pub fn start(tunnel: &Tunnel, data: &Path, token: String, hostname: String) {
+    if hub::sealed::is_sealed() {
+        tunnel.set(State::Sealed);
+        return;
+    }
+    tunnel.set(State::Starting);
+    tunnel.want();
+    let tunnel = tunnel.clone();
+    let data = data.to_path_buf();
+    std::thread::spawn(move || {
+        let connector = match fetch_connector(&data, download) {
+            Ok(path) => path,
+            Err(why) => {
+                tunnel.set(State::Trouble { why });
+                return;
+            }
+        };
+        let mut waited = 2u64;
+        while tunnel.wanted() {
+            match run_once(&connector, &token) {
+                Ok(child) => {
+                    tunnel.hold(child);
+                    // A moment before telling anybody it is up: a revoked
+                    // token fails immediately, and "On" followed by "Trouble"
+                    // two seconds later is worse than a slightly slower "On".
+                    std::thread::sleep(std::time::Duration::from_secs(5));
+                    if tunnel.running() {
+                        tunnel.set(match reachable(&hostname) {
+                            Ok(()) => State::On { address: hostname.clone() },
+                            Err(why) => State::Unreachable {
+                                address: hostname.clone(),
+                                why,
+                            },
+                        });
+                        waited = 2;
+                        // Sit here while it runs. Checked rather than waited
+                        // on, so turning it off does not have to wait for the
+                        // connector to feel like stopping.
+                        while tunnel.running() && tunnel.wanted() {
+                            std::thread::sleep(std::time::Duration::from_secs(2));
+                        }
+                    } else {
+                        tunnel.set(State::Trouble {
+                            why: "the connector stopped as soon as it started. \
+                                  The token may have been revoked in Cloudflare."
+                                .into(),
+                        });
+                    }
+                }
+                Err(why) => tunnel.set(State::Trouble { why }),
+            }
+            if !tunnel.wanted() {
+                return;
+            }
+            // Patient rather than eager. A token that has been revoked must
+            // not turn this into a machine hammering Cloudflare all night.
+            std::thread::sleep(std::time::Duration::from_secs(waited));
+            waited = (waited * 2).min(300);
+        }
+    });
+}
+
+fn run_once(connector: &Path, token: &str) -> Result<std::process::Child, String> {
+    std::process::Command::new(connector)
+        .args(["tunnel", "--no-autoupdate", "run", "--token", token])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("the connector would not start: {e}"))
+}
+
+/// Asks the public internet for this server, the way a seat in a truck will.
+///
+/// Worth doing because a connector that started is not the same as an address
+/// that works: the hostname has to point at this tunnel, and that is set in
+/// Cloudflare's dashboard rather than here. An administrator who believes
+/// remote access works and finds out otherwise in a truck has been failed
+/// twice.
+fn reachable(hostname: &str) -> Result<(), String> {
+    let url = format!("https://{hostname}/health");
+    hub::web::outbound("Checking the tunnel answers", &url)?;
+    let agent = hub::web::agent()
+        .timeout(std::time::Duration::from_secs(20))
+        .build();
+    let response = agent.get(&url).call().map_err(|e| format!("{e}"))?;
+    let health: serde_json::Value = response
+        .into_json()
+        .map_err(|e| format!("it answered, but not the way this server would ({e})"))?;
+    if health.get("api_version").is_some() {
+        Ok(())
+    } else {
+        Err("something answered at that address, but it is not this server".into())
+    }
+}
+
+fn download(url: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    /// Bigger than the connector has ever been, and small enough that a
+    /// server pointed at something enormous does not fill its disk.
+    const LARGEST: u64 = 200 * 1024 * 1024;
+    hub::web::outbound("Fetching the tunnel connector", url)?;
+    let agent = hub::web::agent()
+        .timeout(std::time::Duration::from_secs(600))
+        .build();
+    let response = agent.get(url).call().map_err(|e| format!("{e}"))?;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(LARGEST)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("the download stopped part way: {e}"))?;
+    Ok(bytes)
 }
 
 /// Whether a hostname is one we are willing to hand to a seat.

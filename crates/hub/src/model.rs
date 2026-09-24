@@ -362,6 +362,15 @@ pub struct Health {
     /// Absent on an older server, which means an administrator adds people.
     #[serde(default)]
     pub joining: String,
+    /// Where this server can also be reached from outside the shop, when the
+    /// company has turned remote access on and the address has been checked.
+    ///
+    /// A seat that signs in on the shop network keeps this, and uses it when
+    /// the broadcast finds nothing -- which is what being in a truck looks
+    /// like. Absent on an older server and on every server that has not
+    /// turned it on, which is most of them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachable_at: Option<String>,
 }
 
 fn yes() -> bool {

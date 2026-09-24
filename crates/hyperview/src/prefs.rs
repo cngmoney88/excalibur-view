@@ -248,6 +248,7 @@ mod tests {
             token: "a-session-token".into(),
             name: "Mesa Fab".into(),
             user: "Creede".into(),
+            reachable_at: None,
         };
         let text = serde_json::to_string(&p).unwrap();
         assert!(text.contains("a-session-token"));
