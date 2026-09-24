@@ -408,6 +408,38 @@ impl Client {
         })))
     }
 
+    // ---- inviting one person ---------------------------------------------
+
+    /// Makes one invitation. Administrators only. Nothing is emailed: what
+    /// comes back is the code, to send however you already talk to them.
+    pub fn invite(
+        &self,
+        email: &str,
+        name: &str,
+        role: &str,
+        days: Option<u32>,
+    ) -> Answer<crate::Invitation> {
+        Self::read(self.post("/admin/invites").send_json(serde_json::json!({
+            "email": email,
+            "name": name,
+            "role": role,
+            "days": days,
+        })))
+    }
+
+    /// The invitations nobody has used yet.
+    pub fn invites(&self) -> Answer<Vec<crate::Invitation>> {
+        Self::read(self.get("/admin/invites").call())
+    }
+
+    /// Throws one away before it is used.
+    pub fn drop_invite(&self, code: &str) -> Answer<Vec<crate::Invitation>> {
+        Self::read(
+            Attempt::once(self.sign(self.agent.delete(&self.url(&format!("/admin/invites/{code}")))))
+                .call(),
+        )
+    }
+
     /// How this server keeps up to date. Administrators only.
     pub fn update_settings(&self) -> Answer<crate::UpdateSettings> {
         Self::read(self.get("/admin/updates").call())
