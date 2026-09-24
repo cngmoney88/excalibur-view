@@ -176,7 +176,12 @@ class Folder:
 
     def __init__(self, path):
         self.path = os.path.abspath(path)
-        self.key = os.path.join(self.path, "hyperview-signing.key")
+        # A licence is signed with the key made for licences alone when it is
+        # here, so the release key only ever signs releases. Licences signed
+        # with the release key before 0.6.6 still check out: the server trusts
+        # both for licences, and only the release key for anything it runs.
+        licence_key = os.path.join(self.path, "licence-signing.key")
+        self.key = licence_key if os.path.exists(licence_key) else os.path.join(self.path, "hyperview-signing.key")
         self.token_file = a_file_called(self.path, "square-token")
         self.links_file = os.path.join(self.path, "square-links.json")
         self.issued_file = os.path.join(self.path, "square-orders.json")
@@ -820,17 +825,29 @@ def push_the_feed(site_repo, what, quiet=False, say=print):
     was = os.getcwd()
     try:
         os.chdir(site_repo)
-        if not subprocess.run(["git", "status", "--porcelain"],
-                              capture_output=True, text=True).stdout.strip():
+        # Someone else may have pushed to the site since (a page change, the
+        # other half of this). Taken first, so our push is not refused.
+        subprocess.run(["git", "pull", "-q", "--rebase", "--autostash"], capture_output=True, text=True)
+        committed = False
+        if subprocess.run(["git", "status", "--porcelain", "--", "static/f"],
+                          capture_output=True, text=True).stdout.strip():
+            subprocess.run(["git", "add", "-A", "--", "static/f"], check=True,
+                           capture_output=True)
+            # Deliberately says nothing about who bought what. A commit message
+            # is forever and this one is about a customer.
+            subprocess.run(["git", "commit", "-q", "-m", what], check=True,
+                           capture_output=True)
+            committed = True
+        # Pushed whenever this checkout is ahead of GitHub, not only when
+        # something was committed just now: a push that failed last time left
+        # a commit here that nothing would otherwise ever send.
+        counted = subprocess.run(["git", "rev-list", "--count", "@{u}..HEAD"],
+                                 capture_output=True, text=True)
+        ahead = int(counted.stdout.strip()) if counted.returncode == 0 and counted.stdout.strip().isdigit() else 0
+        if not committed and not ahead:
             if not quiet:
                 say("    nothing to push - the feed was already up to date")
             return False
-        subprocess.run(["git", "add", "-A", "--", "static/f"], check=True,
-                       capture_output=True)
-        # Deliberately says nothing about who bought what. A commit message is
-        # forever and this one is about a customer.
-        subprocess.run(["git", "commit", "-q", "-m", what], check=True,
-                       capture_output=True)
         pushed = subprocess.run(["git", "push", "-q"], capture_output=True, text=True)
         if pushed.returncode != 0:
             raise SystemExit("could not push the licence feed: " + (pushed.stderr or "").strip())
@@ -958,6 +975,7 @@ def cmd_orders(a):
 
 
 def cmd_issue(a):
+    refuse_if_the_cloud_is_issuing(a)
     folder = Folder(a.folder)
     sales = paid_orders(folder.square(a.sandbox), folder, a.days)
     if a.payment:
@@ -1067,6 +1085,93 @@ def cmd_thanks(a):
     print("in square-links.json under chests.by_trade, as url_page and url_file.")
 
 
+def cmd_tidy(a):
+    """Finds payment links nothing points at any more, and offers to delete them.
+
+    They happen honestly: `setup` is run, then run again with a different
+    shape -- a ladder where there was a single link -- and the first set is
+    left behind. Square keeps them forever and they still take money, which
+    is the problem: an old link at an old price, still live, still findable
+    by anybody who was sent it once.
+
+    A link is an orphan when its id and its URL both appear nowhere in
+    square-links.json, which is the file the website is built from. Nothing
+    is deleted without --yes, and what would go is printed first.
+    """
+    folder = Folder(a.folder)
+    square = folder.square(a.sandbox)
+    known = json.dumps(folder.links())
+
+    links, cursor = [], None
+    while True:
+        path = "/v2/online-checkout/payment-links?limit=100"
+        if cursor:
+            path += "&cursor=" + cursor
+        answer = square.call("GET", path)
+        links += answer.get("payment_links") or []
+        cursor = answer.get("cursor")
+        if not cursor:
+            break
+
+    orphans = [
+        l for l in links
+        if (l.get("id") or "") not in known and (l.get("url") or "") not in known
+    ]
+    print(f"{len(links)} payment links, {len(links) - len(orphans)} still pointed at.\n")
+    if not orphans:
+        print("Nothing to tidy.")
+        return
+    print(f"{len(orphans)} nothing points at any more:\n")
+    for l in orphans:
+        print(f"  {l.get('url')}")
+        print(f"    id      {l.get('id')}")
+        print(f"    made    {(l.get('created_at') or '')[:10]}")
+        print(f"    {(l.get('description') or '')[:66]}")
+        print()
+
+    if not a.yes:
+        print("Nothing was deleted. Run it again with --yes to delete these.")
+        print("Deleting a payment link cannot be undone, and anybody holding it")
+        print("gets an error rather than a checkout -- which is the point.")
+        return
+
+    gone = 0
+    for l in orphans:
+        try:
+            square.call("DELETE", f"/v2/online-checkout/payment-links/{l['id']}")
+            print(f"  deleted {l.get('url')}")
+            gone += 1
+        except SquareSaid as e:
+            print(f"  {l.get('url')}: {e}")
+    print(f"\n{gone} deleted.")
+
+
+def cloud_is_issuing(site):
+    """Whether the licence service on the website is signing licences itself.
+
+    From 0.6.6 it is: a licence is signed the moment Square says paid, by the
+    service on Cloudflare, whether or not this PC is on. This script stays as
+    the manual fallback, and it must not sign what the service already has,
+    or a shop that bought three seats would be given six.
+    """
+    try:
+        with urllib.request.urlopen(site.rstrip("/") + "/api/licence/health", timeout=15) as r:
+            return bool(json.load(r).get("issuing"))
+    except Exception:
+        return False
+
+
+def refuse_if_the_cloud_is_issuing(a):
+    if getattr(a, "force_local", False) or getattr(a, "sandbox", False):
+        return
+    if cloud_is_issuing(a.site):
+        raise SystemExit(
+            "The licence service on the website is issuing licences on its own, so this does not.\n"
+            "Anything that needs a person is on its admin page: " + a.site.rstrip("/") + "/api/licence/admin\n"
+            "(--force-local signs here anyway. Only for when the service is down and a customer is waiting.)"
+        )
+
+
 def cmd_watch(a):
     """Issues and publishes whatever has been paid for, over and over.
 
@@ -1138,6 +1243,11 @@ def main():
     i.add_argument("--site-repo", dest="site_repo",
                    help="the site checkout, if it is not two levels above --publish-into")
     i.add_argument("--quiet", action="store_true")
+    i.add_argument("--force-local", dest="force_local", action="store_true",
+                   help="sign here even though the licence service is issuing (only if it is down)")
+    td = sub.add_parser("tidy", help="find payment links nothing points at, and delete them")
+    td.add_argument("--yes", action="store_true",
+                    help="actually delete them (without it, this only lists them)")
     w = sub.add_parser("watch", help="issue and publish, over and over")
     w.add_argument("--days", type=int, default=7)
     w.add_argument("--every", type=int, default=0,
@@ -1148,10 +1258,12 @@ def main():
                    help="commit and push the feed afterwards, so it actually reaches them")
     w.add_argument("--site-repo", dest="site_repo",
                    help="the site checkout, if it is not two levels above --publish-into")
+    w.add_argument("--force-local", dest="force_local", action="store_true",
+                   help="sign here even though the licence service is issuing (only if it is down)")
     a = p.parse_args()
     try:
         {"setup": cmd_setup, "orders": cmd_orders, "issue": cmd_issue,
-         "watch": cmd_watch, "files": cmd_files, "thanks": cmd_thanks}[a.command](a)
+         "watch": cmd_watch, "files": cmd_files, "thanks": cmd_thanks, "tidy": cmd_tidy}[a.command](a)
     except SquareSaid as e:
         raise SystemExit(str(e))
 
