@@ -2069,3 +2069,87 @@ fn a_used_invitation_stops_being_listed_and_one_can_be_thrown_away() {
         .expect("join");
     assert!(boss.invites().expect("list").is_empty(), "a used one was still listed");
 }
+
+/// Shares a tool chest the way Studio's "Share one" does.
+fn share_chest(server: &Running, token: &str, filename: &str, bytes: &[u8]) {
+    let boundary = "----hyperviewchest";
+    let mut body: Vec<u8> = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; \
+             filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    ureq::post(&format!("{}/api/v1/chests", server.base))
+        .set("Authorization", &format!("Bearer {token}"))
+        .set("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+        .send_bytes(&body)
+        .expect("share a chest");
+}
+
+/// An `.evtools` chest with one beam, and the column names given.
+fn an_evtools(columns: &[(usize, &str)]) -> Vec<u8> {
+    use base64::Engine;
+    let template = base64::engine::general_purpose::STANDARD
+        .encode(b"<< /Type /Annot /Subtype /Line /Subj (W12x26) /IT /LineDimension >>");
+    let columns: Vec<serde_json::Value> = columns
+        .iter()
+        .map(|(slot, name)| serde_json::json!({ "slot": slot, "name": name, "kind": "Number", "decimals": 2 }))
+        .collect();
+    serde_json::to_vec(&serde_json::json!({
+        "format": "excalibur-view-tools",
+        "version": 1,
+        "name": "Steel",
+        "columns": columns,
+        "sets": [{ "title": "Beams", "tools": [{
+            "subject": "W12x26", "kind": "Length", "colour": "#ff0000",
+            "columns": ["26", "", "", "", "", ""], "template": template,
+        }]}],
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_chest_shared_from_studio_names_the_columns_in_the_markups_list() {
+    let server = start();
+    let admin = signed_in(&server, "creede@mesafab.com", "brace-gusset-purlin-shim-42");
+    let token = admin.token().unwrap().to_string();
+    let project = admin.create_project("6743", "Fox West").expect("project");
+    let set = upload(&server, &token, &project.id, &a_drawing());
+    set_scale(&server, &set.id, 0, Some("1/4\" = 1'-0\""));
+    admin
+        .push_markups(&set.id, &[hub::NewMarkup { page: 0, dictionary: a_beam(720.0), replaces: None }])
+        .expect("push");
+
+    let columns = |server: &Running| -> serde_json::Map<String, serde_json::Value> {
+        let list: serde_json::Value =
+            ureq::get(&format!("{}/api/v1/projects/{}/markuplist", server.base, project.id))
+                .set("Authorization", &format!("Bearer {token}"))
+                .call()
+                .expect("markuplist")
+                .into_json()
+                .unwrap();
+        list.pointer("/results/0/markups/Markups/0/ExtendedProperties")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .expect("the beam's columns")
+    };
+
+    // Nothing shared: the slot has no name but its number.
+    assert_eq!(columns(&server).get("Custom 1").and_then(|v| v.as_str()), Some("26"));
+
+    // Share one: an `.evtools` is what Studio puts on the server.
+    share_chest(&server, &token, "Steel.evtools", &an_evtools(&[(0, "LBS Per FT")]));
+    let named = columns(&server);
+    assert_eq!(named.get("LBS Per FT").and_then(|v| v.as_str()), Some("26"), "{named:?}");
+    assert!(named.get("Custom 1").is_none());
+
+    // A newer chest that names nothing, like a Revu tool set, doesn't take
+    // the names away.
+    share_chest(&server, &token, "Misc.evtools", &an_evtools(&[]));
+    let still = columns(&server);
+    assert_eq!(still.get("LBS Per FT").and_then(|v| v.as_str()), Some("26"), "{still:?}");
+}

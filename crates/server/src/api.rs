@@ -1657,39 +1657,39 @@ async fn revoke_key(
 // ---- the markup list, the way Bluebeam hands one over ------------------------
 
 /// The custom columns the office's tool chest defines — "LBS Per FT" and the
-/// rest — read from the newest chest an administrator has shared. What the
-/// markup list calls them, and which of them are unit weights.
+/// rest — read from the newest shared chest that names any. What the markup
+/// list calls them, and which of them are unit weights.
+///
+/// Any kind of chest counts: "Share one" puts an `.evtools` on the server, and
+/// a Revu profile (`.bpx`) carries names too. A Revu tool set (`.btx`) names
+/// none, so an older chest that does is used instead of it.
 fn office_columns(server: &Server) -> Vec<takeoff::user::UserColumn> {
-    let digest: Option<String> = server
+    let digests: Vec<String> = server
         .store
         .with(|db| {
-            Ok(db
-                .query_row(
-                    "SELECT digest FROM chests WHERE shared = 1 AND filename LIKE '%.bpx'
-                     ORDER BY uploaded DESC LIMIT 1",
-                    [],
-                    |r| r.get(0),
-                )
-                .optional()?)
+            let mut q = db.prepare("SELECT digest FROM chests WHERE shared = 1 ORDER BY uploaded DESC")?;
+            let rows = q.query_map([], |r| r.get::<_, String>(0))?;
+            Ok(rows.filter_map(Result::ok).collect())
         })
-        .ok()
-        .flatten();
-    let Some(bytes) = digest.and_then(|d| server.store.get_blob(&d).ok()) else {
-        return Vec::new();
-    };
-    chest::Profile::read(&bytes)
-        .map(|p| {
-            p.custom_columns
-                .into_iter()
-                .map(|c| takeoff::user::UserColumn {
-                    index: c.index,
-                    name: c.name.clone(),
-                    formula: c.is_formula().then(|| c.expression.clone()),
-                    precision: c.precision,
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for digest in digests {
+        let Ok(bytes) = server.store.get_blob(&digest) else { continue };
+        let Some(profile) = chest::Profile::read(&bytes) else { continue };
+        if profile.custom_columns.is_empty() {
+            continue;
+        }
+        return profile
+            .custom_columns
+            .into_iter()
+            .map(|c| takeoff::user::UserColumn {
+                index: c.index,
+                name: c.name.clone(),
+                formula: c.is_formula().then(|| c.expression.clone()),
+                precision: c.precision,
+            })
+            .collect();
+    }
+    Vec::new()
 }
 
 fn markuplist_of(server: &Server, id: &str, user: &[takeoff::user::UserColumn]) -> Answer<serde_json::Value> {
