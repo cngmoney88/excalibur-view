@@ -1,0 +1,31 @@
+Combine from Explorer, chest markups that draw as themselves, and plugins anyone can write.
+
+COMBINE IN EXCALIBUR VIEW
+
+Select some PDFs in Explorer, right-click, and pick Combine in Excalibur View
+(on Windows 11 it's under Show more options). They open in the Combine window
+in the order their names read, going into Combined.pdf beside the first one.
+Change the order with the arrows, or take one off the list, before you run it.
+
+TOOL CHEST MARKUPS
+
+A cloud, callout, arrow, text box or any other tool from a chest that only
+marks up used to draw as a rectangle in the tool's colour. Each one now draws
+as the kind of markup it is, with the look the chest gave it, and goes back to
+Revu as the same tool. Volume, diameter, radius and angle tools from a chest
+measure as themselves too, and a volume asks for its depth.
+
+SHARED CHESTS AND THE MARKUPS LIST
+
+A chest shared from Studio with Share one now names the columns in the
+office's markups list, and in the markups list other programs read from the
+server. Before, only a Revu profile did that, and a chest shared as an
+Excalibur View file left them as Custom 1, Custom 2 and so on.
+
+WRITING A PLUGIN
+
+Plugins -> Save This Sheet for a Plugin Test... writes what a plugin would be
+handed for the sheet on screen, to test against. Hyperview.exe --plugin-check
+runs a plugin that hasn't been signed yet, once, in the same sandbox a signed
+one gets, and says whether it's ready. Neither installs anything.
+excaliburct.com/plugins/ has the whole process.
