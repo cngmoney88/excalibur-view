@@ -304,6 +304,65 @@ impl Tool {
         matches!(self, Tool::Cloud | Tool::CloudPolygon)
     }
 
+    /// The tool that draws a Tool Chest tool, and the toolbar button that
+    /// lights up while it is armed.
+    ///
+    /// A measuring tool goes by what it measures. A tool that only marks up
+    /// goes by the annotation it stamps: a revision cloud is drawn as a cloud
+    /// and a callout as a callout, not as a box with the right colour.
+    pub fn for_chest(kind: annot::Kind, template: &pdf::Dict) -> (Tool, &'static str) {
+        use annot::{Kind, Subtype as S};
+        match kind {
+            Kind::Length | Kind::Polylength => (Tool::Length, "Measure.Length"),
+            Kind::Area => (Tool::Area, "Measure.Area"),
+            Kind::Volume => (Tool::Volume, "Measure.Volume"),
+            Kind::Count => (Tool::Count, "Measure.Count"),
+            Kind::Angle => (Tool::Angle, "Measure.Angle"),
+            Kind::Diameter => (Tool::Diameter, "Measure.Diameter"),
+            Kind::Radius => (Tool::Radius, "Measure.Radius"),
+            Kind::Markup => {
+                let name = |key: &str| {
+                    template
+                        .get(key)
+                        .and_then(|o| o.as_name())
+                        .map(|n| n.as_str().to_string())
+                        .unwrap_or_default()
+                };
+                let intent = name("IT");
+                let cloudy = intent.ends_with("Cloud")
+                    || template
+                        .get("BE")
+                        .and_then(|o| o.as_dict())
+                        .and_then(|be| be.get("S"))
+                        .and_then(|o| o.as_name())
+                        .is_some_and(|s| s.as_str() == "C");
+                match S::read(template) {
+                    S::Square if cloudy => (Tool::Cloud, "Markup.Cloud"),
+                    S::Square => (Tool::Rect, "Markup.Rectangle"),
+                    S::Circle => (Tool::Ellipse, "Markup.Ellipse"),
+                    S::Polygon if cloudy => (Tool::CloudPolygon, "Markup.Cloud9"),
+                    S::Polygon => (Tool::Polygon, "Markup.Polygon"),
+                    S::PolyLine => (Tool::Polyline, "Markup.Polyline"),
+                    S::Line => (Tool::Arrow, "Markup.Line"),
+                    S::Ink => (Tool::Ink, "Markup.Pen"),
+                    S::FreeText if intent == "FreeTextCallout" => (Tool::Callout, "Markup.Callout"),
+                    S::FreeText if intent == "FreeTextTypeWriter" => {
+                        (Tool::Typewriter, "Markup.Typewriter")
+                    }
+                    S::FreeText => (Tool::Text, "Markup.TextBox"),
+                    S::Text => (Tool::Note, "Markup.Note"),
+                    S::Highlight => (Tool::Highlight, "Markup.Highlight"),
+                    S::Underline => (Tool::Underline, "Markup.Underline"),
+                    S::StrikeOut => (Tool::Strikethrough, "Markup.Strikethrough"),
+                    S::Squiggly => (Tool::Squiggly, "Markup.Squiggly"),
+                    // A stamp, a link or something newer: a box is the
+                    // nearest thing that can still be drawn and moved.
+                    _ => (Tool::Rect, "Markup.Rectangle"),
+                }
+            }
+        }
+    }
+
     /// Tools that mark words on the sheet rather than draw on it.
     pub fn marks_text(self) -> bool {
         matches!(
