@@ -1,0 +1,66 @@
+Locked drawing sets, a jobsite that can reach the office, and who sees
+which job.
+
+OPENING A LOCKED SET
+
+A drawing set somebody else locked with a password now opens. Type the
+password when it asks. It reads the four kinds of lock in circulation --
+AES-256, AES-128, and the two older RC4 ones -- and the properties panel
+names which one a file uses. Three of the four have not been real
+protection for years, and it says so rather than letting you believe a set
+is safe to send when it is not.
+
+Markups you add to a locked set are locked the same way when you save, so
+the file still opens with the same password and with nothing else. A weakly
+locked file keeps its weak lock rather than being quietly upgraded: changing
+it would lock out everybody else who has the password.
+
+DRAWING
+
+The area tools drag. Press at one corner of a plate and let go at the
+opposite one, or keep clicking corner by corner for an irregular shape --
+Area, Volume, Perimeter, Area Cutout and Polygon all do both now. A plate
+used to take four clicks.
+
+REACHING THE OFFICE FROM A JOBSITE
+
+Studio -> Office -> Remote access. An administrator pastes a Cloudflare
+tunnel token and a hostname, and the office server answers from outside the
+shop with nothing opened on the firewall. The tunnel is yours: your
+Cloudflare account, your hostname, your token.
+
+A seat that has used the server in the office finds it from a truck by
+itself. Nobody types an address.
+
+A sealed server refuses all of this and says why, which is what the Sealed
+edition is for.
+
+WHO SEES WHICH JOB
+
+A project with nobody named on it is everybody's, exactly as before, so a
+shop that ignores this sees no change. Name one person on a job and it
+becomes theirs -- the drawings, sheets, markups and takeoff with it.
+Administrators see everything. Take the last person off and it is
+everybody's again.
+
+GETTING PEOPLE IN
+
+Invite one person instead of sharing one code. An invitation names who it is
+for, carries the role they get, runs out on a date, and dies when it is
+used. It works even on a server that is otherwise closed.
+
+The shared join code can now be given a date too. It still works forever if
+that is what you want, but that has to be chosen rather than being what
+happens by not choosing.
+
+FIXED
+
+A seat that lost signal partway through pushing markups could end up sending
+them twice, leaving the office holding two of everything somebody drew in a
+trailer.
+
+A dropped connection showed an operating-system error number instead of a
+sentence. A request that never reached the server is now simply sent again.
+
+A bid pushed from FabWire without a job number arrived named after a
+timestamp.
