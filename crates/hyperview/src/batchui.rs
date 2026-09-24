@@ -264,9 +264,61 @@ impl Batching {
     }
 }
 
+/// How long after the last of Explorer's starts the Combine window opens.
+/// Explorer starts one for every file selected, all at once, so this is long
+/// enough for a hundred of them to land and short enough to feel like the
+/// click did it.
+const GATHERING: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// The Combine window with Explorer's selection added: each file once, in the
+/// order a person reads the names, going into Combined.pdf beside the first
+/// unless somewhere was already chosen. Files already in the list keep their
+/// place, in case somebody has put them in order by hand.
+pub fn gathered(mut batching: Batching, mut files: Vec<PathBuf>) -> Batching {
+    let name = |p: &PathBuf| p.file_name().unwrap_or_default().to_string_lossy().to_string();
+    files.sort_by(|a, b| batch::naturally(&name(a), &name(b)));
+    for file in files {
+        if !batching.files.contains(&file) {
+            batching.files.push(file);
+        }
+    }
+    if batching.to.trim().is_empty() {
+        if let Some(folder) = batching.files.first().and_then(|f| f.parent()) {
+            batching.to = folder.join("Combined.pdf").display().to_string();
+        }
+    }
+    batching
+}
+
 impl App {
     pub fn begin_batch(&mut self, which: Which) {
         self.batching = Some(Batching::new(which));
+    }
+
+    /// Opens the Combine window once Explorer has finished handing files
+    /// over. A batch already running is left to finish first.
+    pub fn combine_when_gathered(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.to_combine_at else {
+            return;
+        };
+        let waited = at.elapsed();
+        if waited < GATHERING {
+            ctx.request_repaint_after(GATHERING - waited);
+            return;
+        }
+        if self.batching.as_ref().is_some_and(|b| b.running) {
+            ctx.request_repaint_after(GATHERING);
+            return;
+        }
+        let files = std::mem::take(&mut self.to_combine);
+        self.to_combine_at = None;
+        let batching = match self.batching.take() {
+            Some(open) if open.which == Which::Combine => open,
+            _ => Batching::new(Which::Combine),
+        };
+        self.batching = Some(gathered(batching, files));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     pub fn batch_dialog(&mut self, ctx: &egui::Context) {
@@ -318,21 +370,60 @@ impl App {
                 });
                 if !batching.files.is_empty() {
                     ui.add_space(4.0);
+                    // Combining goes in this order, so the order can be
+                    // changed here. Any file can be taken off the list.
+                    let ordered = batching.which == Which::Combine;
+                    let last = batching.files.len() - 1;
+                    let mut moved: Option<(usize, usize)> = None;
+                    let mut dropped: Option<usize> = None;
                     egui::ScrollArea::vertical()
                         .id_salt("batch-files")
-                        .max_height(110.0)
+                        .max_height(if ordered { 220.0 } else { 110.0 })
                         .auto_shrink([false, true])
                         .show(ui, |ui| {
-                            for file in &batching.files {
-                                ui.label(
-                                    RichText::new(format!(
-                                        "· {}",
-                                        file.file_name().unwrap_or_default().to_string_lossy()
-                                    ))
-                                    .size(11.0),
-                                );
+                            for (i, file) in batching.files.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    if ordered {
+                                        if ui
+                                            .add_enabled(i > 0, egui::Button::new("⏶").small())
+                                            .on_hover_text("Earlier in the combined file")
+                                            .clicked()
+                                        {
+                                            moved = Some((i, i - 1));
+                                        }
+                                        if ui
+                                            .add_enabled(i < last, egui::Button::new("⏷").small())
+                                            .on_hover_text("Later in the combined file")
+                                            .clicked()
+                                        {
+                                            moved = Some((i, i + 1));
+                                        }
+                                    }
+                                    if ui
+                                        .add_enabled(!batching.running, egui::Button::new("×").small())
+                                        .on_hover_text("Take it off the list")
+                                        .clicked()
+                                    {
+                                        dropped = Some(i);
+                                    }
+                                    ui.label(
+                                        RichText::new(
+                                            file.file_name().unwrap_or_default().to_string_lossy(),
+                                        )
+                                        .size(11.0),
+                                    )
+                                    .on_hover_text(file.display().to_string());
+                                });
                             }
                         });
+                    if !batching.running {
+                        if let Some((from, to)) = moved {
+                            batching.files.swap(from, to);
+                        }
+                        if let Some(i) = dropped {
+                            batching.files.remove(i);
+                        }
+                    }
                 }
                 ui.add_space(12.0);
 
@@ -1086,6 +1177,40 @@ mod tests {
         assert!(batching.job().is_none());
         batching.to = "/tmp/All.pdf".into();
         assert!(batching.job().is_some());
+    }
+
+    #[test]
+    fn explorer_selection_is_combined_in_the_order_the_names_read() {
+        let files = ["S-110.pdf", "S-102.pdf", "S-9.pdf", "S-101.pdf"]
+            .iter()
+            .map(|n| PathBuf::from("jobs").join("6742").join(n))
+            .collect();
+        let batching = gathered(Batching::new(Which::Combine), files);
+        let names: Vec<String> = batching
+            .files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["S-9.pdf", "S-101.pdf", "S-102.pdf", "S-110.pdf"]);
+        assert_eq!(
+            PathBuf::from(&batching.to),
+            PathBuf::from("jobs").join("6742").join("Combined.pdf"),
+            "beside the drawings, never over one of them"
+        );
+        assert!(batching.job().is_some(), "ready to run");
+    }
+
+    #[test]
+    fn a_second_selection_joins_the_first_without_undoing_its_order() {
+        let mut batching = Batching::new(Which::Combine);
+        batching.files = vec![PathBuf::from("B.pdf"), PathBuf::from("A.pdf")];
+        batching.to = "All.pdf".into();
+        let batching = gathered(batching, vec![PathBuf::from("C.pdf"), PathBuf::from("A.pdf")]);
+        assert_eq!(
+            batching.files,
+            vec![PathBuf::from("B.pdf"), PathBuf::from("A.pdf"), PathBuf::from("C.pdf")]
+        );
+        assert_eq!(batching.to, "All.pdf", "a place already chosen stays chosen");
     }
 
     #[test]
