@@ -1,0 +1,27 @@
+Pick sheets in Thumbnails, then print just those or save them as a PDF.
+
+PICKING SHEETS
+
+In the Thumbnails panel, Ctrl-click (Cmd on a Mac) sheets to pick them,
+Shift-click to pick a run, and Ctrl-Shift-click to add another run. A
+plain click still goes to a sheet, and clears the picks. Picking doesn't
+move the drawing, so you can keep looking at one sheet while you choose
+others.
+
+The line above the list says how many are picked, with Print, Save as PDF
+and Clear beside it. Right-click a sheet for the same, or to pick every
+sheet a search is showing.
+
+PRINTING THEM
+
+Print opens on the picked sheets. Ctrl+P does too.
+
+SAVING THEM AS A PDF
+
+Save as PDF writes the picked sheets, markups and all, into a new file
+wherever you put it. The drawing you're in stays as it is and stays open.
+
+THE DOCUMENT MENU
+
+Rotate, Extract, Delete, Crop, Flatten and the other jobs that work on
+chosen sheets open with the picked ones already filled in.
