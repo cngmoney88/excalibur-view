@@ -224,7 +224,10 @@ impl Update {
             }
         }
 
-        let size = offsets.keys().copied().max().unwrap_or(0) + 1;
+        // The size is the whole file's, not this section's: an update that
+        // only replaces a few early objects still has to say how many there
+        // are in all, or a reader that believes it loses the rest.
+        let size = (offsets.keys().copied().max().unwrap_or(0) + 1).max(self.next);
         let start = out.len();
         if doc.xref.stream_style && !repairing {
             self.write_xref_stream(doc, &mut offsets, start, size, out);
@@ -472,6 +475,21 @@ mod tests {
         assert_eq!(annots.len(), 1);
         let got = reopened.get(annots[0]);
         assert!(got.as_dict().unwrap().get("Subtype").unwrap().is_name("Line"));
+    }
+
+    #[test]
+    fn an_update_that_only_changes_an_early_object_still_counts_them_all() {
+        let doc = Document::from_bytes(sample());
+        let mut update = Update::new(&doc);
+        let mut catalog = doc.get(Ref::new(1, 0)).as_dict().unwrap().clone();
+        catalog.set(Name::new("PageMode"), Object::name("UseOutlines"));
+        update.replace(Ref::new(1, 0), Object::Dict(catalog));
+        let saved = update.apply(&doc);
+        let text = String::from_utf8_lossy(&saved);
+        let last = &text[text.rfind("trailer").unwrap()..];
+        assert!(last.contains("/Size 4"), "{last}");
+        let reopened = Document::from_bytes(saved);
+        assert_eq!(reopened.page_count(), 1);
     }
 
     #[test]
