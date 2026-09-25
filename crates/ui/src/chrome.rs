@@ -673,7 +673,11 @@ pub fn room_beside(ui: &Ui, button: &str) -> f32 {
     });
     let spacing = ui.spacing();
     let button = text + spacing.button_padding.x * 2.0;
-    (ui.available_width() - button - spacing.item_spacing.x - 1.0).max(120.0)
+    // A text box is its desired width plus its own margin, 4 points each
+    // side. Leaving that out made the box 8 points too wide, and a resizable
+    // window holding one grew by that much every frame.
+    const TEXT_EDIT_MARGIN: f32 = 8.0;
+    (ui.available_width() - button - spacing.item_spacing.x - TEXT_EDIT_MARGIN - 1.0).max(120.0)
 }
 
 pub fn toolbar_width(bar: &chest::ToolBar) -> f32 {
