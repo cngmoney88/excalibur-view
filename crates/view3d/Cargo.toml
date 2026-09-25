@@ -1,0 +1,31 @@
+[package]
+name = "view3d"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Draws a model's parts in 3D, off the screen, on a thread of its own: the picture comes back as pixels, a click comes back as the part under it."
+
+[dependencies]
+# The picture is drawn with wgpu on a device of its own and read back, so it
+# works the same whichever renderer the window itself is using, and a picture
+# twice the size of the screen is just a bigger target.
+wgpu = { version = "25", default-features = false, features = ["wgsl"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+rustc-hash = "2"
+log = "0.4"
+
+# The same backends the program's own window uses, for the same reasons: see
+# hyperview's Cargo.toml.
+[target.'cfg(windows)'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["wgsl", "dx12", "vulkan"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["wgsl", "metal"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { version = "25", default-features = false, features = ["wgsl", "vulkan", "gles"] }
+
+[dev-dependencies]
+model = { path = "../model", features = ["geometry"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
