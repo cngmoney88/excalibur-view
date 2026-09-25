@@ -299,7 +299,7 @@ fn policy_seals_this_machine() -> bool {
 
 #[cfg(windows)]
 mod windows_policy {
-    use windows::core::{HSTRING, PCWSTR};
+    use windows::core::HSTRING;
     use windows::Win32::Foundation::ERROR_SUCCESS;
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ,
