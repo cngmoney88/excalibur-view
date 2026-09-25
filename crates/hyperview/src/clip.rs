@@ -74,8 +74,19 @@ impl App {
         let mut carried = Vec::new();
         for index in &picked {
             let Some(mark) = doc.marks.get(*index) else { continue };
+            let mut markup = mark.markup.clone();
+            // A part copied with its group says whose it is by name, so the
+            // paste can put the group back together, even for a group read
+            // from a file that only said so by reference.
+            let head = crate::groups::head_of(&doc.marks, *index);
+            if head != *index && picked.contains(&head) {
+                let name = doc.marks[head].markup.name();
+                if !name.is_empty() {
+                    markup.set(crate::groups::PART_OF, pdf::Object::text(&name));
+                }
+            }
             carried.push(Carried {
-                markup: mark.markup.clone(),
+                markup,
                 points: frame.points_to_sheet(&mark.markup.points()),
                 strokes: mark
                     .markup
@@ -165,15 +176,44 @@ impl App {
             if carried.len() == 1 { "" } else { "s" }
         ));
         let first = doc.marks.len();
+        // Every pasted markup gets a new name now rather than at the save, so
+        // a group pasted whole points at its own new head and not the one it
+        // was copied from.
+        let renamed: std::collections::HashMap<String, String> = carried
+            .iter()
+            .map(|c| c.markup.name())
+            .filter(|n| !n.is_empty())
+            .map(|n| (n, annot::name::fresh()))
+            .collect();
         for one in &carried {
             let mut markup = one.markup.clone();
             // A pasted markup is a new markup, not the same one in two places:
             // it gets no reference into the file until it is saved, and it
             // gets a name of its own so Revu does not treat the two as one.
-            markup.dict.remove("NM");
+            match renamed.get(&markup.name()) {
+                Some(name) => {
+                    markup.set_name(name);
+                }
+                None => {
+                    markup.dict.remove("NM");
+                }
+            }
+            let part_of = markup.dict.get(crate::groups::PART_OF).and_then(|o| o.as_text());
+            if let Some(head) = part_of {
+                match renamed.get(&head) {
+                    Some(name) => {
+                        markup.set(crate::groups::PART_OF, pdf::Object::text(name));
+                    }
+                    None => {
+                        markup.dict.remove(crate::groups::PART_OF);
+                    }
+                }
+            }
+            let was = markup.drawn_box();
             markup.dict.remove("AP");
             markup.dict.remove("Popup");
             markup.dict.remove("IRT");
+            markup.dict.remove("RT");
 
             let moved: Vec<[f64; 2]> = one
                 .points
@@ -219,13 +259,20 @@ impl App {
                     if pdf_points.len() < 2 {
                         continue;
                     }
-                    let (a, b) = (pdf_points[0], pdf_points[pdf_points.len() - 1]);
-                    markup.set_box([
-                        a[0].min(b[0]),
-                        a[1].min(b[1]),
-                        a[0].max(b[0]),
-                        a[1].max(b[1]),
-                    ]);
+                    // Round every corner, not the first and last: a box
+                    // carries four, and its first and last share a side.
+                    let placed = pdf_points.iter().fold(
+                        [f64::MAX, f64::MAX, f64::MIN, f64::MIN],
+                        |r, p| [r[0].min(p[0]), r[1].min(p[1]), r[2].max(p[0]), r[3].max(p[1])],
+                    );
+                    markup.set_box(placed);
+                    // A callout's leader goes with its box.
+                    if let (Some(was), Some(cl)) = (was, markup.dict.get("CL").map(|o| o.numbers())) {
+                        let d = [(placed[0] + placed[2] - was[0] - was[2]) / 2.0, (placed[1] + placed[3] - was[1] - was[3]) / 2.0];
+                        let moved: Vec<pdf::Object> =
+                            cl.iter().enumerate().map(|(i, v)| pdf::Object::real(v + d[i % 2])).collect();
+                        markup.set("CL", pdf::Object::Array(moved));
+                    }
                 }
                 _ => {
                     if pdf_points.len() < 2 {

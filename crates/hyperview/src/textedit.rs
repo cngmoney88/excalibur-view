@@ -558,8 +558,8 @@ impl crate::app::App {
         }
         let Some(index) = self.text_under else {
             self.status = "There are no words there to change. Drawings from CAD often have \
-                           their lettering as lines, which can't be retyped; a text box or the \
-                           Cover and Replace way round it is the way to change those."
+                           their lettering as lines, which can't be retyped; a white-filled box \
+                           over them and a text box on top is the way to change those."
                 .into();
             return;
         };
