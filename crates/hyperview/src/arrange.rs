@@ -506,7 +506,9 @@ fn mirror_markup(markup: &mut annot::Markup, about: f64, across: bool) -> bool {
             markup.set_vertices(&flipped);
         }
     }
-    markup.dict.remove("AP");
+    if !markup.keeps_its_appearance() {
+        markup.dict.remove("AP");
+    }
     true
 }
 
@@ -558,7 +560,9 @@ fn scale_markup(markup: &mut annot::Markup, scale: [f64; 2], about: [f64; 2]) ->
             markup.set_vertices(&moved);
         }
     }
-    markup.dict.remove("AP");
+    if !markup.keeps_its_appearance() {
+        markup.dict.remove("AP");
+    }
     true
 }
 

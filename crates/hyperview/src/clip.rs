@@ -481,8 +481,11 @@ impl Style {
             }
         }
         // The appearance was drawn for the old look, so it has to go and be
-        // drawn again, or the markup keeps looking exactly as it did.
-        markup.dict.remove("AP");
+        // drawn again, or the markup keeps looking exactly as it did — unless
+        // it is a picture that can only be kept.
+        if !markup.keeps_its_appearance() {
+            markup.dict.remove("AP");
+        }
     }
 }
 

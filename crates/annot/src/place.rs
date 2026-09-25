@@ -87,6 +87,15 @@ impl<'a> Placer<'a> {
     /// Replaces a markup that is already in the file, keeping its object
     /// number so anything else referring to it still finds it.
     pub fn replace(&mut self, reference: Ref, markup: &mut Markup) -> bool {
+        // A stamp whose picture is only in its appearance keeps it: readers
+        // fit the appearance to the new rectangle, so a moved or resized
+        // signature is the same signature somewhere else.
+        if markup.keeps_its_appearance() {
+            markup.dict.set(Name::new("M"), Object::text(&self.stamp));
+            self.update
+                .replace(reference, Object::Dict(markup.dict.clone()));
+            return true;
+        }
         let Some(appearance) = markup.finish_how(self.how) else {
             return false;
         };
@@ -492,6 +501,40 @@ mod tests {
         assert!(stream.dict.get("Subtype").unwrap().is_name("Form"));
         let drawn = String::from_utf8_lossy(&stream.data);
         assert!(drawn.contains("100 100 m"), "{drawn}");
+    }
+
+    #[test]
+    fn a_stamp_read_from_the_file_keeps_its_picture_when_it_is_moved_and_resized() {
+        // Put a picture stamp in, read it back the way a reopened drawing
+        // does (no picture in hand, only the appearance), then move it.
+        let doc = Document::from_bytes(sample());
+        let mut placer = Placer::new(&doc);
+        let picture = crate::markup::Picture {
+            width: 2,
+            height: 1,
+            data: vec![0, 0, 255, 255, 0, 0],
+            filter: "FlateDecode",
+            grey: false,
+            mask: None,
+        };
+        let mut stamp = Markup::new(Subtype::Stamp).showing(picture);
+        stamp.set_box([100.0, 100.0, 200.0, 150.0]);
+        let reference = placer.add(0, &mut stamp).unwrap();
+        let once = Document::from_bytes(placer.finish().apply(&doc));
+        let (_, mut read) = read_page(&once, 0).into_iter().find(|(r, _)| *r == reference).unwrap();
+        assert!(read.picture.is_none() && read.keeps_its_appearance());
+        let appearance = read.dict.get("AP").cloned();
+
+        read.move_by(50.0, 0.0);
+        read.set_box([150.0, 90.0, 350.0, 190.0]);
+        assert!(read.keeps_its_appearance(), "moving it didn't drop the picture");
+        let mut again = Placer::new(&once);
+        assert!(again.replace(reference, &mut read));
+        let twice = Document::from_bytes(again.finish().apply(&once));
+        let back = twice.get(reference);
+        let dict = back.as_dict().unwrap();
+        assert_eq!(dict.get("AP").cloned(), appearance, "the same picture");
+        assert_eq!(dict.get("Rect").and_then(|o| o.as_rect()), Some([150.0, 90.0, 350.0, 190.0]));
     }
 
     #[test]

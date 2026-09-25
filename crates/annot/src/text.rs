@@ -258,8 +258,11 @@ impl Setting {
                 }
             )),
         );
-        // The appearance was drawn with the old setting, so it has to go.
-        markup.dict.remove("AP");
+        // The appearance was drawn with the old setting, so it has to go —
+        // unless it is a picture that can only be kept.
+        if !markup.keeps_its_appearance() {
+            markup.dict.remove("AP");
+        }
     }
 
     /// One font dictionary for this setting, to hang in the resources.

@@ -168,11 +168,15 @@ impl App {
                 if fresh {
                     ctx.request_repaint_after(std::time::Duration::from_secs(1));
                 }
+                // A long one is cut to the room there is, rather than
+                // written over what is on the left; the whole of it is under
+                // the pointer.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if fresh {
-                        ui.label(RichText::new(&self.status).color(theme.accent_text));
+                        ui.add(egui::Label::new(RichText::new(&self.status).color(theme.accent_text)).truncate())
+                            .on_hover_text(&self.status);
                     } else {
-                        ui.label(RichText::new(self.tool.hint()).weak());
+                        ui.add(egui::Label::new(RichText::new(self.tool.hint()).weak()).truncate());
                     }
                 });
             });
@@ -366,8 +370,84 @@ impl App {
         }
     }
 
+    /// A text box's words, typed on the sheet where they will be. Finished by
+    /// clicking anywhere else, Esc, or Ctrl+Enter.
+    fn type_in_place(&mut self, ctx: &egui::Context, index: usize) {
+        let accent = self.chrome.theme.accent;
+        let Some(doc) = self.doc_mut() else {
+            self.editing_text = None;
+            return;
+        };
+        let Some(mark) = doc.marks.get(index) else {
+            self.editing_text = None;
+            return;
+        };
+        let frame = doc.frame();
+        let Some(b) = crate::grips::bounding(&frame.points_to_sheet(&mark.markup.points())) else {
+            self.editing_text = None;
+            return;
+        };
+        let rect = egui::Rect::from_two_pos(
+            doc.view.to_screen([b[0] as f32, b[1] as f32]),
+            doc.view.to_screen([b[2] as f32, b[3] as f32]),
+        );
+        let setting = annot::text::Setting::of(&mark.markup);
+        let size = (setting.size as f32 * doc.view.zoom).clamp(6.0, 120.0);
+        let ink = Color32::from_rgb(
+            (setting.colour[0] * 255.0) as u8,
+            (setting.colour[1] * 255.0) as u8,
+            (setting.colour[2] * 255.0) as u8,
+        );
+        let mut text = mark.markup.contents();
+        let inner = egui::vec2((rect.width() - 8.0).max(60.0), (rect.height() - 8.0).max(size + 4.0));
+        let shown = egui::Area::new(egui::Id::new(("typing-in-place", doc.id, index)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(rect.min)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 235))
+                    .stroke(egui::Stroke::new(1.5, accent))
+                    .inner_margin(egui::Margin::same(3))
+                    .show(ui, |ui| {
+                        let typed = ui.add(
+                            egui::TextEdit::multiline(&mut text)
+                                .frame(false)
+                                .font(egui::FontId::proportional(size))
+                                .text_color(ink)
+                                .desired_width(inner.x)
+                                .min_size(inner),
+                        );
+                        typed.request_focus();
+                    });
+            });
+        let area = shown.response.rect;
+        let finished = ctx.input(|i| {
+            i.key_pressed(egui::Key::Escape)
+                || (i.modifiers.command && i.key_pressed(egui::Key::Enter))
+                || (i.pointer.any_pressed()
+                    && i.pointer.interact_pos().is_some_and(|p| !area.contains(p)))
+        });
+        if let Some(mark) = doc.marks.get_mut(index) {
+            if mark.markup.contents() != text {
+                mark.markup.set_contents(&text);
+                mark.markup.dict.remove("AP");
+                mark.changed = true;
+                doc.dirty = true;
+            }
+        }
+        if finished {
+            self.editing_text = None;
+            self.status = "Double-click a text box to change its words again.".into();
+            self.save_soon();
+        }
+    }
+
     pub fn text_dialog(&mut self, ctx: &egui::Context) {
         let Some(index) = self.editing_text else { return };
+        if self.typing_in_place() {
+            self.type_in_place(ctx, index);
+            return;
+        }
         let Some(doc) = self.doc_mut() else {
             self.editing_text = None;
             return;
@@ -1813,6 +1893,8 @@ impl App {
                     if let Some(doc) = self.doc_mut() {
                         if !doc.undo() {
                             self.status = "Nothing left to undo.".into();
+                        } else {
+                            self.save_soon();
                         }
                     }
                 }
@@ -1820,6 +1902,8 @@ impl App {
                     if let Some(doc) = self.doc_mut() {
                         if !doc.redo() {
                             self.status = "Nothing left to put back.".into();
+                        } else {
+                            self.save_soon();
                         }
                     }
                 }
@@ -1839,6 +1923,10 @@ impl App {
                         ui::Theme::dark()
                     };
                     self.chrome.theme.apply(ctx);
+                }
+                "Markup.Signature" => {
+                    self.finish_draft();
+                    self.begin_signature();
                 }
                 "Plugins.Add" => self.add_plugin(),
                 "Plugins.Manage" => self.managing_plugins = true,
@@ -2148,6 +2236,7 @@ pub fn tool_for(id: &str) -> Option<Tool> {
         "Markup.Polygon" => Tool::Polygon,
         "Markup.Cloud" => Tool::Cloud,
         "Markup.Cloud9" => Tool::CloudPolygon,
+        "Markup.CloudPlus" => Tool::CloudPlus,
         "Markup.Line" => Tool::Arrow,
         "Markup.Arrow" => Tool::Arrow,
         "Markup.Polyline" => Tool::Polyline,
@@ -2158,7 +2247,8 @@ pub fn tool_for(id: &str) -> Option<Tool> {
 
         // ---- words ----
         "Markup.TextBox" => Tool::Text,
-        "Markup.Typewriter" | "Edit.Text" => Tool::Typewriter,
+        "Markup.Typewriter" => Tool::Typewriter,
+        "Edit.Text" => Tool::EditText,
         "Markup.Callout" => Tool::Callout,
         "Markup.Note" | "Markup.ReviewText" => Tool::Note,
         "Markup.Flag" => Tool::Flag,

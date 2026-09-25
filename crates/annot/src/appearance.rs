@@ -121,16 +121,27 @@ pub fn build_with(markup: &mut Markup, how: Draw) -> Option<Appearance> {
         rect[2] = rect[2].max(c.box_at[2]);
         rect[3] = rect[3].max(c.box_at[3]);
     }
-    markup.set_box(rect);
+    // The shape's own box is kept beside the wider rectangle, so drawing it
+    // again starts from the shape and not from the allowance round it.
+    if matches!(
+        subtype,
+        Subtype::Square | Subtype::Circle | Subtype::FreeText | Subtype::Stamp | Subtype::Text | Subtype::Link
+    ) {
+        markup.set_drawing_area(rect, box_only);
+    } else {
+        markup.set_box(rect);
+    }
 
     let mut c = Content::new();
     // Which fonts the stream ended up naming, so the resources carry them.
     let mut words: Vec<(String, Dict)> = Vec::new();
     c.save();
-    if opacity < 1.0 || fill_opacity < 1.0 {
-        c.graphics_state(if subtype == Subtype::Highlight { MULTIPLY } else { SOLID });
-    } else if subtype == Subtype::Highlight {
+    // A highlighter always multiplies; anything else does when it is set to,
+    // so a filled box lets the lines under it show.
+    if subtype == Subtype::Highlight || markup.multiplies() {
         c.graphics_state(MULTIPLY);
+    } else if opacity < 1.0 || fill_opacity < 1.0 {
+        c.graphics_state(SOLID);
     }
     c.line_cap(0).line_join(0).line_width(width);
     c.stroke_colour(colour);
@@ -142,7 +153,7 @@ pub fn build_with(markup: &mut Markup, how: Draw) -> Option<Appearance> {
     // A picture takes the place of the shape: what a stamp or an image markup
     // is, is the picture, sat in the box somebody dragged out.
     if let Some(picture) = markup.picture.clone() {
-        return picture_stream(&picture, geometry, opacity, fill_opacity);
+        return picture_stream(&picture, geometry, opacity, fill_opacity, markup.multiplies());
     }
 
     let points = markup.points();
@@ -399,6 +410,7 @@ fn picture_stream(
     area: [f64; 4],
     opacity: f32,
     fill_opacity: f32,
+    multiply: bool,
 ) -> Option<Appearance> {
     if picture.width == 0 || picture.height == 0 {
         return None;
@@ -419,7 +431,11 @@ fn picture_stream(
 
     let mut c = Content::new();
     c.save();
-    if opacity < 1.0 || fill_opacity < 1.0 {
+    // Multiplied, a scanned signature's white paper disappears and only the
+    // ink lands on the sheet.
+    if multiply {
+        c.graphics_state(MULTIPLY);
+    } else if opacity < 1.0 || fill_opacity < 1.0 {
         c.graphics_state(SOLID);
     }
     c.matrix(w, 0.0, 0.0, h, x, y);
@@ -1251,6 +1267,97 @@ mod tests {
         let text = stream_text(&m.finish().unwrap());
         assert!(text.contains("50 50 m"), "{text}");
         assert!(text.contains("S\n"));
+    }
+
+    /// Drawn, moved and drawn again, as happens every time a markup is moved
+    /// and saved: the shape has to come back the size it was.
+    fn redrawn(mut m: Markup) -> ([f64; 4], [f64; 4]) {
+        m.finish().unwrap();
+        let first = m.bounds().unwrap();
+        for _ in 0..5 {
+            m.move_by(10.0, -4.0);
+            m.finish().unwrap();
+        }
+        let last = m.bounds().unwrap();
+        (first, [last[0] - 50.0, last[1] + 20.0, last[2] - 50.0, last[3] + 20.0])
+    }
+
+    fn close(a: [f64; 4], b: [f64; 4]) -> bool {
+        a.iter().zip(b.iter()).all(|(x, y)| (x - y).abs() < 1e-6)
+    }
+
+    #[test]
+    fn drawing_a_shape_again_does_not_make_it_bigger() {
+        let mut boxed = Markup::new(Subtype::Square);
+        boxed.set_colour([1.0, 0.0, 0.0]).set_width(3.0);
+        boxed.set_box([100.0, 100.0, 300.0, 200.0]);
+        let (a, b) = redrawn(boxed);
+        assert!(close(a, [100.0, 100.0, 300.0, 200.0]), "{a:?}");
+        assert!(close(a, b), "{a:?} became {b:?}");
+
+        let mut ring = Markup::new(Subtype::Circle);
+        ring.set_colour([0.0, 0.0, 1.0]).set_width(2.0);
+        ring.set_box([10.0, 10.0, 60.0, 40.0]);
+        let (a, b) = redrawn(ring);
+        assert!(close(a, b), "{a:?} became {b:?}");
+    }
+
+    #[test]
+    fn a_cloud_stays_the_size_it_was_drawn() {
+        // The scallops stick out a long way, so a cloud grew the most.
+        let mut cloud = Markup::new(Subtype::Square);
+        cloud.set_colour([1.0, 0.0, 0.0]).set_width(2.0);
+        let mut effect = Dict::new();
+        effect.set(Name::new("S"), Object::name("C"));
+        effect.set(Name::new("I"), Object::Real(2.0));
+        cloud.dict.set(Name::new("BE"), Object::Dict(effect));
+        cloud.set_box([100.0, 100.0, 300.0, 240.0]);
+        let (a, b) = redrawn(cloud);
+        assert!(close(a, [100.0, 100.0, 300.0, 240.0]), "{a:?}");
+        assert!(close(a, b), "{a:?} became {b:?}");
+    }
+
+    #[test]
+    fn a_callouts_box_stays_where_it_was_and_the_same_size() {
+        let mut m = Markup::new(Subtype::FreeText);
+        m.set_colour([1.0, 0.0, 0.0]).set_width(1.0);
+        m.set_box([200.0, 100.0, 400.0, 160.0]);
+        m.set(
+            "CL",
+            Object::Array(vec![Object::real(50.0), Object::real(50.0), Object::real(200.0), Object::real(130.0)]),
+        );
+        let (a, b) = redrawn(m);
+        assert!(close(a, [200.0, 100.0, 400.0, 160.0]), "the box is the box, not the leader: {a:?}");
+        assert!(close(a, b), "{a:?} became {b:?}");
+    }
+
+    #[test]
+    fn a_box_set_to_multiply_is_drawn_multiplied() {
+        let mut m = Markup::new(Subtype::Square);
+        m.set_colour([1.0, 0.0, 0.0]).set_width(2.0);
+        m.set("IC", Object::Array(vec![Object::real(1.0), Object::real(1.0), Object::real(0.0)]));
+        m.set_box([0.0, 0.0, 100.0, 60.0]);
+        let plain = stream_text(&m.finish().unwrap());
+        assert!(!plain.contains("/GSm gs"), "{plain}");
+        m.set_multiply(true);
+        let multiplied = stream_text(&m.finish().unwrap());
+        assert!(multiplied.contains("/GSm gs"), "{multiplied}");
+        assert!(m.multiplies());
+    }
+
+    #[test]
+    fn a_highlight_is_where_its_words_are() {
+        let mut m = Markup::new(Subtype::Highlight);
+        m.set_colour([1.0, 1.0, 0.0]);
+        m.set_box([10.0, 10.0, 110.0, 25.0]);
+        m.set(
+            "QuadPoints",
+            Object::Array(
+                [10.0, 25.0, 110.0, 25.0, 10.0, 10.0, 110.0, 10.0].iter().map(|v| Object::real(*v)).collect(),
+            ),
+        );
+        let (a, b) = redrawn(m);
+        assert!(close(a, b), "{a:?} became {b:?}");
     }
 }
 

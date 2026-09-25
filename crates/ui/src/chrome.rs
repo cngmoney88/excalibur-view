@@ -744,7 +744,7 @@ pub fn standard_toolbars() -> Vec<chest::ToolBar> {
         ("toolStripFile", 0, 3, &["Document.New", "File.CreatePDF", "File.CombinePDFs", "File.Open", "Document.Save", "Document.Print", "Split.Email", "Document.NewPackage", "Search", "SpellCheck"]),
         ("toolStripAdvancedText", 0, 383, &["Edit.Text", "|", "Markup.ReviewText", "|", "Markup.Underline", "Markup.Squiggly", "Markup.Strikethrough"]),
         ("toolStripMeasure", 0, 586, &["Measure.Tool", "Measure.Calibrate", "|", "Measure.Length", "Measure.Polylength", "Measure.Area", "Measure.Perimeter", "Measure.Diameter", "Measure.Angle", "Measure.Radius", "Measure.Volume", "Measure.Count", "|", "Measure.AreaCutout", "Measure.AreaEllipseCutout", "Measure.DynamicFill"]),
-        ("toolStripText", 0, 1113, &["Markup.TextBox", "Markup.Typewriter", "Markup.Note", "Markup.Callout", "Markup.Flag", "|", "Markup.Highlight", "Markup.Pen", "Eraser", "|", "Markup.Cloud9", "Markup.Cloud", "Button.Stamp", "Markup.Image", "Snapshot"]),
+        ("toolStripText", 0, 1113, &["Markup.TextBox", "Markup.Typewriter", "Markup.Note", "Markup.Callout", "Markup.Flag", "|", "Markup.Highlight", "Markup.Pen", "Eraser", "|", "Markup.Cloud9", "Markup.Cloud", "Markup.CloudPlus", "Button.Stamp", "Markup.Signature", "Markup.Image", "Snapshot"]),
         ("toolStripLine", 0, 1457, &["Markup.Line", "Markup.Arrow", "Markup.Arc", "Markup.Polyline", "Markup.Dimension", "Markup.Rectangle", "Markup.Ellipse", "Markup.Polygon"]),
         ("toolStripRotateDocument", 0, 1756, &["Document.RotateCounterclockwise", "Document.RotateClockwise"]),
         ("toolStripDigitalSignature", 0, 1839, &["Markup.DigitalSignature"]),

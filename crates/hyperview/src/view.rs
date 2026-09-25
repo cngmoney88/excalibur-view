@@ -89,6 +89,9 @@ impl View {
 pub struct Tiles {
     map: HashMap<TileKey, TextureHandle>,
     order: Vec<TileKey>,
+    /// Tiles that still show markups where they were before a save. They go
+    /// on being drawn, so nothing flickers, and are asked for again.
+    stale: std::collections::HashSet<TileKey>,
 }
 
 const TILE_BUDGET: usize = 256;
@@ -99,13 +102,38 @@ static NO_PREFETCH: std::sync::LazyLock<bool> =
     std::sync::LazyLock::new(|| std::env::var_os("HYPERVIEW_NO_PREFETCH").is_some());
 
 impl Tiles {
+    /// Keeps a tile. `current` says it was drawn from the file as it is now;
+    /// one that wasn't is kept for showing but still counts as wanted.
+    pub fn insert_drawn(&mut self, key: TileKey, handle: TextureHandle, current: bool) {
+        self.insert(key, handle);
+        if !current {
+            self.stale.insert(key);
+        }
+    }
+
+    /// Every tile of these sheets is out of date.
+    pub fn mark_stale(&mut self, pages: &std::collections::BTreeSet<u32>) {
+        for key in &self.order {
+            if pages.contains(&key.page) {
+                self.stale.insert(*key);
+            }
+        }
+    }
+
+    /// Whether a tile is here and shows the file as it is now.
+    pub fn fresh(&self, key: &TileKey) -> bool {
+        self.map.contains_key(key) && !self.stale.contains(key)
+    }
+
     pub fn insert(&mut self, key: TileKey, handle: TextureHandle) {
+        self.stale.remove(&key);
         if self.map.insert(key, handle).is_none() {
             self.order.push(key);
         }
         while self.order.len() > TILE_BUDGET {
             let oldest = self.order.remove(0);
             self.map.remove(&oldest);
+            self.stale.remove(&oldest);
         }
     }
 
@@ -172,6 +200,9 @@ impl App {
             self.follow_the_scroll(mine);
             self.showing = self.sheets_showing(mine);
             self.tool_input(ui, &response, mine);
+            if self.tool == Tool::Select && !self.typing_in_place() {
+                self.markup_menu(&response);
+            }
             self.request_tiles(mine);
             self.paint_sheet(&painter, mine, size);
             if self.dimmed {
@@ -182,6 +213,7 @@ impl App {
             }
             self.paint_grid(&painter, mine, size);
             self.paint_markups(&painter, mine);
+            self.paint_paragraphs(&painter);
             self.paint_plugin_findings(&painter);
             self.paint_found(&painter, mine);
             self.paint_fill(&painter, mine);
@@ -760,8 +792,235 @@ impl App {
         sheet
     }
 
+    /// The grips of what is selected: one markup, or one group of them (a
+    /// Cloud+), on the sheet in view and not locked. Each with its markup.
+    pub fn grips_showing(&self) -> Option<Vec<(usize, crate::grips::Handle)>> {
+        if self.tool != Tool::Select || self.points_mode.is_some() || self.typing_in_place() {
+            return None;
+        }
+        let doc = self.doc()?;
+        let held = doc.selection();
+        if !crate::groups::one_thing(&doc.marks, &held) {
+            return None;
+        }
+        let frame = doc.frame();
+        let mut out = Vec::new();
+        for index in held {
+            let mark = doc.marks.get(index)?;
+            if mark.gone || mark.page != doc.page || locked(&mark.markup) {
+                return None;
+            }
+            for handle in crate::grips::handles(&mark.markup, &frame) {
+                out.push((index, handle));
+            }
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// Whether a text box's words are being typed on the sheet itself.
+    pub fn typing_in_place(&self) -> bool {
+        let Some(index) = self.editing_text else { return false };
+        self.doc()
+            .and_then(|doc| doc.marks.get(index).map(|m| (m, doc.page)))
+            .is_some_and(|(m, page)| m.page == page && m.markup.subtype() == annot::Subtype::FreeText)
+    }
+
+    /// Grips first: a drag that starts on one changes the markup's size or
+    /// its points rather than moving it. Comes back true when it took the
+    /// input.
+    fn grip_input(&mut self, ui: &egui::Ui, response: &egui::Response, pointer: Pos2) -> bool {
+        use crate::grips;
+        if let Some(mut g) = self.gripping.take() {
+            ui.ctx().set_cursor_icon(grips::cursor(g.grip));
+            if ui.input(|i| i.pointer.primary_down()) {
+                let shift = ui.input(|i| i.modifiers.shift);
+                let doc = self.docs.get_mut(self.current).unwrap();
+                let s = doc.view.to_sheet(pointer);
+                let by = [s[0] as f64 - g.from[0], s[1] as f64 - g.from[1]];
+                if !g.moved && (by[0] != 0.0 || by[1] != 0.0) {
+                    doc.checkpoint_named(match g.grip {
+                        grips::Grip::Side(_) => "Resize",
+                        grips::Grip::Point(_) => "Move a point",
+                        grips::Grip::Leader(_) => "Move the leader",
+                    });
+                    g.moved = true;
+                }
+                if g.moved {
+                    let frame = doc.frame();
+                    let changed = grips::dragged(&g.original, &frame, g.grip, by, shift);
+                    // A Cloud+'s words keep pointing at the same part of the
+                    // cloud as the cloud changes size.
+                    let resized_cloud = matches!(g.grip, grips::Grip::Side(_))
+                        && g.original.subtype() != annot::Subtype::FreeText;
+                    if resized_cloud {
+                        if let (Some(was), Some(now)) = (g.original.drawn_box(), changed.drawn_box()) {
+                            for (partner, original) in &g.partners {
+                                if original.subtype() == annot::Subtype::FreeText {
+                                    if let Some(mark) = doc.marks.get_mut(*partner) {
+                                        mark.markup = grips::follow_cloud(original, was, now);
+                                        mark.changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if let Some(mark) = doc.marks.get_mut(g.index) {
+                        mark.markup = changed;
+                        mark.changed = true;
+                    }
+                    doc.dirty = true;
+                    doc.remeasure_selection();
+                }
+                self.gripping = Some(g);
+            } else if g.moved {
+                self.save_soon();
+                self.status = match g.grip {
+                    grips::Grip::Side(_) if grips::is_picture(&g.original) => {
+                        "Resized. Hold Shift to stretch it instead; Undo puts it back.".into()
+                    }
+                    grips::Grip::Side(_) => {
+                        "Resized. Hold Shift on a corner to keep its shape; Undo puts it back.".into()
+                    }
+                    _ => "Moved. Undo puts it back.".into(),
+                };
+            }
+            return true;
+        }
+        let Some(handles) = self.grips_showing() else {
+            return false;
+        };
+        let doc = self.doc().unwrap();
+        let reach = 8.0 / doc.view.zoom as f64;
+        let under = |at: [f64; 2]| {
+            handles
+                .iter()
+                .map(|(i, h)| (*i, h.grip, (h.at[0] - at[0]).powi(2) + (h.at[1] - at[1]).powi(2)))
+                .filter(|(_, _, d)| *d <= reach * reach)
+                .min_by(|a, b| a.2.total_cmp(&b.2))
+                .map(|(i, g, _)| (i, g))
+        };
+        let s = doc.view.to_sheet(pointer);
+        if let Some((_, grip)) = under([s[0] as f64, s[1] as f64]) {
+            ui.ctx().set_cursor_icon(grips::cursor(grip));
+        }
+        if response.drag_started() {
+            let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(pointer);
+            let s = doc.view.to_sheet(press);
+            let from = [s[0] as f64, s[1] as f64];
+            if let Some((index, grip)) = under(from) {
+                let original = doc.marks[index].markup.clone();
+                let partners = crate::groups::group_of(&doc.marks, index)
+                    .into_iter()
+                    .filter(|i| *i != index)
+                    .map(|i| (i, doc.marks[i].markup.clone()))
+                    .collect();
+                self.gripping = Some(grips::Gripping { index, grip, from, original, moved: false, partners });
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The Cloud+ tool: drag out the cloud, then click where its words go.
+    fn cloud_plus_input(&mut self, response: &egui::Response, at: [f64; 2]) {
+        let waiting = self.cloud_waiting
+            && self.doc().is_some_and(|d| {
+                d.draft.as_ref().is_some_and(|draft| draft.tool == Tool::CloudPlus && draft.points.len() == 2)
+            });
+        self.cloud_waiting = waiting;
+        if waiting {
+            if response.clicked() {
+                self.place_cloud_plus(at);
+            }
+            return;
+        }
+        if response.drag_started() {
+            self.start_draft();
+            self.push_point(at);
+            self.push_point(at);
+        } else if response.dragged() {
+            if let Some(draft) = self.doc_mut().and_then(|d| d.draft.as_mut()) {
+                if draft.points.len() == 2 {
+                    draft.points[1] = at;
+                }
+            }
+        } else if response.drag_stopped() {
+            let Some(doc) = self.doc_mut() else { return };
+            let zoom = doc.view.zoom as f64;
+            let big_enough = doc.draft.as_ref().is_some_and(|d| {
+                d.points.len() == 2 && a_real_drag(d.points[0], d.points[1], zoom)
+            });
+            if big_enough {
+                self.cloud_waiting = true;
+                self.status = "Now click where the words go.".into();
+            } else {
+                doc.draft = None;
+            }
+        }
+    }
+
+    /// Puts down a Cloud+: the cloud that was dragged out, and a callout from
+    /// it to a box of words where the click was, then opens the box for
+    /// typing.
+    fn place_cloud_plus(&mut self, click: [f64; 2]) {
+        self.cloud_waiting = false;
+        let pen = self.pen.clone();
+        let Some(doc) = self.doc_mut() else { return };
+        let Some(draft) = doc.draft.take() else { return };
+        let frame = doc.frame();
+        let scale = doc.scale();
+        let Some(mut cloud) = draft.into_markup(&frame, scale.as_ref()) else { return };
+        let Some(cloud_box) = cloud.drawn_box() else { return };
+        cloud.set_subject(crate::groups::CLOUD_PLUS);
+        let name = annot::name::fresh();
+        cloud.set_name(&name);
+
+        // The box of words goes out from the click, away from the cloud.
+        let p = frame.to_pdf(click);
+        let (w, h) = (200.0, 54.0);
+        let middle = [(cloud_box[0] + cloud_box[2]) * 0.5, (cloud_box[1] + cloud_box[3]) * 0.5];
+        let (x0, x1) = if p[0] < middle[0] { (p[0] - w, p[0]) } else { (p[0], p[0] + w) };
+        let (y0, y1) = if p[1] > middle[1] { (p[1], p[1] + h) } else { (p[1] - h, p[1]) };
+        let words_box = [x0, y0, x1, y1];
+
+        let mut words = annot::Markup::new(annot::Subtype::FreeText);
+        pen.onto(&mut words);
+        // The fill is the cloud's; the words sit on the drawing.
+        words.dict.remove("IC");
+        words.set_multiply(false);
+        if words.width() <= 0.0 {
+            words.set_width(1.0);
+        }
+        words.set_box(words_box);
+        words.set_subject(crate::groups::CLOUD_PLUS);
+        words.set("IT", pdf::Object::name("FreeTextCallout"));
+        words.set(crate::groups::PART_OF, pdf::Object::text(&name));
+        words.set_name(&annot::name::fresh());
+        let line = crate::grips::leader_between(cloud_box, words_box);
+        words.set(
+            "CL",
+            pdf::Object::Array(line.iter().flat_map(|q| [pdf::Object::real(q[0]), pdf::Object::real(q[1])]).collect()),
+        );
+
+        doc.checkpoint_named("Draw Cloud+");
+        let page = doc.page;
+        doc.marks.push(crate::sheet::Mark::new(page, cloud));
+        let head = doc.marks.len() - 1;
+        doc.marks.push(crate::sheet::Mark::new(page, words));
+        let typed = doc.marks.len() - 1;
+        doc.dirty = true;
+        doc.choose(Some(head));
+        self.editing_text = Some(typed);
+        self.status = "Type what the cloud is about. Click anywhere else when it's done.".into();
+    }
+
     fn tool_input(&mut self, ui: &mut egui::Ui, response: &egui::Response, _area: Rect) {
         if self.tool == Tool::Pan {
+            return;
+        }
+        // Words being typed into a box on the sheet have the pointer to
+        // themselves; a click elsewhere finishes them and does nothing else.
+        if self.typing_in_place() {
             return;
         }
         let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) else {
@@ -775,11 +1034,57 @@ impl App {
             return;
         }
 
+        if tool == Tool::EditText {
+            self.edit_text_input(ui, response, pointer);
+            return;
+        }
+
         if tool == Tool::Select {
             // A point mode takes the click before selection does, so clicking
             // a corner changes it rather than picking something else up.
             if response.clicked() && self.points_mode.is_some() && self.edit_points_at(at) {
                 return;
+            }
+            if self.grip_input(ui, response, pointer) {
+                return;
+            }
+            // A right-click is about what is under the pointer: it becomes
+            // what is selected, unless it already is part of it.
+            if response.secondary_clicked() {
+                let doc = self.doc_mut().unwrap();
+                let frame = doc.frame();
+                let page = doc.page;
+                let reach = (12.0 / doc.view.zoom as f64).powi(2);
+                let s = doc.view.to_sheet(pointer);
+                match hit_at(doc, &frame, page, [s[0] as f64, s[1] as f64], reach) {
+                    Some(i) if !doc.selection().contains(&i) => doc.choose(Some(i)),
+                    Some(_) => {}
+                    None => doc.choose(None),
+                }
+                self.take_pen_from_selection();
+            }
+            // Double-clicking a text box or a callout opens its words for
+            // typing, right there on the sheet.
+            if response.double_clicked() && self.points_mode.is_none() {
+                let doc = self.doc_mut().unwrap();
+                let frame = doc.frame();
+                let page = doc.page;
+                let reach = (12.0 / doc.view.zoom as f64).powi(2);
+                let s = doc.view.to_sheet(pointer);
+                if let Some(i) = hit_at(doc, &frame, page, [s[0] as f64, s[1] as f64], reach) {
+                    // A Cloud+'s cloud opens its words too.
+                    let words = if doc.marks[i].markup.subtype() == annot::Subtype::FreeText {
+                        Some(i)
+                    } else {
+                        crate::groups::words_of(&doc.marks, i)
+                    };
+                    if let Some(w) = words.filter(|w| !locked(&doc.marks[*w].markup)) {
+                        doc.choose(Some(i));
+                        doc.checkpoint_named("Edit text");
+                        self.editing_text = Some(w);
+                        return;
+                    }
+                }
             }
             if response.clicked() {
                 // Holding Ctrl or Shift adds to what is already held, which is
@@ -830,7 +1135,15 @@ impl App {
                             doc.choose(Some(i));
                         }
                     }
-                    self.moving = Some(crate::app::Moving { last: from, moved: false });
+                    // A Cloud+'s box of words moves on its own, its leader
+                    // still pointing at the cloud. The cloud moves the lot.
+                    let words_alone = doc.marks[i].markup.subtype() == annot::Subtype::FreeText
+                        && crate::groups::head_of(&doc.marks, i) != i;
+                    self.moving = Some(crate::app::Moving {
+                        last: from,
+                        moved: false,
+                        only: words_alone.then_some(i),
+                    });
                     return;
                 }
             }
@@ -843,18 +1156,24 @@ impl App {
                     let (a, b) = (frame.to_pdf(moving.last), frame.to_pdf(now));
                     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
                     if dx != 0.0 || dy != 0.0 {
-                        let picked: Vec<usize> = doc
-                            .selection()
-                            .into_iter()
-                            .filter(|i| !locked(&doc.marks[*i].markup))
-                            .collect();
+                        let picked: Vec<usize> = match moving.only {
+                            Some(one) => vec![one],
+                            None => doc.selection(),
+                        }
+                        .into_iter()
+                        .filter(|i| !locked(&doc.marks[*i].markup))
+                        .collect();
                         if !picked.is_empty() {
                             if !moving.moved {
                                 doc.checkpoint_named(if picked.len() == 1 { "Move" } else { "Move markups" });
                                 moving.moved = true;
                             }
                             for i in picked {
-                                doc.marks[i].markup.move_by(dx, dy);
+                                if moving.only.is_some() {
+                                    crate::grips::move_box_only(&mut doc.marks[i].markup, dx, dy);
+                                } else {
+                                    doc.marks[i].markup.move_by(dx, dy);
+                                }
                                 doc.marks[i].changed = true;
                             }
                             doc.dirty = true;
@@ -868,6 +1187,7 @@ impl App {
                     self.moving = None;
                     if moved {
                         self.status = "Moved. Undo puts it back; the arrow keys nudge it.".into();
+                        self.save_soon();
                     }
                     return;
                 }
@@ -885,6 +1205,18 @@ impl App {
                 }
             } else if response.drag_stopped() {
                 self.close_lasso(true);
+            }
+            return;
+        }
+
+        if tool == Tool::CloudPlus {
+            self.cloud_plus_input(response, at);
+            return;
+        }
+
+        if tool == Tool::Signature {
+            if response.clicked() {
+                self.place_signature(at);
             }
             return;
         }
@@ -1355,6 +1687,11 @@ impl App {
         let at = doc.marks.len() - 1;
         doc.choose(Some(at));
 
+        // A callout is for its words: they are typed straight into its box.
+        if tool == Tool::Callout {
+            self.editing_text = Some(at);
+        }
+
         // A volume is an area with a depth, and without the depth it is not a
         // volume. Asking now, while the shape they just drew is in front of
         // them, beats letting it sit there measuring nothing.
@@ -1506,7 +1843,7 @@ impl App {
                     tx: tx as u32,
                     ty: ty as u32,
                 };
-                if doc.tiles.has(&key) {
+                if doc.tiles.fresh(&key) {
                     continue;
                 }
                 let cx = (tx as f64 + 0.5) * TILE as f64 / scale;
@@ -1660,6 +1997,29 @@ impl App {
                 &mark.on_sheet(&frame),
                 &Look::of(&mark.markup, selected).labelled(every_label || selected),
             );
+            paint_leader(painter, &doc.view, &frame, &mark.markup);
+        }
+        // The grips on what is selected, so it can be taken hold of.
+        if let Some(handles) = self.grips_showing() {
+            let blue = Color32::from_rgb(90, 170, 255);
+            for (_, handle) in handles {
+                let at = doc.view.to_screen([handle.at[0] as f32, handle.at[1] as f32]);
+                match handle.grip {
+                    crate::grips::Grip::Side(_) => {
+                        let r = Rect::from_center_size(at, egui::vec2(8.0, 8.0));
+                        painter.rect_filled(r, 1.0, Color32::WHITE);
+                        painter.rect_stroke(r, 1.0, Stroke::new(1.5, blue), egui::StrokeKind::Middle);
+                    }
+                    crate::grips::Grip::Point(_) => {
+                        painter.circle_filled(at, 4.5, Color32::WHITE);
+                        painter.circle_stroke(at, 4.5, Stroke::new(1.5, blue));
+                    }
+                    crate::grips::Grip::Leader(_) => {
+                        painter.circle_filled(at, 4.5, Color32::from_rgb(255, 196, 64));
+                        painter.circle_stroke(at, 4.5, Stroke::new(1.5, Color32::from_gray(40)));
+                    }
+                }
+            }
         }
         // The corners of whatever is selected, while a point mode is in hand,
         // so there is something to aim at.
@@ -1774,8 +2134,34 @@ impl App {
                     caption: String::new(),
                     selected: true,
                     cloud: draft.tool.is_cloudy().then_some(9.0),
+                    picture: false,
                 },
             );
+            // A Cloud+ waiting for where its words go: the leader and the box
+            // follow the pointer until the click.
+            if self.cloud_waiting && draft.points.len() == 2 {
+                if let Some(pointer) = painter.ctx().input(|i| i.pointer.hover_pos()) {
+                    let s = doc.view.to_sheet(pointer);
+                    let at = [s[0] as f64, s[1] as f64];
+                    let (a, b) = (draft.points[0], draft.points[1]);
+                    let cloud = [a[0].min(b[0]), a[1].min(b[1]), a[0].max(b[0]), a[1].max(b[1])];
+                    let middle = [(cloud[0] + cloud[2]) * 0.5, (cloud[1] + cloud[3]) * 0.5];
+                    // Sheet space runs down, so "above" is a smaller y.
+                    let (x0, x1) = if at[0] < middle[0] { (at[0] - 200.0, at[0]) } else { (at[0], at[0] + 200.0) };
+                    let (y0, y1) = if at[1] < middle[1] { (at[1] - 54.0, at[1]) } else { (at[1], at[1] + 54.0) };
+                    let words = [x0, y0, x1, y1];
+                    let line = crate::grips::leader_between(cloud, words);
+                    let screen = |p: [f64; 2]| doc.view.to_screen([p[0] as f32, p[1] as f32]);
+                    let stroke = Stroke::new(1.5, colour);
+                    painter.line_segment([screen(line[0]), screen(line[1])], stroke);
+                    painter.rect_stroke(
+                        Rect::from_two_pos(screen([words[0], words[1]]), screen([words[2], words[3]])),
+                        0.0,
+                        stroke,
+                        egui::StrokeKind::Middle,
+                    );
+                }
+            }
         }
     }
 
@@ -1837,12 +2223,16 @@ fn colour_of(markup: &annot::Markup) -> Color32 {
 }
 
 fn interior_of(markup: &annot::Markup) -> Option<Color32> {
+    // A multiplied fill is drawn properly into the sheet once it is saved,
+    // which happens straight away; here it is only a tint, so it never hides
+    // the lines the multiply is there to keep.
+    let share = if markup.multiplies() { 0.25 } else { 1.0 };
     markup.interior().map(|c| {
         Color32::from_rgba_unmultiplied(
             (c[0] * 255.0) as u8,
             (c[1] * 255.0) as u8,
             (c[2] * 255.0) as u8,
-            (markup.fill_opacity() * 255.0) as u8,
+            (markup.fill_opacity() * share * 255.0) as u8,
         )
     })
 }
@@ -1953,6 +2343,9 @@ pub struct Look {
     /// has to be what the file says, or somebody draws a cloud here and finds
     /// a box when they open it anywhere else.
     pub cloud: Option<f64>,
+    /// A picture — a signature, a photograph — is the picture, with no box
+    /// drawn round it.
+    pub picture: bool,
 }
 
 /// What a measurement says on the sheet, with `×6` after it when one markup
@@ -2006,6 +2399,7 @@ impl Look {
             width: markup.width(),
             caption: caption_with_quantity(markup),
             selected,
+            picture: markup.picture.is_some() || markup.subtype() == annot::Subtype::Stamp,
             cloud: annot::appearance::cloud_radius_for(
                 markup,
                 markup.bounds().unwrap_or([0.0, 0.0, 0.0, 0.0]),
@@ -2099,7 +2493,9 @@ fn paint_shape(painter: &egui::Painter, view: &View, sheet: &[[f64; 2]], look: &
             if let Some(fill) = interior {
                 painter.rect_filled(rect, 0.0, fill);
             }
-            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+            if !look.picture {
+                painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
+            }
         }
         S::Circle => {
             let rect = bounding(&points);
@@ -2143,6 +2539,39 @@ fn paint_shape(painter: &egui::Painter, view: &View, sheet: &[[f64; 2]], look: &
             Stroke::new(1.5, Color32::from_rgb(90, 170, 255)),
             egui::StrokeKind::Outside,
         );
+    }
+}
+
+/// A callout's leader, live, so it follows while its tip or its box is being
+/// dragged rather than showing where it was at the last save.
+fn paint_leader(painter: &egui::Painter, view: &View, frame: &annot::Frame, markup: &annot::Markup) {
+    if markup.subtype() != annot::Subtype::FreeText {
+        return;
+    }
+    let line: Vec<[f64; 2]> = markup
+        .dict
+        .get("CL")
+        .map(|o| o.numbers())
+        .unwrap_or_default()
+        .chunks(2)
+        .filter(|c| c.len() == 2)
+        .map(|c| frame.to_sheet([c[0], c[1]]))
+        .collect();
+    if line.len() < 2 {
+        return;
+    }
+    let colour = colour_of(markup);
+    let width = (markup.width().max(1.0) as f32 * view.zoom.clamp(0.4, 2.0)).max(1.2);
+    let points: Vec<Pos2> = line.iter().map(|p| view.to_screen([p[0] as f32, p[1] as f32])).collect();
+    painter.add(egui::Shape::line(points.clone(), Stroke::new(width, colour)));
+    // The head, pointing at what the callout is about.
+    let (tip, from) = (points[0], points[1]);
+    let along = (tip - from).normalized();
+    if along.is_finite() {
+        let reach = (width * 4.0).max(7.0);
+        let side = egui::vec2(-along.y, along.x) * reach * 0.45;
+        let back = tip - along * reach;
+        painter.add(egui::Shape::convex_polygon(vec![tip, back + side, back - side], colour, Stroke::NONE));
     }
 }
 

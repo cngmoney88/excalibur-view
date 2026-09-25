@@ -71,7 +71,7 @@ fn main() {
                 );
                 dump("preview", image);
             }
-            FromWorker::Tile { key, image, millis } => {
+            FromWorker::Tile { key, image, millis, .. } => {
                 tile_ms.push(millis);
                 if key.bucket == 2 && key.tx == 8 && key.ty == 8 {
                     dump("tile-4x", image);

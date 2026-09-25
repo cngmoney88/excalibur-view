@@ -17,6 +17,9 @@ pub struct Moving {
     /// Whether anything has moved yet — the undo step is taken then, so a
     /// click that wobbles is not an undo step.
     pub moved: bool,
+    /// Moving one part of a group on its own: a Cloud+'s box of words, whose
+    /// leader keeps pointing at the cloud.
+    pub only: Option<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -65,6 +68,12 @@ pub enum Tool {
     Cloud,
     /// A cloudy border round a shape clicked out corner by corner.
     CloudPolygon,
+    /// A cloud with a leader to a box of words: Revu's Cloud+.
+    CloudPlus,
+    /// Your own signature, put down with a click.
+    Signature,
+    /// Change the words already on the sheet.
+    EditText,
     /// Three clicks: the two ends and a point the curve passes through.
     Arc,
     /// A dimension line with arrows at both ends and the length on it.
@@ -173,7 +182,7 @@ impl Tool {
             Tool::Radius => (S::Circle, Some("PolygonRadius")),
             Tool::Angle => (S::PolyLine, Some("PolyLineAngle")),
             Tool::Volume => (S::Polygon, Some("PolygonVolume")),
-            Tool::Rect | Tool::Redaction | Tool::Cloud => (S::Square, None),
+            Tool::Rect | Tool::Redaction | Tool::Cloud | Tool::CloudPlus => (S::Square, None),
             Tool::Ellipse => (S::Circle, None),
             Tool::Arrow | Tool::Dimension => (S::Line, None),
             Tool::Ink => (S::Ink, None),
@@ -185,7 +194,7 @@ impl Tool {
             Tool::Squiggly => (S::Squiggly, None),
             Tool::Polyline | Tool::Arc => (S::PolyLine, None),
             Tool::Polygon | Tool::CloudPolygon | Tool::Space => (S::Polygon, None),
-            Tool::Image | Tool::Stamp | Tool::Snapshot => (S::Stamp, None),
+            Tool::Image | Tool::Stamp | Tool::Snapshot | Tool::Signature => (S::Stamp, None),
             Tool::Hyperlink => (S::Link, None),
             Tool::FileAttachment => (S::Other, None),
             Tool::FormText
@@ -203,7 +212,7 @@ impl Tool {
             // when they apply it, and until then it is a proposal.
             Tool::Fill | Tool::FillBoundary => return None,
             Tool::Eraser => return None,
-            Tool::Pan | Tool::Select | Tool::Lasso | Tool::Calibrate => return None,
+            Tool::Pan | Tool::Select | Tool::Lasso | Tool::Calibrate | Tool::EditText => return None,
         })
     }
 
@@ -212,6 +221,7 @@ impl Tool {
         match self {
             Tool::Pan
             | Tool::Select
+            | Tool::EditText
             | Tool::SketchPolygon
             | Tool::SketchRect
             | Tool::SketchEllipse
@@ -223,6 +233,7 @@ impl Tool {
             | Tool::Note
             | Tool::Flag
             | Tool::Stamp
+            | Tool::Signature
             | Tool::FileAttachment => Shaping::Click,
 
             Tool::Rect
@@ -234,6 +245,7 @@ impl Tool {
             | Tool::Strikethrough
             | Tool::Squiggly
             | Tool::Cloud
+            | Tool::CloudPlus
             | Tool::Image
             | Tool::Redaction
             | Tool::Hyperlink
@@ -301,7 +313,7 @@ impl Tool {
 
     /// Tools that draw a cloudy border rather than a plain one.
     pub fn is_cloudy(self) -> bool {
-        matches!(self, Tool::Cloud | Tool::CloudPolygon)
+        matches!(self, Tool::Cloud | Tool::CloudPolygon | Tool::CloudPlus)
     }
 
     /// The tool that draws a Tool Chest tool, and the toolbar button that
@@ -421,6 +433,9 @@ impl Tool {
             Tool::Polygon => "Polygon",
             Tool::Cloud => "Cloud",
             Tool::CloudPolygon => "Polygon Cloud",
+            Tool::CloudPlus => "Cloud+",
+            Tool::Signature => "Signature",
+            Tool::EditText => "Edit Text",
             Tool::Arc => "Arc",
             Tool::Dimension => "Dimension",
             Tool::Callout => "Callout",
@@ -479,6 +494,9 @@ impl Tool {
             Tool::Polyline => "Click each corner. Double click, Enter or right click finishes.",
             Tool::Polygon => "Drag out a rectangle, or click each corner. Double click, Enter or right click closes it.",
             Tool::Cloud => "Drag out a box. It is drawn as a revision cloud.",
+            Tool::CloudPlus => "Drag out the cloud, then click where the words go, and type.",
+            Tool::Signature => "Click the sheet where your signature goes.",
+            Tool::EditText => "Click words on the sheet to change them.",
             Tool::CloudPolygon => "Click round what changed. Double click, Enter or right click closes it.",
             Tool::Arc => "Click the two ends, then a point the curve goes through.",
             Tool::Dimension => "Drag between the two points. The length is written on the line.",
@@ -683,6 +701,18 @@ pub struct App {
     pub lasso: Option<Vec<[f64; 2]>>,
     /// Markups being dragged to a new place with Select.
     pub moving: Option<Moving>,
+    /// A grip on the selected markup, while it is being dragged.
+    pub gripping: Option<crate::grips::Gripping>,
+    /// A Cloud+'s cloud has been dragged out and is waiting for a click on
+    /// where its words go.
+    pub cloud_waiting: bool,
+    /// Your signatures: picking one, making one, and the one in hand.
+    pub signing: crate::signature::Signing,
+    /// Words on the sheet being changed, when they are.
+    pub rewording: Option<crate::textedit::Rewording>,
+    pub reword_task: u64,
+    /// The paragraph under the pointer, with the Edit Text tool in hand.
+    pub text_under: Option<usize>,
     /// The look the Format Painter is carrying, when it has one.
     pub painting_format: Option<crate::clip::Style>,
     /// The address being typed for a hyperlink, while that box is up.
@@ -887,6 +917,12 @@ impl App {
             history_open: false,
             lasso: None,
             moving: None,
+            gripping: None,
+            cloud_waiting: false,
+            signing: Default::default(),
+            rewording: None,
+            reword_task: 0,
+            text_under: None,
             painting_format: None,
             asking_address: None,
             showing: Vec::new(),
@@ -1527,7 +1563,39 @@ impl App {
                         self.sync_now();
                     }
                 }
-                FromWorker::Tile { key, image, millis } => {
+                FromWorker::Paragraphs { doc: id, page, found } => {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                        match found {
+                            Ok(found) => {
+                                doc.paragraphs.insert(page, found);
+                            }
+                            Err(why) => {
+                                doc.paragraphs.insert(page, Vec::new());
+                                log::warn!("could not read the words on sheet {}: {why}", page + 1);
+                            }
+                        }
+                    }
+                }
+                FromWorker::Rewritten { doc, job, page, result } => self.rewritten(doc, job, page, result),
+                FromWorker::Refreshed { doc: id, generation } => {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                        doc.fresh_from = generation;
+                        let pages = std::mem::take(&mut doc.redrawing);
+                        doc.tiles.mark_stale(&pages);
+                        // The words on those sheets are read again when next wanted.
+                        for page in &pages {
+                            doc.paragraphs.remove(page);
+                            doc.paragraphs_asked.remove(page);
+                        }
+                        // The thumbnails too, which show the markups.
+                        for page in &pages {
+                            doc.thumbs.remove(page);
+                            doc.asked.remove(page);
+                            doc.previews.remove(page);
+                        }
+                    }
+                }
+                FromWorker::Tile { key, image, millis, generation } => {
                     self.last_tile_millis = millis;
                     if let Some(bench) = self.bench.as_mut() {
                         bench.tile(millis as f64);
@@ -1541,7 +1609,8 @@ impl App {
                             image,
                             egui::TextureOptions::LINEAR,
                         );
-                        doc.tiles.insert(key, handle);
+                        let current = generation >= doc.fresh_from;
+                        doc.tiles.insert_drawn(key, handle, current);
                     }
                 }
                 FromWorker::Preview { doc: id, page, scale, image } => {
@@ -1772,6 +1841,30 @@ impl App {
     /// safe — so saving on a timer while somebody is still clicking would grow
     /// the drawing for no reason. It waits for quiet instead, and it says once
     /// when it cannot write rather than failing in silence every few seconds.
+    /// Saves on the next frame rather than after the usual pause, for the end
+    /// of something whole — a markup let go of after moving or resizing it,
+    /// words finished being typed — so the sheet shows it where it is now.
+    pub fn save_soon(&mut self) {
+        let Some(doc) = self.doc() else { return };
+        let count = doc.marks.len();
+        let long_ago = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .unwrap_or_else(std::time::Instant::now);
+        self.settled = Some((long_ago, count));
+    }
+
+    /// Has every drawing whose markups were saved read again for drawing.
+    fn refresh_saved(&mut self) {
+        for doc in self.docs.iter_mut() {
+            if doc.redraw.is_empty() {
+                continue;
+            }
+            let pages = std::mem::take(&mut doc.redraw);
+            doc.redrawing.extend(pages);
+            self.svc.send(ToWorker::Refresh { doc: doc.id });
+        }
+    }
+
     fn autosave(&mut self) {
         const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
         let Some(doc) = self.doc() else {
@@ -1921,6 +2014,8 @@ impl eframe::App for App {
         self.run_commands(ctx);
         self.calibrate_dialog(ctx);
         self.text_dialog(ctx);
+        self.signature_window(ctx);
+        self.reword_window(ctx);
         self.prefs_dialog(ctx);
         self.sign_in_dialog(ctx);
         self.print_dialog(ctx);
@@ -1950,6 +2045,7 @@ impl eframe::App for App {
 
         crate::bench::mark(&mut marks, "dialogs");
         self.autosave();
+        self.refresh_saved();
         self.keep_in_step(ctx);
         crate::bench::mark(&mut marks, "autosave");
         if let Some(bench) = self.bench.as_mut() {
@@ -2362,10 +2458,12 @@ impl App {
             }
         }
         doc.choose(None);
+        doc.dirty = true;
         self.status = format!(
             "{} markup{} deleted.",
             picked.len(),
             if picked.len() == 1 { "" } else { "s" }
         );
+        self.save_soon();
     }
 }

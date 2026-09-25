@@ -24,6 +24,8 @@ pub struct Pen {
     /// Nought to one.
     pub opacity: f32,
     pub fill_opacity: f32,
+    /// Blended by multiplying, so the drawing shows through.
+    pub blend: bool,
     pub text: annot::text::Setting,
 }
 
@@ -39,6 +41,7 @@ impl Default for Pen {
             hatch: Hatch::Solid,
             opacity: 1.0,
             fill_opacity: 1.0,
+            blend: false,
             text: annot::text::Setting::default(),
         }
     }
@@ -308,6 +311,7 @@ impl Pen {
                 .unwrap_or(Hatch::Solid),
             opacity: markup.opacity(),
             fill_opacity: markup.fill_opacity(),
+            blend: markup.multiplies(),
             text: annot::text::Setting::of(markup),
         }
     }
@@ -378,9 +382,13 @@ impl Pen {
         markup
             .dict
             .set("FillOpacity", pdf::Object::real(self.fill_opacity as f64));
+        markup.set_multiply(self.blend);
         self.text.onto(markup);
-        // The appearance was drawn for the old look.
-        markup.dict.remove("AP");
+        // The appearance was drawn for the old look — unless it is a picture
+        // that can only be kept, which a colour doesn't change.
+        if !markup.keeps_its_appearance() {
+            markup.dict.remove("AP");
+        }
     }
 }
 
@@ -444,7 +452,6 @@ impl App {
         change(&mut self.pen);
         // The colour on the old toolbar and the pen are the same thing.
         self.color = self.pen.line;
-        let pen = self.pen.clone();
         let Some(doc) = self.doc_mut() else { return };
         let picked = doc.selection();
         if picked.is_empty() {
@@ -455,9 +462,13 @@ impl App {
             picked.len(),
             if picked.len() == 1 { "" } else { "s" }
         ));
+        // Only what was chosen changes on each of them. Six boxes in three
+        // colours given a fill keep their three colours.
         for index in &picked {
             if let Some(mark) = doc.marks.get_mut(*index) {
-                pen.onto(&mut mark.markup);
+                let mut look = Pen::of(&mark.markup);
+                change(&mut look);
+                look.onto(&mut mark.markup);
                 mark.changed = true;
             }
         }
@@ -484,6 +495,164 @@ impl App {
     }
 }
 
+/// Colours offered on a markup's right-click menu: the toolbar's own.
+fn menu_colours() -> impl Iterator<Item = (&'static str, [u8; 4])> {
+    crate::app::PALETTE.iter().chain(MORE_COLOURS.iter()).map(|(n, c)| (*n, *c))
+}
+
+/// A row of colour swatches in a menu. Comes back with the one clicked.
+fn swatches(ui: &mut egui::Ui, line: egui::Color32) -> Option<[u8; 4]> {
+    let mut picked = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(180.0);
+        for (name, rgb) in menu_colours() {
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::click());
+            ui.painter().rect_filled(rect.shrink(2.0), 3.0, egui::Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            ui.painter().rect_stroke(rect.shrink(2.0), 3.0, egui::Stroke::new(1.0, line), egui::StrokeKind::Inside);
+            if response.on_hover_text(name).clicked() {
+                picked = Some(rgb);
+            }
+        }
+    });
+    picked
+}
+
+impl App {
+    /// The right-click menu on a markup on the sheet: its fill, its outline,
+    /// blending, how see-through it is, its line weight, its words.
+    pub fn markup_menu(&mut self, response: &egui::Response) {
+        let theme = self.chrome.theme;
+        let Some(doc) = self.doc() else { return };
+        let picked = doc.selection();
+        // One markup, or one group of them such as a Cloud+, counts as one.
+        let single = crate::groups::one_thing(&doc.marks, &picked);
+        let one = single.then(|| picked.first().and_then(|i| doc.marks.get(*i))).flatten();
+        let look = one.map(|m| Pen::of(&m.markup)).unwrap_or_else(|| self.pen.clone());
+        let words_at = if single {
+            picked
+                .iter()
+                .copied()
+                .find(|i| doc.marks.get(*i).is_some_and(|m| m.markup.subtype() == annot::Subtype::FreeText))
+        } else {
+            None
+        };
+        let words = words_at.is_some();
+        let count = if single { 1 } else { picked.len() };
+        let mut chosen: Option<Box<dyn Fn(&mut Pen)>> = None;
+        let mut edit_words = false;
+        let mut delete = false;
+        response.context_menu(|ui| {
+            if count == 0 {
+                ui.close();
+                return;
+            }
+            ui.set_min_width(220.0);
+            ui.label(
+                egui::RichText::new(if count == 1 {
+                    "This markup".to_string()
+                } else {
+                    format!("These {count} markups")
+                })
+                .color(theme.faint)
+                .size(11.0),
+            );
+            ui.menu_button("Fill", |ui| {
+                if ui.button("No fill").clicked() {
+                    chosen = Some(Box::new(|p: &mut Pen| p.fill = None));
+                    ui.close();
+                }
+                if let Some(rgb) = swatches(ui, theme.line) {
+                    chosen = Some(Box::new(move |p: &mut Pen| p.fill = Some(rgb)));
+                    ui.close();
+                }
+                ui.horizontal(|ui| {
+                    let now = look.fill.unwrap_or([255, 255, 255, 255]);
+                    let mut rgb = [now[0], now[1], now[2]];
+                    if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                        chosen = Some(Box::new(move |p: &mut Pen| p.fill = Some([rgb[0], rgb[1], rgb[2], 255])));
+                    }
+                    ui.label(egui::RichText::new("Any other").color(theme.faint).size(11.0));
+                });
+            });
+            ui.menu_button("Outline", |ui| {
+                if ui.button("No outline").clicked() {
+                    chosen = Some(Box::new(|p: &mut Pen| p.width = 0.0));
+                    ui.close();
+                }
+                if let Some(rgb) = swatches(ui, theme.line) {
+                    chosen = Some(Box::new(move |p: &mut Pen| {
+                        p.line = rgb;
+                        if p.width <= 0.0 {
+                            p.width = 1.0;
+                        }
+                    }));
+                    ui.close();
+                }
+                ui.horizontal(|ui| {
+                    let mut rgb = [look.line[0], look.line[1], look.line[2]];
+                    if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                        chosen = Some(Box::new(move |p: &mut Pen| p.line = [rgb[0], rgb[1], rgb[2], 255]));
+                    }
+                    ui.label(egui::RichText::new("Any other").color(theme.faint).size(11.0));
+                });
+            });
+            ui.menu_button("Line weight", |ui| {
+                for weight in WEIGHTS {
+                    if ui.selectable_label((look.width - weight).abs() < 0.01, format!("{weight} pt")).clicked() {
+                        let at = *weight;
+                        chosen = Some(Box::new(move |p: &mut Pen| p.width = at));
+                        ui.close();
+                    }
+                }
+            });
+            ui.menu_button("See-through", |ui| {
+                for (label, share) in [("Solid", 1.0f32), ("Three quarters", 0.75), ("Half", 0.5), ("A third", 0.35), ("A quarter", 0.25)] {
+                    if ui.selectable_label((look.fill_opacity - share).abs() < 0.01, label).clicked() {
+                        chosen = Some(Box::new(move |p: &mut Pen| p.fill_opacity = share));
+                        ui.close();
+                    }
+                }
+            });
+            let mut blend = look.blend;
+            if ui
+                .checkbox(&mut blend, "Multiply")
+                .on_hover_text("The drawing shows through the fill, the way it does under a highlighter.")
+                .changed()
+            {
+                chosen = Some(Box::new(move |p: &mut Pen| p.blend = blend));
+                ui.close();
+            }
+            if words {
+                ui.separator();
+                if ui.button("Edit the words").clicked() {
+                    edit_words = true;
+                    ui.close();
+                }
+            }
+            ui.separator();
+            if ui.button("Delete").clicked() {
+                delete = true;
+                ui.close();
+            }
+        });
+        if let Some(change) = chosen {
+            self.change_pen(change);
+            self.save_soon();
+        }
+        if edit_words {
+            if let Some(i) = words_at {
+                if let Some(doc) = self.doc_mut() {
+                    doc.checkpoint_named("Edit text");
+                }
+                self.editing_text = Some(i);
+            }
+        }
+        if delete {
+            self.delete_selected();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +669,7 @@ mod tests {
             hatch: Hatch::Cross,
             opacity: 0.5,
             fill_opacity: 0.25,
+            blend: true,
             text: annot::text::Setting::default(),
         };
         let mut markup = annot::Markup::new(annot::Subtype::Line);
@@ -514,6 +684,24 @@ mod tests {
         assert_eq!(back.hatch, Hatch::Cross);
         assert!((back.opacity - 0.5).abs() < 0.01);
         assert!(back.fill.is_some());
+    }
+
+    #[test]
+    fn changing_one_thing_leaves_the_rest_of_a_markups_look_alone() {
+        // What the right-click menu and the toolbar do to each selected
+        // markup: read its own look, change the one thing, put it back.
+        let mut red = annot::Markup::new(annot::Subtype::Square);
+        red.set_box([0.0, 0.0, 10.0, 10.0]);
+        Pen { line: [220, 40, 40, 255], width: 3.0, ..Pen::default() }.onto(&mut red);
+        let mut look = Pen::of(&red);
+        look.fill = Some([255, 255, 0, 255]);
+        look.blend = true;
+        look.onto(&mut red);
+        let after = Pen::of(&red);
+        assert_eq!(after.line, [220, 40, 40, 255], "the outline is still red");
+        assert_eq!(after.width, 3.0);
+        assert_eq!(after.fill, Some([255, 255, 0, 255]));
+        assert!(after.blend && red.multiplies());
     }
 
     #[test]
@@ -665,6 +853,38 @@ impl App {
                                 }
                             }
                         });
+                        // Any colour at all, for a company's own or one to
+                        // match a drawing.
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let now = match which {
+                                Choosing::LineColour => pen.line,
+                                Choosing::FillColour => pen.fill.unwrap_or([255, 255, 255, 255]),
+                                _ => {
+                                    let c = pen.text.colour;
+                                    [(c[0] * 255.0) as u8, (c[1] * 255.0) as u8, (c[2] * 255.0) as u8, 255]
+                                }
+                            };
+                            let mut rgb = [now[0], now[1], now[2]];
+                            if egui::widgets::color_picker::color_edit_button_srgb(ui, &mut rgb).changed() {
+                                picked = Some([rgb[0], rgb[1], rgb[2], 255]);
+                            }
+                            ui.label(egui::RichText::new("Any other colour").color(theme.faint).size(11.0));
+                        });
+                        if which == Choosing::FillColour {
+                            ui.add_space(6.0);
+                            let mut blend = pen.blend;
+                            if ui
+                                .checkbox(&mut blend, "Multiply, so the drawing shows through")
+                                .on_hover_text(
+                                    "Blends the fill onto the sheet the way a highlighter does: \
+                                     the lines under it stay dark and readable at full colour.",
+                                )
+                                .changed()
+                            {
+                                chosen = Some(Box::new(move |pen: &mut Pen| pen.blend = blend));
+                            }
+                        }
                         if let Some(rgb) = picked {
                             chosen = Some(match which {
                                 Choosing::LineColour => Box::new(move |pen: &mut Pen| {
@@ -718,6 +938,13 @@ impl App {
                                     .size(11.0),
                             );
                         });
+                        let mut blend = pen.blend;
+                        if ui
+                            .checkbox(&mut blend, "Multiply, so the drawing shows through")
+                            .changed()
+                        {
+                            chosen = Some(Box::new(move |pen: &mut Pen| pen.blend = blend));
+                        }
                         ui.add_space(4.0);
                         ui.label(
                             egui::RichText::new(

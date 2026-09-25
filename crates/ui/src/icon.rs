@@ -371,6 +371,21 @@ pub const CLOUD: Glyph = &[(
     "M 22 68 C 12 68 12 52 24 52 C 22 34 46 28 52 42 C 62 32 82 40 80 54 C 92 56 90 68 80 68 Z",
     false,
 )];
+pub const SIGNATURE: Glyph = &[
+    (
+        "M 10 66 C 18 40 26 34 28 46 C 30 58 22 74 30 70 C 40 64 44 44 50 52 C 54 58 52 66 60 62 C 66 58 70 54 76 58",
+        false,
+    ),
+    ("M 10 82 L 90 82", false),
+];
+pub const CLOUD_PLUS: Glyph = &[
+    (
+        "M 16 80 C 8 80 8 66 18 66 C 18 54 34 52 38 62 C 46 54 60 60 56 70 C 64 72 62 82 54 82 Z",
+        false,
+    ),
+    ("M 50 62 L 62 42", false),
+    ("M 58 14 L 92 14 L 92 42 L 58 42 Z", false),
+];
 pub const TEXT_BOX: Glyph = &[
     ("M 12 22 L 88 22 L 88 78 L 12 78 Z", false),
     ("M 32 38 L 68 38 M 50 38 L 50 64", false),
@@ -1053,6 +1068,8 @@ pub const CONTACT_SHEET: &[(&str, Glyph)] = &[
     ("ellipse", ELLIPSE),
     ("polygon", POLYGON),
     ("cloud", CLOUD),
+    ("cloud plus", CLOUD_PLUS),
+    ("signature", SIGNATURE),
     ("text box", TEXT_BOX),
     ("callout", CALLOUT),
     ("note", NOTE),

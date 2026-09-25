@@ -356,6 +356,35 @@ impl Markup {
             .unwrap_or_else(|| self.opacity())
     }
 
+    /// Whether this markup's look can only be kept, not drawn again: a stamp
+    /// read from a file, whose picture — a signature, a rubber stamp made in
+    /// another program, a photograph — is in its appearance and nowhere
+    /// else. Moving or resizing one changes its rectangle, and every reader
+    /// fits the appearance to the rectangle, so the picture goes with it.
+    pub fn keeps_its_appearance(&self) -> bool {
+        self.picture.is_none() && self.subtype() == Subtype::Stamp && self.dict.has("AP")
+    }
+
+    /// Whether the markup is blended onto the sheet by multiplying, so the
+    /// drawing under a fill still shows through it the way it does under a
+    /// highlighter. `/BM` in the annotation, which is where PDF 2.0 put it
+    /// and where Revu has always written it.
+    pub fn multiplies(&self) -> bool {
+        self.dict
+            .get("BM")
+            .and_then(|o| o.as_name())
+            .is_some_and(|n| n.as_str() == "Multiply")
+    }
+
+    pub fn set_multiply(&mut self, on: bool) -> &mut Markup {
+        if on {
+            self.dict.set(Name::new("BM"), Object::name("Multiply"));
+        } else {
+            self.dict.remove("BM");
+        }
+        self
+    }
+
     /// Reads the point size out of Bluebeam's `/DS` style string.
     pub fn font_size(&self) -> f64 {
         let ds = self.text_of("DS");
@@ -424,11 +453,63 @@ impl Markup {
         self
     }
 
+    /// Sets the box the markup is drawn in: its shape, for a box, an ellipse,
+    /// a text box or a stamp. Any allowance an earlier drawing added round it
+    /// goes, because it was an allowance for the old shape.
     pub fn set_box(&mut self, rect: [f64; 4]) -> &mut Markup {
         self.dict.set(
             Name::new("Rect"),
             Object::Array(rect.iter().map(|v| Object::real(*v)).collect()),
         );
+        self.dict.remove("RD");
+        self
+    }
+
+    /// The box the shape is drawn in, for the markups whose shape is a box.
+    ///
+    /// `/Rect` is the area a reader may draw in, which has to be bigger than
+    /// the shape: half the line sticks out, a cloud's scallops stick out
+    /// further, and a callout's leader can be anywhere. `/RD` says by how much
+    /// on each side. Reading the shape as `/Rect` alone made every box a
+    /// little bigger each time it was drawn again, and a cloud a lot bigger.
+    pub fn drawn_box(&self) -> Option<[f64; 4]> {
+        let r = self.dict.get("Rect").and_then(|o| o.as_rect())?;
+        let d = self
+            .dict
+            .get("RD")
+            .map(|o| o.numbers())
+            .filter(|v| v.len() == 4 && v.iter().all(|x| x.is_finite() && *x >= 0.0))
+            .unwrap_or_else(|| vec![0.0; 4]);
+        let inner = [r[0] + d[0], r[1] + d[1], r[2] - d[2], r[3] - d[3]];
+        if inner[2] > inner[0] && inner[3] > inner[1] {
+            Some(inner)
+        } else {
+            Some(r)
+        }
+    }
+
+    /// Sets the drawing area round a shape: `/Rect` to `outer`, and `/RD` to
+    /// how far it reaches past `inner` on each side, so the shape can be read
+    /// back exactly.
+    pub fn set_drawing_area(&mut self, outer: [f64; 4], inner: [f64; 4]) -> &mut Markup {
+        self.dict.set(
+            Name::new("Rect"),
+            Object::Array(outer.iter().map(|v| Object::real(*v)).collect()),
+        );
+        let d = [
+            (inner[0] - outer[0]).max(0.0),
+            (inner[1] - outer[1]).max(0.0),
+            (outer[2] - inner[2]).max(0.0),
+            (outer[3] - inner[3]).max(0.0),
+        ];
+        if d.iter().all(|v| *v == 0.0) {
+            self.dict.remove("RD");
+        } else {
+            self.dict.set(
+                Name::new("RD"),
+                Object::Array(d.iter().map(|v| Object::real(*v)).collect()),
+            );
+        }
         self
     }
 
@@ -507,14 +588,21 @@ impl Markup {
         }
         // The box moves whatever the shape, because every markup has one and a
         // reader that trusts it will draw the markup in the wrong place if it
-        // is left behind.
+        // is left behind. `/RD` is a difference, so it moves with it as it is.
         if let Some(rect) = self.dict.get("Rect").and_then(|o| o.as_rect()) {
-            self.set_box([rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy]);
+            let moved = [rect[0] + dx, rect[1] + dy, rect[2] + dx, rect[3] + dy];
+            self.dict.set(
+                Name::new("Rect"),
+                Object::Array(moved.iter().map(|v| Object::real(*v)).collect()),
+            );
         }
         // The drawn appearance is built from the geometry, so the old one is
         // now wrong. Dropping it makes it be rebuilt rather than showing the
-        // markup at its old place.
-        self.dict.remove("AP");
+        // markup at its old place — unless it is a picture that can't be
+        // drawn again, which the new rectangle carries with it.
+        if !self.keeps_its_appearance() {
+            self.dict.remove("AP");
+        }
         self
     }
 
@@ -530,6 +618,14 @@ impl Markup {
                 .into_iter()
                 .flatten()
                 .collect(),
+            // A marked run of words is where its word boxes are. The
+            // rectangle round them is only the area a reader may draw in.
+            Subtype::Highlight | Subtype::Underline | Subtype::StrikeOut | Subtype::Squiggly
+                if self.quad_bounds().is_some() =>
+            {
+                let r = self.quad_bounds().unwrap_or_default();
+                vec![[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]]
+            }
             // Everything whose shape is its rectangle: a box, an ellipse, a
             // stamp, a text box, a folded note, a link, a marked run of words.
             Subtype::Square
@@ -542,7 +638,7 @@ impl Markup {
             | Subtype::Underline
             | Subtype::StrikeOut
             | Subtype::Squiggly => {
-                match self.dict.get("Rect").and_then(|o| o.as_rect()) {
+                match self.drawn_box() {
                     Some(r) => vec![[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]],
                     None => Vec::new(),
                 }
@@ -570,6 +666,22 @@ impl Markup {
                 }
             }
         }
+    }
+
+    /// The box round a text markup's word boxes, when it has any.
+    fn quad_bounds(&self) -> Option<[f64; 4]> {
+        let q = self.dict.get("QuadPoints").map(|o| o.numbers()).unwrap_or_default();
+        if q.len() < 8 {
+            return None;
+        }
+        let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+        for p in q.chunks(2).filter(|c| c.len() == 2) {
+            b[0] = b[0].min(p[0]);
+            b[1] = b[1].min(p[1]);
+            b[2] = b[2].max(p[0]);
+            b[3] = b[3].max(p[1]);
+        }
+        (b[2] > b[0] && b[3] > b[1]).then_some(b)
     }
 
     pub fn ink(&self) -> Vec<Vec<[f64; 2]>> {

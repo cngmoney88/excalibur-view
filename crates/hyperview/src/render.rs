@@ -114,6 +114,20 @@ pub enum ToWorker {
     },
     /// Let go of one. Six sets open at once is a lot of mapped file.
     Close(u64),
+    /// Read a drawing again after its markups were saved into it, so the
+    /// sheet is drawn with them where they are now rather than where they
+    /// were when it was opened. Nothing else about the drawing changes.
+    Refresh { doc: u64 },
+    /// Find the paragraphs of words on a sheet, for changing them.
+    Paragraphs { doc: u64, page: u32 },
+    /// Write one of them back, changed.
+    Rewrite {
+        doc: u64,
+        job: u64,
+        page: u32,
+        found: Box<crate::textedit::Found>,
+        rewrite: Box<crate::textedit::Rewrite>,
+    },
     /// The complete set of tiles the view wants right now, most important first.
     /// Replaces any previous list, so nothing off-screen is ever rendered.
     Want { tiles: Vec<TileKey> },
@@ -304,6 +318,25 @@ pub enum FromWorker {
         key: TileKey,
         image: egui::ColorImage,
         millis: u128,
+        /// Which reading of the file it was drawn from. See `Refreshed`.
+        generation: u64,
+    },
+    /// A drawing has been read again after a save. Tiles drawn from an
+    /// earlier reading than `generation` show its markups where they were.
+    Refreshed { doc: u64, generation: u64 },
+    /// The paragraphs on a sheet.
+    Paragraphs {
+        doc: u64,
+        page: u32,
+        found: Result<Vec<crate::textedit::Found>, String>,
+    },
+    /// A paragraph written back: the whole file as it now should be, and
+    /// what was done — or why nothing was.
+    Rewritten {
+        doc: u64,
+        job: u64,
+        page: u32,
+        result: Result<(Vec<u8>, String), String>,
     },
     Preview {
         doc: u64,
@@ -990,6 +1023,11 @@ impl Board {
         }
     }
 
+    /// How many times a drawing has been read, counting across all of them.
+    fn generation_of(&self, doc: u64) -> u64 {
+        self.with(|w| w.docs.get(&doc).map(|(_, g)| *g).unwrap_or(0))
+    }
+
     fn still_open(&self) -> HashMap<u64, u64> {
         self.with(|w| w.docs.iter().map(|(d, (_, g))| (*d, *g)).collect())
     }
@@ -1099,6 +1137,7 @@ fn helper(library: PathBuf, board: Board, tx: Sender<FromWorker>, ctx: egui::Con
                     key,
                     image,
                     millis: started.elapsed().as_millis(),
+                    generation,
                 })
                 .is_err()
             {
@@ -1260,6 +1299,38 @@ impl Queue {
                 self.forget(doc);
                 self.board.closed(doc);
                 engine.close_one(doc);
+            }
+            ToWorker::Paragraphs { doc, page } => {
+                let found = match engine.path_of(doc) {
+                    Some(path) => engine.paragraphs_on(&path, page),
+                    None => Err("that drawing is not open".into()),
+                };
+                let _ = tx.send(FromWorker::Paragraphs { doc, page, found });
+                ctx.request_repaint();
+            }
+            ToWorker::Rewrite { doc, job, page, found, rewrite } => {
+                let result = match engine.path_of(doc) {
+                    Some(path) => engine.rewrite_paragraph(&path, page, &found, &rewrite),
+                    None => Err("that drawing is not open".into()),
+                };
+                let _ = tx.send(FromWorker::Rewritten { doc, job, page, result });
+                ctx.request_repaint();
+            }
+            ToWorker::Refresh { doc } => {
+                // The same file under the same id, read again. The window is
+                // not told it opened: it already has it open, and its view,
+                // its selection and its undo steps all stay as they are.
+                if let Some(path) = engine.path_of(doc) {
+                    match engine.open(doc, &path, "") {
+                        Ok(_) => {
+                            self.board.opened(doc, &path);
+                            let generation = self.board.generation_of(doc);
+                            let _ = tx.send(FromWorker::Refreshed { doc, generation });
+                            ctx.request_repaint();
+                        }
+                        Err(why) => log::warn!("could not read {} again: {}", path.display(), why.said),
+                    }
+                }
             }
             ToWorker::PrintFile {
                 job,
@@ -1592,11 +1663,13 @@ impl Queue {
         }
         if let Some(key) = self.board.take(false) {
             let started = Instant::now();
+            let generation = self.board.generation_of(key.doc);
             if let Some(image) = engine.tile(key) {
                 let _ = tx.send(FromWorker::Tile {
                     key,
                     image,
                     millis: started.elapsed().as_millis(),
+                    generation,
                 });
                 ctx.request_repaint();
             }
@@ -2207,6 +2280,11 @@ impl Engine {
             Some(at) => self.open[at].sizes.len() as u32,
             None => 0,
         }
+    }
+
+    /// The file a drawing was opened from.
+    fn path_of(&self, id: u64) -> Option<PathBuf> {
+        self.known.iter().find(|(i, _)| *i == id).map(|(_, p)| p.clone())
     }
 
     fn close_one(&mut self, id: u64) {
@@ -4757,7 +4835,9 @@ impl Engine {
                 if !redaction {
                     continue;
                 }
-                if let Some(area) = markup.dict.get("Rect").and_then(|o| o.as_rect()) {
+                // The box as it was drawn, not the wider area its outline
+                // is allowed to reach into.
+                if let Some(area) = markup.drawn_box() {
                     boxes.push((page, area));
                 }
             }
@@ -6588,6 +6668,472 @@ fn label_from_runs(runs: &[Run], size: PageSize) -> SheetLabel {
             }
         }
     }
+}
+
+// ---- changing the words on a sheet -------------------------------------------
+
+/// What a text object is, for the finder: pieces of text in the page's order.
+const OBJECT_TEXT: u32 = 1;
+/// Text drawn invisibly: the searchable words OCR lays under a scan. Not
+/// something to edit, because editing it changes nothing anybody sees.
+const INVISIBLE: i32 = 3;
+/// Save only what changed, after the file as it was.
+const FPDF_INCREMENTAL: u32 = 1;
+
+/// A piece of text on a page, with the handles to change it by.
+struct Piece {
+    run: crate::textedit::Run,
+    object: FPDF_PAGEOBJECT,
+    font: FPDF_FONT,
+    embedded: bool,
+}
+
+impl Engine {
+    /// Every piece of visible text on a page.
+    fn pieces(&self, page: FPDF_PAGE) -> Vec<Piece> {
+        let b = &self.bindings;
+        let mut out = Vec::new();
+        let words = unsafe { b.FPDFText_LoadPage(page) };
+        let count = unsafe { b.FPDFPage_CountObjects(page) }.max(0);
+        for i in 0..count {
+            let object = unsafe { b.FPDFPage_GetObject(page, i) };
+            if object.is_null() || unsafe { b.FPDFPageObj_GetType(object) } as u32 != OBJECT_TEXT {
+                continue;
+            }
+            if unsafe { b.FPDFTextObj_GetTextRenderMode(object) } as i32 == INVISIBLE {
+                continue;
+            }
+            // Its words.
+            let text = unsafe {
+                let bytes = b.FPDFTextObj_GetText(object, words, std::ptr::null_mut(), 0) as usize;
+                if bytes < 2 {
+                    continue;
+                }
+                let mut buffer = vec![0u16; bytes / 2];
+                b.FPDFTextObj_GetText(object, words, buffer.as_mut_ptr() as *mut _, bytes as _);
+                while buffer.last() == Some(&0) {
+                    buffer.pop();
+                }
+                String::from_utf16_lossy(&buffer)
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            // Where, which way, and how big.
+            let mut m = FS_MATRIX { a: 1.0, b: 0.0, c: 0.0, d: 1.0, e: 0.0, f: 0.0 };
+            unsafe { b.FPDFPageObj_GetMatrix(object, &mut m) };
+            let (a, bb, c, d) = (m.a as f64, m.b as f64, m.c as f64, m.d as f64);
+            let across = (a * a + bb * bb).sqrt();
+            let high = (c * c + d * d).sqrt();
+            // Mirrored text, or text squashed flat, is left alone.
+            if across < 1e-6 || high < 1e-6 || a * d - bb * c <= 0.0 {
+                continue;
+            }
+            let along = [a / across, bb / across];
+            let mut size = 0f32;
+            unsafe { b.FPDFTextObj_GetFontSize(object, &mut size) };
+            let size = size as f64 * high;
+            if size <= 0.1 {
+                continue;
+            }
+            let origin = [m.e as f64, m.f as f64];
+            let (mut l, mut bo, mut r, mut t) = (0f32, 0f32, 0f32, 0f32);
+            unsafe { b.FPDFPageObj_GetBounds(object, &mut l, &mut bo, &mut r, &mut t) };
+            let start = origin[0] * along[0] + origin[1] * along[1];
+            let furthest = [[l, bo], [r, bo], [r, t], [l, t]]
+                .iter()
+                .map(|p| p[0] as f64 * along[0] + p[1] as f64 * along[1])
+                .fold(f64::MIN, f64::max);
+            let (mut cr, mut cg, mut cb, mut ca) = (0u32, 0u32, 0u32, 0u32);
+            unsafe { b.FPDFPageObj_GetFillColor(object, &mut cr, &mut cg, &mut cb, &mut ca) };
+            // Its font.
+            let font = unsafe { b.FPDFTextObj_GetFont(object) };
+            let name = if font.is_null() {
+                String::new()
+            } else {
+                unsafe {
+                    let n = b.FPDFFont_GetBaseFontName(font, std::ptr::null_mut(), 0);
+                    let mut buffer = vec![0u8; n.max(1)];
+                    b.FPDFFont_GetBaseFontName(font, buffer.as_mut_ptr() as *mut _, n);
+                    while buffer.last() == Some(&0) {
+                        buffer.pop();
+                    }
+                    String::from_utf8_lossy(&buffer).to_string()
+                }
+            };
+            let lower = name.to_lowercase();
+            let weight = if font.is_null() { 400 } else { unsafe { b.FPDFFont_GetWeight(font) } };
+            let mut slant = 0i32;
+            if !font.is_null() {
+                unsafe { b.FPDFFont_GetItalicAngle(font, &mut slant) };
+            }
+            let embedded = !font.is_null() && unsafe { b.FPDFFont_GetIsEmbedded(font) } == 1;
+            out.push(Piece {
+                run: crate::textedit::Run {
+                    object: i as usize,
+                    text,
+                    origin,
+                    along,
+                    size,
+                    advance: (furthest - start).max(0.0),
+                    colour: [cr.min(255) as u8, cg.min(255) as u8, cb.min(255) as u8],
+                    bold: weight >= 600 || lower.contains("bold") || lower.contains("black") || lower.contains("heavy"),
+                    italic: slant != 0 || lower.contains("italic") || lower.contains("oblique"),
+                    font: name,
+                },
+                object,
+                font,
+                embedded,
+            });
+        }
+        if !words.is_null() {
+            unsafe { b.FPDFText_ClosePage(words) };
+        }
+        out
+    }
+
+    /// The paragraphs on a sheet of a file, read fresh from disk.
+    fn paragraphs_on(&mut self, path: &std::path::Path, page: u32) -> Result<Vec<crate::textedit::Found>, String> {
+        let one = self.open_alone(path)?;
+        let handle = unsafe { self.bindings.FPDF_LoadPage(one.doc, page as i32) };
+        if handle.is_null() {
+            self.close_alone(one);
+            return Err("that sheet could not be read".into());
+        }
+        let runs: Vec<crate::textedit::Run> = self.pieces(handle).into_iter().map(|p| p.run).collect();
+        unsafe { self.bindings.FPDF_ClosePage(handle) };
+        self.close_alone(one);
+        Ok(crate::textedit::paragraphs(&runs))
+    }
+
+    /// A page drawn small enough to compare, the same size every time.
+    fn look_at(&mut self, page: FPDF_PAGE) -> Option<egui::ColorImage> {
+        let (w, h) = unsafe {
+            (self.bindings.FPDF_GetPageWidthF(page) as f64, self.bindings.FPDF_GetPageHeightF(page) as f64)
+        };
+        let scale = (1600.0 / w.max(h).max(1.0)).min(3.0);
+        let (pw, ph) = ((w * scale).ceil() as u32, (h * scale).ceil() as u32);
+        self.raster(page, scale, 0.0, 0.0, pw.max(1), ph.max(1))
+    }
+
+    /// Writes a paragraph back into a sheet, changed. Comes back with the
+    /// whole file as it should now be, and a sentence saying what was done.
+    /// Nothing is written to disk here; the window does that.
+    fn rewrite_paragraph(
+        &mut self,
+        path: &std::path::Path,
+        page: u32,
+        found: &crate::textedit::Found,
+        rewrite: &crate::textedit::Rewrite,
+    ) -> Result<(Vec<u8>, String), String> {
+        // Which of the sheet's fonts are in the file whole. pdfium gives a
+        // font's name without the tag that says it was cut down, so that is
+        // read from the file itself.
+        let whole = std::fs::read(path)
+            .map(|bytes| crate::textedit::whole_fonts(&pdf::Document::from_bytes(bytes), page))
+            .unwrap_or_default();
+        let one = self.open_alone(path)?;
+        let result = self.rewrite_in(&one, page, found, rewrite, &whole);
+        self.close_alone(one);
+        result
+    }
+
+    fn rewrite_in(
+        &mut self,
+        one: &Aside,
+        page_index: u32,
+        found: &crate::textedit::Found,
+        rewrite: &crate::textedit::Rewrite,
+        whole: &std::collections::HashSet<String>,
+    ) -> Result<(Vec<u8>, String), String> {
+        use crate::textedit::{self as te, Family};
+        let page = unsafe { self.bindings.FPDF_LoadPage(one.doc, page_index as i32) };
+        if page.is_null() {
+            return Err("that sheet could not be read".into());
+        }
+        let result = (|| {
+            // The bindings live in a box that stays put for the engine's
+            // life, so holding them by pointer while the engine draws is safe
+            // and saves threading them through every call.
+            let b: &dyn PdfiumLibraryBindings = unsafe { &*(&*self.bindings as *const dyn PdfiumLibraryBindings) };
+            let pieces = self.pieces(page);
+
+            // The paragraph's own pieces, found again by their words and
+            // where they start.
+            let mut used = vec![false; pieces.len()];
+            let mut mine: Vec<usize> = Vec::new();
+            for (words, at) in &found.pieces {
+                let hit = pieces.iter().enumerate().position(|(i, p)| {
+                    !used[i]
+                        && p.run.text == *words
+                        && (p.run.origin[0] - at[0]).abs() < 0.6
+                        && (p.run.origin[1] - at[1]).abs() < 0.6
+                });
+                match hit {
+                    Some(i) => {
+                        used[i] = true;
+                        mine.push(i);
+                    }
+                    None => {
+                        return Err("The words on the sheet have changed since they were read. Click them again.".to_string())
+                    }
+                }
+            }
+            let first = &pieces[mine[0]];
+
+            // The font. Its own, when it can set every letter; otherwise the
+            // standard one nearest it, and a sentence saying so.
+            let letters: String = rewrite.text.chars().filter(|c| !c.is_whitespace()).collect();
+            let mut note = String::new();
+            let own = if rewrite.family == Family::Keep && !first.font.is_null() {
+                let had: std::collections::HashSet<char> = pieces
+                    .iter()
+                    .filter(|p| p.run.font == first.run.font)
+                    .flat_map(|p| p.run.text.chars())
+                    .collect();
+                // An embedded font is only trusted with letters it hasn't set
+                // yet when the file shows it was put in whole.
+                let cut_down = first.embedded && !whole.contains(&first.run.font);
+                let settable = |c: char| {
+                    let mut w = 0f32;
+                    let known = b.is_true(unsafe {
+                        b.FPDFFont_GetGlyphWidth(first.font, c as u32, rewrite.size as f32, &mut w)
+                    });
+                    known && (!cut_down || had.contains(&c))
+                };
+                let missing: Vec<char> = letters.chars().filter(|c| !settable(*c)).collect();
+                if missing.is_empty() {
+                    Some(first.font)
+                } else {
+                    let shown: String = {
+                        let mut seen = Vec::new();
+                        for c in missing {
+                            if !seen.contains(&c) {
+                                seen.push(c);
+                            }
+                        }
+                        seen.into_iter().take(4).collect()
+                    };
+                    note = format!(
+                        " Set in {}: its own font here has no \"{shown}\".",
+                        Family::nearest(&first.run.font).name()
+                    );
+                    None
+                }
+            } else {
+                None
+            };
+            let font = match own {
+                Some(f) => f,
+                None => {
+                    let family = if rewrite.family == Family::Keep {
+                        Family::nearest(&first.run.font)
+                    } else {
+                        rewrite.family
+                    };
+                    let name = family.standard(rewrite.bold, rewrite.italic);
+                    let f = unsafe { b.FPDFText_LoadStandardFont(one.doc, name) };
+                    if f.is_null() {
+                        return Err(format!("{name} could not be loaded"));
+                    }
+                    f
+                }
+            };
+            let size = rewrite.size.max(1.0);
+            let width_of = |s: &str| -> Option<f64> {
+                let mut total = 0f64;
+                for c in s.chars() {
+                    let mut w = 0f32;
+                    let ok = b.is_true(unsafe { b.FPDFFont_GetGlyphWidth(font, c as u32, size as f32, &mut w) });
+                    if !ok {
+                        return None;
+                    }
+                    total += w as f64;
+                }
+                Some(total)
+            };
+            if let Some(bad) = letters.chars().find(|c| width_of(&c.to_string()).is_none()) {
+                return Err(format!("\"{bad}\" isn't a letter the font can set. Try another font, or leave it out."));
+            }
+            let spaces = width_of(" ").is_some();
+            let space = width_of(" ").unwrap_or(size * 0.28);
+            let measure = |s: &str| -> f64 {
+                if spaces {
+                    width_of(s).unwrap_or(0.0)
+                } else {
+                    let words: Vec<&str> = s.split(' ').filter(|w| !w.is_empty()).collect();
+                    words.iter().map(|w| width_of(w).unwrap_or(0.0)).sum::<f64>()
+                        + space * words.len().saturating_sub(1) as f64
+                }
+            };
+            let lines = te::wrap(&rewrite.text, rewrite.width.max(size), &measure);
+            let widths: Vec<f64> = lines.iter().map(|l| measure(l)).collect();
+            let spacing = if found.lines.len() > 1 {
+                found.spacing * size / found.size.max(0.1)
+            } else {
+                size * 1.2
+            };
+            let starts = te::origins(found, &widths, rewrite.align, rewrite.width, spacing);
+
+            // Out with the old words. The sheet without them, as pdfium had it,
+            // is what the result has to match everywhere else.
+            for i in &mine {
+                unsafe { b.FPDFPage_RemoveObject(page, pieces[*i].object) };
+            }
+            let before = self.look_at(page).ok_or("the sheet could not be drawn")?;
+
+            // In with the new: a line at a time, or a word at a time when the
+            // font has no space to put between them.
+            let mut placed: Vec<(String, [f64; 2])> = Vec::new();
+            for (line, start) in lines.iter().zip(&starts) {
+                if line.is_empty() {
+                    continue;
+                }
+                let bits: Vec<(String, f64)> = if spaces {
+                    vec![(line.clone(), 0.0)]
+                } else {
+                    let mut x = 0.0;
+                    let mut out = Vec::new();
+                    for word in line.split(' ').filter(|w| !w.is_empty()) {
+                        out.push((word.to_string(), x));
+                        x += width_of(word).unwrap_or(0.0) + space;
+                    }
+                    out
+                };
+                for (words, offset) in bits {
+                    let at = [start[0] + found.along[0] * offset, start[1] + found.along[1] * offset];
+                    let object = unsafe { b.FPDFPageObj_CreateTextObj(one.doc, font, size as f32) };
+                    if object.is_null() {
+                        return Err("pdfium would not make the new text".into());
+                    }
+                    unsafe {
+                        b.FPDFText_SetText_str(object, &words);
+                        b.FPDFPageObj_SetFillColor(
+                            object,
+                            rewrite.colour[0] as u32,
+                            rewrite.colour[1] as u32,
+                            rewrite.colour[2] as u32,
+                            255,
+                        );
+                        let m = FS_MATRIX {
+                            a: found.along[0] as f32,
+                            b: found.along[1] as f32,
+                            c: found.up[0] as f32,
+                            d: found.up[1] as f32,
+                            e: at[0] as f32,
+                            f: at[1] as f32,
+                        };
+                        b.FPDFPageObj_SetMatrix(object, &m);
+                        b.FPDFPage_InsertObject(page, object);
+                    }
+                    placed.push((words, at));
+                }
+            }
+            if !b.is_true(unsafe { b.FPDFPage_GenerateContent(page) }) {
+                return Err("pdfium could not write the sheet back".into());
+            }
+            for i in &mine {
+                unsafe { b.FPDFPageObj_Destroy(pieces[*i].object) };
+            }
+            let bytes = self.save_incrementally(one.doc)?;
+
+            // Read what was written, take the new words back out, and draw it.
+            // Anything different from the sheet before is something this
+            // would have broken, and then nothing is changed.
+            let check = unsafe { b.FPDF_LoadMemDocument64(&bytes, None) };
+            if check.is_null() {
+                return Err("the changed sheet would not open again, so nothing was changed".into());
+            }
+            let verdict = (|| {
+                let again = unsafe { b.FPDF_LoadPage(check, page_index as i32) };
+                if again.is_null() {
+                    return Err("the changed sheet would not open again, so nothing was changed".to_string());
+                }
+                let mut left = placed.clone();
+                for p in self.pieces(again) {
+                    if let Some(k) = left.iter().position(|(w, at)| {
+                        p.run.text == *w && (p.run.origin[0] - at[0]).abs() < 0.6 && (p.run.origin[1] - at[1]).abs() < 0.6
+                    }) {
+                        left.remove(k);
+                        unsafe { b.FPDFPage_RemoveObject(again, p.object) };
+                    }
+                }
+                let after = self.look_at(again);
+                unsafe { b.FPDF_ClosePage(again) };
+                if !left.is_empty() {
+                    return Err("the new words didn't come back as they were written, so nothing was changed".to_string());
+                }
+                let after = after.ok_or("the sheet could not be drawn")?;
+                if !same_picture(&before, &after) {
+                    return Err(
+                        "Writing the words back would have changed other things on this sheet, so \
+                         nothing was changed. The drawing is as it was."
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            })();
+            unsafe { b.FPDF_CloseDocument(check) };
+            verdict?;
+            let said = format!(
+                "The words are changed in the drawing: {} line{}.{note}",
+                lines.iter().filter(|l| !l.is_empty()).count(),
+                if lines.len() == 1 { "" } else { "s" }
+            );
+            Ok((bytes, said))
+        })();
+        unsafe { self.bindings.FPDF_ClosePage(page) };
+        result
+    }
+
+    /// The file saved as the original with what changed after it, so the
+    /// drawing as it was is still in the file.
+    fn save_incrementally(&self, document: FPDF_DOCUMENT) -> Result<Vec<u8>, String> {
+        #[repr(C)]
+        struct Writer {
+            version: std::os::raw::c_int,
+            write_block: unsafe extern "C" fn(*mut Writer, *const c_void, std::os::raw::c_ulong) -> std::os::raw::c_int,
+            into: *mut Vec<u8>,
+        }
+        unsafe extern "C" fn write_block(me: *mut Writer, data: *const c_void, size: std::os::raw::c_ulong) -> std::os::raw::c_int {
+            if me.is_null() || data.is_null() || (*me).into.is_null() {
+                return 0;
+            }
+            (*(*me).into).extend_from_slice(std::slice::from_raw_parts(data as *const u8, size as usize));
+            1
+        }
+        let mut out: Vec<u8> = Vec::new();
+        let mut writer = Writer { version: 1, write_block, into: &mut out as *mut Vec<u8> };
+        let ok = unsafe {
+            self.bindings.FPDF_SaveAsCopy(
+                document,
+                &mut writer as *mut Writer as *mut pdfium_render::prelude::FPDF_FILEWRITE,
+                FPDF_INCREMENTAL as _,
+            )
+        };
+        if !self.bindings.is_true(ok) || out.is_empty() {
+            return Err("pdfium could not save the sheet".into());
+        }
+        Ok(out)
+    }
+}
+
+/// Whether two drawings of a sheet are the same to the eye: a handful of
+/// pixels may differ where anti-aliasing lands differently, and nothing more.
+fn same_picture(a: &egui::ColorImage, b: &egui::ColorImage) -> bool {
+    if a.size != b.size {
+        return false;
+    }
+    let different = a
+        .pixels
+        .iter()
+        .zip(&b.pixels)
+        .filter(|(p, q)| {
+            let (p, q) = (p.to_array(), q.to_array());
+            (0..3).any(|k| (p[k] as i32 - q[k] as i32).abs() > 60)
+        })
+        .count();
+    different <= (a.pixels.len() / 5000).max(12)
 }
 
 #[cfg(test)]

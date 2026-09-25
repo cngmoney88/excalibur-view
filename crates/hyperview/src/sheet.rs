@@ -443,6 +443,72 @@ impl Draft {
 pub struct Step {
     pub what: String,
     pub marks: Vec<Mark>,
+    /// A change to a sheet's own drawing — its words, changed with Edit
+    /// Text — that stepping back or forward puts back or does again.
+    pub file: Option<PageSwap>,
+}
+
+/// A sheet's drawing before and after a change to it. The page points at its
+/// drawing through `/Contents` and at its fonts through `/Resources`; the old
+/// ones are still in the file, because every save only adds, so going back is
+/// pointing the page at them again.
+#[derive(Clone, Debug)]
+pub struct PageSwap {
+    pub page: Ref,
+    pub before: Drawing,
+    pub after: Drawing,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drawing {
+    pub contents: Option<pdf::Object>,
+    pub resources: Option<pdf::Object>,
+    /// Everything else a change wrote over under its own number, as it was
+    /// in this state: the content stream it rewrote, a font list it added to.
+    /// Pointing the sheet back at the old numbers isn't enough when the old
+    /// numbers now hold the new drawing.
+    pub objects: std::rc::Rc<Vec<(pdf::Ref, pdf::Object)>>,
+}
+
+impl Drawing {
+    pub fn of(page: &pdf::Dict) -> Drawing {
+        Drawing {
+            contents: page.get("Contents").cloned(),
+            resources: page.get("Resources").cloned(),
+            objects: Default::default(),
+        }
+    }
+
+    /// A sheet's drawing before and after a change that was saved on top of
+    /// `old` to make `new`.
+    pub fn either_side(old: &pdf::Document, new: &pdf::Document, page: pdf::Ref) -> Option<(Drawing, Drawing)> {
+        use pdf::xref::Slot;
+        let mut before = Drawing::of(old.get(page).as_dict()?);
+        let mut after = Drawing::of(new.get(page).as_dict()?);
+        let mut numbers: Vec<(u32, u16)> = new
+            .xref
+            .slots
+            .iter()
+            .filter(|(n, _)| **n != page.number)
+            .filter_map(|(n, slot)| match (old.xref.slots.get(n), slot) {
+                (_, Slot::Free) | (None, _) | (Some(Slot::Free), _) => None,
+                (Some(was), now) if was == now => None,
+                (Some(Slot::InFile { generation, .. }), _) => Some((*n, *generation)),
+                (Some(_), _) => Some((*n, 0)),
+            })
+            .collect();
+        numbers.sort();
+        let mut was = Vec::new();
+        let mut is = Vec::new();
+        for (number, generation) in numbers {
+            let r = pdf::Ref::new(number, generation);
+            was.push((r, (*old.get(r)).clone()));
+            is.push((r, (*new.get(r)).clone()));
+        }
+        before.objects = std::rc::Rc::new(was);
+        after.objects = std::rc::Rc::new(is);
+        Some((before, after))
+    }
 }
 
 /// How far back the history goes. Deep enough for a morning's work, shallow
@@ -471,6 +537,16 @@ pub struct Doc {
     pub asked: HashSet<u32>,
     /// Sheets picked in the Thumbnails panel, to print or save just those.
     pub picks: crate::picks::Picks,
+    /// Sheets whose markups were saved since the drawing was last read for
+    /// drawing, so the picture of them is out of date.
+    pub redraw: std::collections::BTreeSet<u32>,
+    /// Sheets being read again for that, and the reading tiles have to come
+    /// from to be up to date.
+    pub redrawing: std::collections::BTreeSet<u32>,
+    pub fresh_from: u64,
+    /// The paragraphs of words on each sheet, once read, for Edit Text.
+    pub paragraphs: HashMap<u32, Vec<crate::textedit::Found>>,
+    pub paragraphs_asked: HashSet<u32>,
     pub marks: Vec<Mark>,
     /// Scales the user has set but not yet saved. `None` means cleared.
     pub scales: BTreeMap<u32, Option<Measure>>,
@@ -653,6 +729,11 @@ impl Doc {
             side: 0,
             sync_panes: false,
             picks: Default::default(),
+            redraw: Default::default(),
+            redrawing: Default::default(),
+            fresh_from: 0,
+            paragraphs: HashMap::new(),
+            paragraphs_asked: HashSet::new(),
         };
         doc.reload_marks();
         Ok(doc)
@@ -806,6 +887,7 @@ impl Doc {
         self.undo.push(Step {
             what: what.to_string(),
             marks: self.marks.clone(),
+            file: None,
         });
         if self.undo.len() > REMEMBERED_STEPS {
             self.undo.remove(0);
@@ -825,9 +907,17 @@ impl Doc {
         let Some(previous) = self.undo.pop() else {
             return false;
         };
+        if let Some(swap) = &previous.file {
+            if let Err(why) = self.swap_page(swap, false) {
+                log::warn!("could not step back a change to the drawing: {why}");
+                self.undo.push(previous);
+                return false;
+            }
+        }
         let forward = Step {
             what: previous.what.clone(),
             marks: self.marks.clone(),
+            file: previous.file.clone(),
         };
         self.restore(previous.marks);
         self.redo.push(forward);
@@ -839,13 +929,62 @@ impl Doc {
         let Some(forward) = self.redo.pop() else {
             return false;
         };
+        if let Some(swap) = &forward.file {
+            if let Err(why) = self.swap_page(swap, true) {
+                log::warn!("could not put back a change to the drawing: {why}");
+                self.redo.push(forward);
+                return false;
+            }
+        }
         let back = Step {
             what: forward.what.clone(),
             marks: self.marks.clone(),
+            file: forward.file.clone(),
         };
         self.restore(forward.marks);
         self.undo.push(back);
         true
+    }
+
+    /// Points a sheet at its drawing from before a change, or after it, as
+    /// its own small save. The markups on it are left as they are.
+    pub fn swap_page(&mut self, swap: &PageSwap, forward: bool) -> Result<(), String> {
+        if self.read_only {
+            return Err("the drawing is read-only".into());
+        }
+        let wanted = if forward { &swap.after } else { &swap.before };
+        let current = self.file.get(swap.page);
+        let mut page = current.as_dict().cloned().ok_or("that sheet is not in the file any more")?;
+        match &wanted.contents {
+            Some(c) => page.set(pdf::Name::new("Contents"), c.clone()),
+            None => {
+                page.remove("Contents");
+            }
+        }
+        match &wanted.resources {
+            Some(r) => page.set(pdf::Name::new("Resources"), r.clone()),
+            None => {
+                page.remove("Resources");
+            }
+        }
+        let mut update = pdf::Update::new(&self.file);
+        for (reference, object) in wanted.objects.iter() {
+            update.replace(*reference, object.clone());
+        }
+        update.replace(swap.page, pdf::Object::Dict(page));
+        let bytes = update.apply(&self.file);
+        write_into_place(&self.path, &bytes)?;
+        self.file = pdf::Document::from_bytes(bytes);
+        self.on_disk = stamp(&self.path);
+        if let Some(index) = self.file.pages().iter().position(|r| *r == swap.page) {
+            let index = index as u32;
+            self.redraw.insert(index);
+            self.paragraphs.remove(&index);
+            self.paragraphs_asked.remove(&index);
+            self.geometry.remove(&index);
+            self.geometry_asked.remove(&index);
+        }
+        Ok(())
     }
 
     /// Goes back to a particular step, taking every step after it with it.
@@ -907,14 +1046,37 @@ impl Doc {
         out
     }
 
-    /// Takes hold of one markup, letting go of everything else.
+    /// Takes hold of one markup, letting go of everything else. A markup that
+    /// is part of a group — a Cloud+'s cloud or its words — brings the rest
+    /// of its group with it.
     pub fn choose(&mut self, index: Option<usize>) {
         self.selected = index;
         self.also.clear();
+        if let Some(i) = index {
+            self.also = crate::groups::group_of(&self.marks, i)
+                .into_iter()
+                .filter(|j| *j != i)
+                .collect();
+        }
     }
 
-    /// Adds one markup to what is already held, or lets go of it if it is.
+    /// Adds one markup to what is already held, or lets go of it if it is,
+    /// with the rest of its group.
     pub fn choose_also(&mut self, index: usize) {
+        let group = crate::groups::group_of(&self.marks, index);
+        if group.len() > 1 {
+            let held = self.selection().contains(&index);
+            for member in group {
+                if self.selection().contains(&member) == held {
+                    self.choose_one_also(member);
+                }
+            }
+            return;
+        }
+        self.choose_one_also(index);
+    }
+
+    fn choose_one_also(&mut self, index: usize) {
         if self.selected == Some(index) {
             // Letting go of the one whose properties are shown promotes the
             // next one, so a selection never loses its head while it still
@@ -1049,8 +1211,10 @@ impl Doc {
         // estimator on the share, or Bluebeam. Their markups are brought in
         // first and ours put on top, so neither of us loses anything. Writing
         // our copy over theirs is what a program that does not check does.
+        let mut theirs_came_in = false;
         if stamp(&self.path).is_some() && stamp(&self.path) != self.on_disk {
             let theirs = self.catch_up()?;
+            theirs_came_in = theirs > 0;
             if theirs > 0 {
                 log::info!(
                     "{} was saved elsewhere since it was opened; kept {theirs} change(s) from there",
@@ -1065,11 +1229,36 @@ impl Doc {
             placer.set_scale(*page as usize, measure.clone());
         }
         let mut written = 0usize;
+        // The sheets whose drawing changes with this save.
+        let touched: std::collections::BTreeSet<u32> = if theirs_came_in {
+            (0..self.pages.len() as u32).collect()
+        } else {
+            self.marks
+                .iter()
+                .filter(|m| m.changed || m.gone)
+                .map(|m| m.page)
+                .collect()
+        };
         // The order the markups are in here is the order they go in the file,
         // and that order is what decides which is in front of which. Kept as
         // they are written so "bring to front" survives a save.
         let mut order: std::collections::BTreeMap<usize, Vec<Ref>> = Default::default();
+        // Where each named markup is in the file, so a group's parts can say
+        // whose they are the way other programs read it.
+        let mut placed: std::collections::HashMap<String, Ref> = self
+            .marks
+            .iter()
+            .filter_map(|m| m.reference.map(|r| (m.markup.name(), r)))
+            .filter(|(n, _)| !n.is_empty())
+            .collect();
         for mark in self.marks.iter_mut() {
+            if !mark.gone && mark.markup.dict.has(crate::groups::PART_OF) {
+                let had = mark.markup.dict.get("IRT").cloned();
+                crate::groups::point_at_head(mark, &placed);
+                if mark.markup.dict.get("IRT").cloned() != had {
+                    mark.changed = true;
+                }
+            }
             match (mark.reference, mark.gone, mark.changed) {
                 (Some(reference), true, _) => {
                     placer.remove(mark.page as usize, reference);
@@ -1088,6 +1277,10 @@ impl Doc {
                     if let Some(reference) = placer.add(mark.page as usize, &mut mark.markup) {
                         written += 1;
                         order.entry(mark.page as usize).or_default().push(reference);
+                        let name = mark.markup.name();
+                        if !name.is_empty() {
+                            placed.insert(name, reference);
+                        }
                     }
                 }
                 _ => {}
@@ -1124,6 +1317,7 @@ impl Doc {
         self.scales.clear();
         self.dirty = false;
         self.on_disk = stamp(&self.path);
+        self.redraw.extend(touched);
         Ok(written)
     }
 
@@ -1246,9 +1440,24 @@ impl Doc {
     pub fn reload_marks(&mut self) {
         // What was held stays held, by name: saving every few seconds must
         // not drop whatever somebody was in the middle of moving or editing.
-        let name_of = |marks: &Vec<Mark>, i: usize| marks.get(i).map(|m| m.markup.name()).filter(|n| !n.is_empty());
-        let held = self.selected.and_then(|i| name_of(&self.marks, i));
-        let also: Vec<String> = self.also.iter().filter_map(|i| name_of(&self.marks, *i)).collect();
+        // A markup from a program that gave it no name is known by where it
+        // is in the file instead, which a save keeps.
+        #[derive(PartialEq)]
+        enum Known {
+            Name(String),
+            At(Ref),
+        }
+        let known = |marks: &Vec<Mark>, i: usize| {
+            let m = marks.get(i)?;
+            let name = m.markup.name();
+            if !name.is_empty() {
+                Some(Known::Name(name))
+            } else {
+                m.reference.map(Known::At)
+            }
+        };
+        let held = self.selected.and_then(|i| known(&self.marks, i));
+        let also: Vec<Known> = self.also.iter().filter_map(|i| known(&self.marks, *i)).collect();
         let mut marks = Vec::new();
         for page in 0..self.pages.len() {
             for (reference, markup) in annot::place::read_page(&self.file, page) {
@@ -1256,9 +1465,14 @@ impl Doc {
             }
         }
         self.marks = marks;
-        let find = |marks: &Vec<Mark>, name: &str| marks.iter().position(|m| m.markup.name() == name);
-        self.selected = held.as_deref().and_then(|n| find(&self.marks, n));
-        self.also = also.iter().filter_map(|n| find(&self.marks, n)).collect();
+        let find = |marks: &Vec<Mark>, wanted: &Known| {
+            marks.iter().position(|m| match wanted {
+                Known::Name(name) => m.markup.name() == *name,
+                Known::At(at) => m.reference == Some(*at),
+            })
+        };
+        self.selected = held.as_ref().and_then(|k| find(&self.marks, k));
+        self.also = also.iter().filter_map(|k| find(&self.marks, k)).collect();
     }
 }
 
@@ -1515,6 +1729,45 @@ mod tests {
     use super::*;
     use annot::measure::imperial;
     use annot::Subtype;
+
+    #[test]
+    fn a_change_that_rewrote_the_sheets_own_stream_keeps_the_old_one_to_go_back_to() {
+        // A page whose drawing is object 4, then a change that writes a new
+        // object 4 in place, the way PDFium saves an edited page.
+        let bodies = [
+            "<</Type/Catalog/Pages 2 0 R>>",
+            "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+            "<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R>>",
+            "<</Length 12>>\nstream\nBT (old) ET\nendstream",
+        ];
+        let mut file = b"%PDF-1.5\n".to_vec();
+        let mut offsets = Vec::new();
+        for (i, body) in bodies.iter().enumerate() {
+            offsets.push(file.len());
+            file.extend_from_slice(format!("{} 0 obj\n{body}\nendobj\n", i + 1).as_bytes());
+        }
+        let table = file.len();
+        file.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        for offset in &offsets {
+            file.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+        }
+        file.extend_from_slice(format!("trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n{table}\n%%EOF\n").as_bytes());
+        let old = pdf::Document::from_bytes(file);
+        let page = old.pages()[0];
+        let mut update = pdf::Update::new(&old);
+        update.replace(
+            pdf::Ref::new(4, 0),
+            pdf::Object::Stream(Box::new(pdf::Stream { dict: pdf::Dict::new(), data: b"BT (new) ET".to_vec() })),
+        );
+        update.replace(page, (*old.get(page)).clone());
+        let new = pdf::Document::from_bytes(update.apply(&old));
+
+        let (before, after) = Drawing::either_side(&old, &new, page).unwrap();
+        assert_eq!(before.objects.len(), 1);
+        assert_eq!(before.objects[0].0, pdf::Ref::new(4, 0));
+        assert_eq!(before.objects[0].1.as_stream().unwrap().data, b"BT (old) ET\n".to_vec());
+        assert_eq!(after.objects[0].1.as_stream().unwrap().data, b"BT (new) ET".to_vec());
+    }
 
     fn quarter() -> Measure {
         imperial(48.0, "1/4\" = 1'-0\"", 16)
