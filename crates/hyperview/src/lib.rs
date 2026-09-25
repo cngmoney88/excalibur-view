@@ -35,6 +35,7 @@ pub mod panelbody;
 pub mod picture;
 pub mod panels;
 pub mod pen;
+pub mod picks;
 pub mod places;
 pub mod plugins;
 pub mod pluginui;

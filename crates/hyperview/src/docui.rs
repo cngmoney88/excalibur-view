@@ -283,6 +283,12 @@ impl App {
                 })
                 .collect();
         }
+        // Sheets picked in the Thumbnails panel are the ones meant.
+        if job.picks_sheets() {
+            if let Some(picked) = doc.picks.offered(doc.page) {
+                setting.range = crate::picks::as_range(&picked);
+            }
+        }
         if job == Job::Export {
             setting.to = source
                 .parent()
@@ -1071,6 +1077,20 @@ impl App {
         if job != self.doc_task {
             return;
         }
+        if self.quiet_task.take() == Some(job) {
+            // Picked sheets saved from the Thumbnails panel: say where they
+            // went, and stay on the drawing being worked on.
+            self.status = match done.wrote.first() {
+                Some(path) => format!("Saved: {}", path.display()),
+                None => done.said.clone(),
+            };
+            if std::mem::take(&mut self.quiet_left_out) {
+                self.status.push_str(
+                    " Markups not yet saved into this drawing aren't in it; Save As first to include them.",
+                );
+            }
+            return;
+        }
         self.doc_job = None;
         self.status = done.said.clone();
         // Opened straight away when it is one file, because the next thing
@@ -1083,6 +1103,11 @@ impl App {
 
     pub fn document_failed(&mut self, job: u64, why: String) {
         if job != self.doc_task {
+            return;
+        }
+        if self.quiet_task.take() == Some(job) {
+            self.quiet_left_out = false;
+            self.error = Some(format!("Could not save the sheets: {why}"));
             return;
         }
         match self.doc_job.as_mut() {

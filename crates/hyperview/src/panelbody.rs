@@ -1,5 +1,7 @@
 //! The bodies of the panels, the markups grid, and the small dialogs.
 
+use std::path::PathBuf;
+
 use egui::{Color32, RichText};
 
 use crate::app::{App, Tool};
@@ -483,6 +485,7 @@ impl App {
     pub fn thumbnails(&mut self, ui: &mut egui::Ui) {
         let theme = self.chrome.theme;
         let mut go: Option<u32> = None;
+        let mut action: Option<PickAction> = None;
         let Some(doc) = self.doc_mut() else {
             ui.add_space(8.0);
             ui.weak("No drawing open.");
@@ -506,16 +509,50 @@ impl App {
                     || format!("{}", p + 1) == needle
             })
             .collect();
+        doc.picks.keep_within(doc.pages.len());
+        let current = doc.page;
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!("{} of {} sheets", shown.len(), doc.pages.len()))
                 .color(theme.faint)
                 .size(11.0),
         );
+        // One line that is always there, so picking the first sheet doesn't
+        // push the list down under the pointer: how to pick, or what to do
+        // with what's picked.
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.set_min_height(20.0);
+            if doc.picks.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "{}-click to pick sheets, Shift-click for a run",
+                        command_key()
+                    ))
+                    .color(theme.faint)
+                    .size(10.0),
+                );
+            } else {
+                ui.label(
+                    RichText::new(format!("{} picked", doc.picks.count()))
+                        .color(theme.text)
+                        .size(11.0),
+                );
+                if ui.small_button("Print…").clicked() {
+                    action = Some(PickAction::Print);
+                }
+                if ui.small_button("Save as PDF…").clicked() {
+                    action = Some(PickAction::Save);
+                }
+                if ui.small_button("Clear").clicked() {
+                    action = Some(PickAction::Clear);
+                }
+            }
+        });
         ui.add_space(4.0);
 
         let row = 70.0;
-        let current = doc.page;
+        let picking = !doc.picks.is_empty();
         let mut wanted: Vec<u32> = Vec::new();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
@@ -529,14 +566,61 @@ impl App {
                     let (rect, response) =
                         ui.allocate_exact_size(egui::vec2(width, row - 6.0), egui::Sense::click());
                     if response.clicked() {
-                        go = Some(page);
+                        let how = crate::picks::Click::from(click_modifiers(ui));
+                        if doc.picks.click(page, how, current, &shown) {
+                            go = Some(page);
+                        }
                     }
+                    if response.secondary_clicked() {
+                        doc.picks.right_click(page, current);
+                    }
+                    response.context_menu(|ui| {
+                        let n = doc.picks.sheets(current).len();
+                        let these = if n == 1 {
+                            "this sheet".to_string()
+                        } else {
+                            format!("these {n} sheets")
+                        };
+                        if ui.button(format!("Print {these}…")).clicked() {
+                            action = Some(PickAction::Print);
+                            ui.close();
+                        }
+                        if ui.button(format!("Save {these} as a PDF…")).clicked() {
+                            action = Some(PickAction::Save);
+                            ui.close();
+                        }
+                        ui.separator();
+                        if ui.button("Pick every sheet in the list").clicked() {
+                            action = Some(PickAction::All);
+                            ui.close();
+                        }
+                        if ui
+                            .add_enabled(!doc.picks.is_empty(), egui::Button::new("Clear the picks"))
+                            .clicked()
+                        {
+                            action = Some(PickAction::Clear);
+                            ui.close();
+                        }
+                    });
                     let painter = ui.painter();
-                    let selected = page == current;
+                    let here = page == current;
+                    // With nothing picked, the sheet on screen is the one
+                    // lit up, as it always was. Once sheets are picked they
+                    // are, and the sheet on screen keeps an outline so you
+                    // still know where you are.
+                    let selected = if picking { doc.picks.contains(page) } else { here };
                     if selected {
                         painter.rect_filled(rect, egui::CornerRadius::same(4), theme.accent);
                     } else if response.hovered() {
                         painter.rect_filled(rect, egui::CornerRadius::same(4), theme.hover);
+                    }
+                    if picking && here {
+                        painter.rect_stroke(
+                            rect.shrink(1.0),
+                            egui::CornerRadius::same(4),
+                            egui::Stroke::new(1.5, if selected { Color32::WHITE } else { theme.accent }),
+                            egui::StrokeKind::Inside,
+                        );
                     }
 
                     let size = doc.pages[page as usize];
@@ -593,6 +677,11 @@ impl App {
                     painter.galley(text_left + egui::vec2(0.0, 22.0), galley, theme.faint);
                 }
             });
+        match action {
+            Some(PickAction::All) => doc.picks.all(&shown),
+            Some(PickAction::Clear) => doc.picks.clear(),
+            _ => {}
+        }
         if !wanted.is_empty() {
             if let Some(id) = self.doc().map(|d| d.id) {
                 self.svc.send(ToWorker::Thumbs { doc: id, pages: wanted });
@@ -601,6 +690,92 @@ impl App {
         if let Some(page) = go {
             self.go_to(page);
         }
+        match action {
+            Some(PickAction::Print) => self.begin_print(),
+            Some(PickAction::Save) => self.save_picked_sheets(),
+            _ => {}
+        }
+    }
+
+    /// Writes the picked sheets (or the one on screen) into a PDF of their
+    /// own, markups and all. The drawing itself is left as it is.
+    pub fn save_picked_sheets(&mut self) {
+        if self.doc_job.as_ref().is_some_and(|job| job.running) {
+            self.status = "Another document job is still running. Try again when it's done.".into();
+            return;
+        }
+        let Some(doc) = self.doc() else { return };
+        let pages = doc.picks.sheets(doc.page);
+        let source = doc.path.clone();
+        let numbers: Vec<String> = pages
+            .iter()
+            .map(|p| doc.labels.get(*p as usize).map(|l| l.number.clone()).unwrap_or_default())
+            .collect();
+        let stem = source
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "drawing".into());
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save the sheets as a PDF")
+            .set_file_name(crate::picks::file_name(&stem, &numbers))
+            .add_filter("PDF", &["pdf"]);
+        if let Some(folder) = source.parent() {
+            dialog = dialog.set_directory(folder);
+        }
+        let Some(mut to) = dialog.save_file() else {
+            return;
+        };
+        if !to
+            .extension()
+            .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
+        {
+            let mut name = to.as_os_str().to_os_string();
+            name.push(".pdf");
+            to = PathBuf::from(name);
+        }
+        let same = |a: &std::path::Path, b: &std::path::Path| {
+            match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => a == b,
+            }
+        };
+        if same(&to, &source) {
+            self.error = Some(
+                "That's the drawing itself. Pick another name, so the sheets go into a file of their own."
+                    .into(),
+            );
+            return;
+        }
+        // The copy is made from the file, so markups not written into it yet
+        // go in first.
+        let (dirty, read_only) = self.doc().map(|d| (d.dirty, d.read_only)).unwrap_or_default();
+        if dirty && !read_only {
+            self.save_now();
+        }
+        let left_out = self.doc().is_some_and(|d| d.dirty);
+        self.doc_task += 1;
+        self.quiet_task = Some(self.doc_task);
+        self.quiet_left_out = left_out;
+        self.svc.send(ToWorker::Document {
+            job: self.doc_task,
+            op: Box::new(crate::docops::Operation::Extract {
+                source,
+                pages: pages.clone(),
+                to: to.clone(),
+                and_remove: false,
+            }),
+        });
+        let names = crate::picks::in_words(&numbers);
+        self.status = if names.is_empty() {
+            format!(
+                "Saving {} sheet{} into {}…",
+                pages.len(),
+                if pages.len() == 1 { "" } else { "s" },
+                to.display()
+            )
+        } else {
+            format!("Saving {names} into {}…", to.display())
+        };
     }
 
     // ---- tool chest ------------------------------------------------------
@@ -2224,4 +2399,43 @@ impl App {
             }
         }
     }
+}
+
+/// What the Thumbnails panel was asked to do with the picked sheets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PickAction {
+    Print,
+    Save,
+    Clear,
+    All,
+}
+
+/// What the key held to pick several things is called on this computer.
+fn command_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
+}
+
+/// The keys held when the mouse button came up. Read off the click itself
+/// rather than the keyboard now, so a quick Ctrl-click whose Ctrl is already
+/// let go by the time the frame is drawn still counts as one.
+fn click_modifiers(ui: &egui::Ui) -> egui::Modifiers {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                egui::Event::PointerButton {
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers,
+                    ..
+                } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or(i.modifiers)
+    })
 }
