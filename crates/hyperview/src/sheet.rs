@@ -469,6 +469,8 @@ pub struct Doc {
     pub geometry_asked: HashSet<u32>,
     pub thumbs: HashMap<u32, TextureHandle>,
     pub asked: HashSet<u32>,
+    /// Sheets picked in the Thumbnails panel, to print or save just those.
+    pub picks: crate::picks::Picks,
     pub marks: Vec<Mark>,
     /// Scales the user has set but not yet saved. `None` means cleared.
     pub scales: BTreeMap<u32, Option<Measure>>,
@@ -650,6 +652,7 @@ impl Doc {
             other: None,
             side: 0,
             sync_panes: false,
+            picks: Default::default(),
         };
         doc.reload_marks();
         Ok(doc)

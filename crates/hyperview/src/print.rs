@@ -16,6 +16,10 @@ use crate::winprint::{self, Fit, Orientation, PaperSize};
 pub struct Printing {
     pub which: Which,
     pub range: String,
+    /// The sheets picked in the Thumbnails panel when the window opened, and
+    /// their numbers, for saying which they are.
+    pub picked: Vec<u32>,
+    pub picked_names: String,
     pub error: Option<String>,
     /// The sheets are being got ready (markups and all) before they go.
     pub waiting: bool,
@@ -52,6 +56,8 @@ pub enum Which {
     ThisSheet,
     Everything,
     Some,
+    /// The sheets picked in the Thumbnails panel.
+    Picked,
 }
 
 /// What was chosen last time, so the dialog opens on it.
@@ -69,6 +75,8 @@ impl Printing {
         let mut printing = Printing {
             which: Which::ThisSheet,
             range: String::new(),
+            picked: Vec::new(),
+            picked_names: String::new(),
             error: None,
             waiting: false,
             sending: None,
@@ -247,7 +255,21 @@ impl App {
             self.status = "Open a drawing first.".into();
             return;
         }
-        self.printing = Some(Printing::new(&self.last_print));
+        let mut printing = Printing::new(&self.last_print);
+        // Sheets picked in the Thumbnails panel are what somebody means to
+        // print, so the window opens on them.
+        if let Some(doc) = self.doc() {
+            if let Some(picked) = doc.picks.offered(doc.page) {
+                let numbers: Vec<String> = picked
+                    .iter()
+                    .map(|p| doc.labels.get(*p as usize).map(|l| l.number.clone()).unwrap_or_default())
+                    .collect();
+                printing.picked_names = crate::picks::in_words(&numbers);
+                printing.picked = picked;
+                printing.which = Which::Picked;
+            }
+        }
+        self.printing = Some(printing);
     }
 
     pub fn print_dialog(&mut self, ctx: &egui::Context) {
@@ -379,6 +401,23 @@ impl App {
 
                         ui.add_space(10.0);
                         ui.label(egui::RichText::new("Sheets").color(theme.faint).size(11.0));
+                        if !printing.picked.is_empty() {
+                            let n = printing.picked.len();
+                            ui.radio_value(
+                                &mut printing.which,
+                                Which::Picked,
+                                format!("The {n} sheet{} picked", if n == 1 { "" } else { "s" }),
+                            );
+                            let names = if printing.picked_names.is_empty() {
+                                format!("Sheets {}", crate::picks::as_range(&printing.picked))
+                            } else {
+                                printing.picked_names.clone()
+                            };
+                            ui.horizontal(|ui| {
+                                ui.add_space(24.0);
+                                ui.label(egui::RichText::new(names).color(theme.faint).size(10.0));
+                            });
+                        }
                         ui.radio_value(
                             &mut printing.which,
                             Which::ThisSheet,
@@ -449,6 +488,7 @@ impl App {
                         && (!printing.printer.is_empty() || !cfg!(windows))
                         && match printing.which {
                             Which::Some => !read_range(&printing.range, sheets).is_empty(),
+                            Which::Picked => !printing.picked.is_empty(),
                             _ => true,
                         };
                     let print = ui.add_enabled(ready, egui::Button::new("Print"));
@@ -509,6 +549,12 @@ impl App {
                 Which::ThisSheet => vec![here as u32 - 1],
                 Which::Everything => (0..sheets as u32).collect(),
                 Which::Some => read_range(&printing.range, sheets),
+                Which::Picked => printing
+                    .picked
+                    .iter()
+                    .copied()
+                    .filter(|p| (*p as usize) < sheets)
+                    .collect(),
             };
             printing.waiting = true;
             printing.error = None;

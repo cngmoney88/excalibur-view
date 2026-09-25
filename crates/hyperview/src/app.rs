@@ -636,6 +636,13 @@ pub struct App {
     /// The Document menu's window, when one is up.
     pub doc_job: Option<crate::docui::Setting>,
     pub doc_task: u64,
+    /// A document job started from the Thumbnails panel's picks. Its result
+    /// is saved where it was asked to go and not opened, because the point
+    /// was a file to send, not another tab.
+    pub quiet_task: Option<u64>,
+    /// Markups that could not be written into the drawing before the picks
+    /// were saved, so the saved copy does not have them.
+    pub quiet_left_out: bool,
     /// The Compare Documents window, when one is up.
     pub comparing: Option<crate::compareui::Comparing>,
     pub compare_task: u64,
@@ -858,6 +865,8 @@ impl App {
             printing: None,
             doc_job: None,
             doc_task: 0,
+            quiet_task: None,
+            quiet_left_out: false,
             comparing: None,
             compare_task: 0,
             overlaying: None,
