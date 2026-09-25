@@ -29,6 +29,12 @@
       <key>LSItemContentTypes</key>       <array><string>com.excaliburct.evlicense</string></array>
     </dict>
     <dict>
+      <key>CFBundleTypeName</key>         <string>IFC model</string>
+      <key>CFBundleTypeRole</key>         <string>Viewer</string>
+      <key>LSHandlerRank</key>            <string>Alternate</string>
+      <key>LSItemContentTypes</key>       <array><string>org.buildingsmart.ifc</string></array>
+    </dict>
+    <dict>
       <key>CFBundleTypeName</key>         <string>Excalibur View tool chest</string>
       <key>CFBundleTypeRole</key>         <string>Editor</string>
       <key>LSHandlerRank</key>            <string>Owner</string>
@@ -51,6 +57,18 @@
       <key>UTTypeConformsTo</key>         <array><string>public.json</string></array>
       <key>UTTypeTagSpecification</key>
       <dict><key>public.filename-extension</key><array><string>evtools</string></array></dict>
+    </dict>
+  </array>
+  <!-- IFC has no type of its own in macOS, so it is described here, for the
+       IFC model entry above to point at. -->
+  <key>UTImportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>         <string>org.buildingsmart.ifc</string>
+      <key>UTTypeDescription</key>        <string>IFC model</string>
+      <key>UTTypeConformsTo</key>         <array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict><key>public.filename-extension</key><array><string>ifc</string><string>IFC</string></array></dict>
     </dict>
   </array>
   <!-- hyperview:// links, the same as on Windows. -->

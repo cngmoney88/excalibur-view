@@ -209,8 +209,8 @@ mod windows_shell {
         COINIT_APARTMENTTHREADED,
     };
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
-        KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyValueW, RegDeleteTreeW, RegSetValueExW, HKEY,
+        HKEY_CURRENT_USER, KEY_WRITE, REG_DWORD, REG_OPTION_NON_VOLATILE, REG_SZ,
     };
     use windows::Win32::UI::Shell::{
         FOLDERID_Desktop, FOLDERID_Programs, IShellLinkW, SHGetKnownFolderPath, ShellLink,
@@ -242,6 +242,13 @@ mod windows_shell {
     /// Per person, and on PDFs whichever program opens them.
     const COMBINE_KEY: &str =
         r"Software\Classes\SystemFileAssociations\.pdf\shell\ExcaliburView.Combine";
+    /// Steel models (`.ifc`) are offered to this program without taking them
+    /// from whatever opens them now, which on a detailer's machine is Tekla
+    /// or a model viewer they chose: Excalibur View is added to Open with,
+    /// and "Open in Excalibur View" to the right-click menu.
+    const MODEL_CLASS: &str = r"Software\Classes\ExcaliburView.Model";
+    const MODEL_OPEN_WITH: &str = r"Software\Classes\.ifc\OpenWithProgids";
+    const MODEL_VERB: &str = r"Software\Classes\SystemFileAssociations\.ifc\shell\ExcaliburView.Open";
     const LINK_NAME: &str = "Excalibur View.lnk";
     /// What the shortcuts were called before the rename. Taken away when the
     /// new ones are made, so nobody ends up with two icons for one program.
@@ -350,6 +357,17 @@ mod windows_shell {
             )
     }
 
+    /// Offers `.ifc` models to this program: see `MODEL_CLASS`.
+    fn model_verbs(exe: &str) -> bool {
+        key_text(MODEL_CLASS, "", "IFC model")
+            && key_text(&format!(r"{MODEL_CLASS}\DefaultIcon"), "", &format!("\"{exe}\",0"))
+            && key_text(&format!(r"{MODEL_CLASS}\shell\open\command"), "", &format!("\"{exe}\" \"%1\""))
+            && key_text(MODEL_OPEN_WITH, "ExcaliburView.Model", "")
+            && key_text(MODEL_VERB, "MUIVerb", "Open in Excalibur View")
+            && key_text(MODEL_VERB, "Icon", &format!("\"{exe}\",0"))
+            && key_text(&format!(r"{MODEL_VERB}\command"), "", &format!("\"{exe}\" \"%1\""))
+    }
+
     /// Makes a `.evlicense` or `.evtools` open in this program.
     fn file_type(exe: &str, extension: &str, class: &str, shown_as: &str) -> bool {
         let class_key = format!(r"Software\Classes\{class}");
@@ -372,6 +390,9 @@ mod windows_shell {
         }
         if !combine_verb(&target.display().to_string()) {
             log::warn!("could not add Combine to the PDF menu");
+        }
+        if !model_verbs(&target.display().to_string()) {
+            log::warn!("could not offer to open IFC models");
         }
         for (extension, class, shown_as) in FILE_TYPES {
             if !file_type(&target.display().to_string(), extension, class, shown_as) {
@@ -432,6 +453,14 @@ mod windows_shell {
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(UNINSTALL_KEY));
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(PROTOCOL_KEY));
             let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(COMBINE_KEY));
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(MODEL_CLASS));
+            let _ = RegDeleteTreeW(HKEY_CURRENT_USER, &HSTRING::from(MODEL_VERB));
+            // Only this program's line in Open with: the .ifc key is shared.
+            let _ = RegDeleteKeyValueW(
+                HKEY_CURRENT_USER,
+                &HSTRING::from(MODEL_OPEN_WITH),
+                &HSTRING::from("ExcaliburView.Model"),
+            );
             for (extension, class, _) in FILE_TYPES {
                 let _ = RegDeleteTreeW(
                     HKEY_CURRENT_USER,
