@@ -1,0 +1,46 @@
+A steel model in 3D, measuring in it, and a Batch window that stays put.
+
+A STEEL MODEL IN 3D
+
+File -> Open Model (IFC)... now opens the model itself. Every part is on
+screen in a moment, and the holes and copes are cut in while you look
+around. Drag to turn it, right-drag to move it, scroll to zoom to the
+pointer, or pick Iso, Top, Front, Back, Left or Right. Parallel takes the
+perspective out for elevations and plans, and Turn spins it slowly for a
+screen at a show.
+
+Colour it by kind, profile, assembly, or by where each part's weight came
+from, which shows any part the model didn't weigh in red. Hide a kind, cut
+away everything above a height to look inside, and click any part for its
+profile, mark, assembly, length and weight. Ctrl-click adds to the
+selection, double-click goes to a part, Esc clears it.
+
+The tonnage and the model work together: the 3D button on a row of By
+profile or Every part lights those pieces up in the model.
+
+MEASURING
+
+Start measuring, then click two points. A point near a corner or an edge
+catches on it. You get the distance, how far it runs across and up, and
+each point's elevation, in feet and inches.
+
+PICTURES
+
+Save picture... writes the view as a PNG at twice its size on screen. With
+the Transparent background it drops onto a web page or a slide as it is.
+
+OPENING IFC FILES
+
+On Windows, .ifc files get "Open in Excalibur View" on their right-click
+menu and in Open with. Whatever opens them now stays the default. On the
+Mac, Excalibur View shows under Open With for an IFC file.
+
+FIXES
+
+The Batch window, Combine included, no longer grows until it reaches both
+edges of the screen.
+
+ALSO, FROM 0.6.8
+
+Tonnage straight from a steel model, a bookmark per file in a combined set,
+plugin keys, and change notices for FabWire.
