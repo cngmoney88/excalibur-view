@@ -53,4 +53,12 @@ The program uses PDFium, which is BSD-licensed and is not included here.
 `crates/hyperview/build.rs` picks it up from `third_party/pdfium/embedded/`
 if it is there, and the program looks for it beside itself if it is not.
 
+## The model reader
+
+Steel models (IFC) are read and drawn with ifc-lite, the `ifc-lite-core` and
+`ifc-lite-geometry` crates at version 19.1.0, under the Mozilla Public License
+2.0. They are used as published, unchanged, and their source is where the
+build gets it: https://crates.io/crates/ifc-lite-core and
+https://crates.io/crates/ifc-lite-geometry.
+
 Excalibur Construction Technologies · Pueblo, Colorado · hello@excaliburct.com

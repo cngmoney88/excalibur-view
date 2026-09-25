@@ -766,43 +766,6 @@ fn looks_like_an_id(mark: &str) -> bool {
     mark.len() > 30 && mark.starts_with("ID") && mark.matches('-').count() >= 4
 }
 
-/// Each part's shape as triangles, for drawing.
+/// Each part's shape as triangles, for drawing. See `shapes.rs`.
 #[cfg(feature = "geometry")]
-pub mod shapes {
-    use ifc_lite_core::{build_entity_index, EntityDecoder};
-    use ifc_lite_geometry::GeometryRouter;
-
-    /// One part's triangles, in metres, in the model's own frame.
-    pub struct Shape {
-        pub id: u32,
-        pub positions: Vec<f32>,
-        pub normals: Vec<f32>,
-        pub indices: Vec<u32>,
-    }
-
-    /// The shapes of the parts named, in order. A part whose shape can't be
-    /// made is left out and named with the reason, rather than drawn wrong.
-    pub fn of(bytes: &[u8], ids: &[u32]) -> (Vec<Shape>, Vec<(u32, String)>) {
-        let mut decoder = EntityDecoder::with_index(bytes, build_entity_index(bytes));
-        let router = GeometryRouter::with_units(bytes, &mut decoder);
-        let mut shapes = Vec::with_capacity(ids.len());
-        let mut failed = Vec::new();
-        for &id in ids {
-            let made = decoder
-                .decode_by_id(id)
-                .map_err(|e| e.to_string())
-                .and_then(|entity| router.process_element(&entity, &mut decoder).map_err(|e| e.to_string()));
-            match made {
-                Ok(mesh) if !mesh.indices.is_empty() => shapes.push(Shape {
-                    id,
-                    positions: mesh.positions,
-                    normals: mesh.normals,
-                    indices: mesh.indices,
-                }),
-                Ok(_) => failed.push((id, "it has no shape".into())),
-                Err(why) => failed.push((id, why)),
-            }
-        }
-        (shapes, failed)
-    }
-}
+pub mod shapes;

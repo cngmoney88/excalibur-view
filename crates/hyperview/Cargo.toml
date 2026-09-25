@@ -50,7 +50,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wgpu", "wayland", "x11"] }
 egui = "0.32"
 egui_extras = { version = "0.32", features = ["image"] }
-model = { path = "../model" }
+model = { path = "../model", features = ["geometry"] }
+# The model in 3D: drawn on a graphics device and thread of its own and
+# handed back as a picture, whichever renderer the window is using.
+view3d = { path = "../view3d" }
 # Reading a seal picture off somebody's disk. PNG and JPEG only: that is what a
 # scanned seal is, and every other format is an invitation to support a format.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

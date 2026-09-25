@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/hyperview", "crates/model", "crates/plugin-api", "crates/plugin-host", "crates/release", "crates/server", "crates/takeoff", "crates/ui"]
+members = ["crates/annot", "crates/chest", "crates/pdf", "crates/hub", "crates/hyperview", "crates/model", "crates/plugin-api", "crates/plugin-host", "crates/release", "crates/server", "crates/takeoff", "crates/ui", "crates/view3d"]
 # Plugins are built on their own, for WebAssembly, and are never part of the
 # program: an office's own tools stay that office's.
 # The chest generator is not part of the program either: the trade chests are

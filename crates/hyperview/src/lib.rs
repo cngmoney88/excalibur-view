@@ -27,6 +27,7 @@ pub mod instance;
 pub mod joined;
 pub mod layout;
 pub mod markuplist;
+pub mod modelview;
 pub mod modelwindow;
 pub mod morepanels;
 pub mod ocr;

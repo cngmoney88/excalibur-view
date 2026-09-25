@@ -1,25 +1,30 @@
-//! File ▸ Open Model: a steel model's tonnage, straight from the model.
+//! File ▸ Open Model: a steel model in 3D, and its tonnage straight from the
+//! model.
 //!
 //! A detailer's IFC already knows every piece and what it weighs. This reads
-//! it (see the `model` crate) and shows it the way an estimator totals a job:
+//! it (see the `model` crate) and shows it two ways: the model itself, to turn
+//! and click on (see `modelview.rs`), and the way an estimator totals a job,
 //! pieces, feet, pounds and tons by profile, every part with where its numbers
-//! came from, and the bolts by size. It draws nothing yet; that comes next.
+//! came from, and the bolts by size. A row in the lists shows its parts in 3D.
 //!
 //! A part the model gives no weight for is counted, named and left out of the
 //! pounds, with a warning at the top, the same rule the takeoff follows for a
 //! sheet with no scale.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 
 use egui::{Color32, RichText};
 
 use crate::app::App;
+use crate::modelview::{profile_key, Scene};
 
 /// Which list the window shows.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Showing {
     #[default]
+    Model,
     ByProfile,
     Parts,
     Bolts,
@@ -33,13 +38,18 @@ pub struct Opened {
     pub showing: Showing,
     /// Narrows the parts list: a profile, a mark, a name.
     pub filter: String,
+    /// The 3D view, started as soon as the model is read.
+    pub scene: Scene,
 }
+
+/// A model read off the disk: its bytes, for drawing, and what it says.
+type Read = Result<(Arc<Vec<u8>>, model::Model), String>;
 
 /// Models being read, off the window's thread.
 #[derive(Default)]
 pub struct Models {
     pub opened: Vec<Opened>,
-    pub reading: Vec<(PathBuf, mpsc::Receiver<Result<model::Model, String>>)>,
+    pub reading: Vec<(PathBuf, mpsc::Receiver<Read>)>,
 }
 
 impl App {
@@ -67,7 +77,7 @@ impl App {
             .spawn(move || {
                 let read = std::fs::read(&reading)
                     .map_err(|e| format!("{}: {e}", reading.display()))
-                    .and_then(|bytes| model::Model::read(&bytes));
+                    .and_then(|bytes| model::Model::read(&bytes).map(|model| (Arc::new(bytes), model)));
                 let _ = tx.send(read);
             })
             .ok();
@@ -91,19 +101,21 @@ impl App {
         }
         for (path, read) in arrived {
             match read {
-                Ok(model) => {
+                Ok((bytes, model)) => {
                     self.status = format!(
                         "{}: {} parts, {:.2} tons.",
                         name_of(&path),
                         model.parts.len(),
                         model.tons()
                     );
+                    let scene = Scene::new(bytes, &model);
                     self.models.opened.push(Opened {
                         path,
                         model,
                         open: true,
-                        showing: Showing::ByProfile,
+                        showing: Showing::Model,
                         filter: String::new(),
+                        scene,
                     });
                 }
                 Err(why) => self.error = Some(why),
@@ -118,12 +130,13 @@ impl App {
             }
             let model = &opened.model;
             let mut open = true;
-            egui::Window::new(format!("Model takeoff: {}", name_of(&opened.path)))
+            let mut show: Option<HashSet<u32>> = None;
+            egui::Window::new(format!("Model: {}", name_of(&opened.path)))
                 .id(egui::Id::new(("model takeoff", index)))
                 .collapsible(true)
                 .resizable(true)
-                .default_width(760.0)
-                .default_height(560.0)
+                .default_width(1120.0)
+                .default_height(720.0)
                 .open(&mut open)
                 .show(ctx, |ui| {
                     let wrote = [model.made_by.split(',').next().unwrap_or_default(), &model.schema]
@@ -169,6 +182,7 @@ impl App {
                     );
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
+                        ui.selectable_value(&mut opened.showing, Showing::Model, "3D");
                         ui.selectable_value(&mut opened.showing, Showing::ByProfile, "By profile");
                         ui.selectable_value(&mut opened.showing, Showing::Parts, "Every part");
                         ui.selectable_value(&mut opened.showing, Showing::Bolts, "Bolts");
@@ -191,11 +205,16 @@ impl App {
                     });
                     ui.separator();
                     match opened.showing {
-                        Showing::ByProfile => by_profile(ui, model, theme.warn),
-                        Showing::Parts => parts(ui, model, &mut opened.filter, theme.warn),
+                        Showing::Model => opened.scene.ui(ui, model, &theme, &stem_of(&opened.path)),
+                        Showing::ByProfile => show = by_profile(ui, model, theme.warn),
+                        Showing::Parts => show = parts(ui, model, &mut opened.filter, theme.warn),
                         Showing::Bolts => bolts(ui, model),
                     }
                 });
+            if let Some(ids) = show {
+                opened.scene.select_ids(&ids);
+                opened.showing = Showing::Model;
+            }
             opened.open = open;
         }
         self.models.opened.retain(|m| m.open);
@@ -219,15 +238,28 @@ impl App {
     }
 }
 
-fn by_profile(ui: &mut egui::Ui, model: &model::Model, warn: Color32) {
+/// The tonnage by section. A row's button shows its pieces in 3D.
+fn by_profile(ui: &mut egui::Ui, model: &model::Model, warn: Color32) -> Option<HashSet<u32>> {
     let rows = model.by_profile();
+    let mut show = None;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("model by profile").striped(true).num_columns(6).show(ui, |ui| {
-            for heading in ["Kind", "Profile", "Pieces", "Feet", "Pounds", "Tons"] {
+        egui::Grid::new("model by profile").striped(true).num_columns(7).show(ui, |ui| {
+            for heading in ["", "Kind", "Profile", "Pieces", "Feet", "Pounds", "Tons"] {
                 ui.label(RichText::new(heading).strong().size(11.0));
             }
             ui.end_row();
             for row in &rows {
+                if ui.small_button("3D").on_hover_text("Show these pieces in the model").clicked() {
+                    let key = profile_key(&row.profile);
+                    show = Some(
+                        model
+                            .parts
+                            .iter()
+                            .filter(|p| p.kind == row.kind && profile_key(&p.profile) == key)
+                            .map(|p| p.id)
+                            .collect(),
+                    );
+                }
                 ui.label(row.kind.name());
                 ui.label(&row.profile);
                 ui.label(row.pieces.to_string());
@@ -243,6 +275,7 @@ fn by_profile(ui: &mut egui::Ui, model: &model::Model, warn: Color32) {
                 ui.label(format!("{:.3}", row.pounds / 2000.0));
                 ui.end_row();
             }
+            ui.label("");
             ui.label(RichText::new("Total").strong());
             ui.label("");
             ui.label(RichText::new(model.parts.len().to_string()).strong());
@@ -252,9 +285,13 @@ fn by_profile(ui: &mut egui::Ui, model: &model::Model, warn: Color32) {
             ui.end_row();
         });
     });
+    show
 }
 
-fn parts(ui: &mut egui::Ui, model: &model::Model, filter: &mut String, warn: Color32) {
+/// Every part. A part's button shows it in 3D; the one above the list shows
+/// every part the filter leaves.
+fn parts(ui: &mut egui::Ui, model: &model::Model, filter: &mut String, warn: Color32) -> Option<HashSet<u32>> {
+    let mut show = None;
     ui.horizontal(|ui| {
         ui.label(RichText::new("Show only").size(11.0));
         ui.add(egui::TextEdit::singleline(filter).hint_text("a profile, mark or name").desired_width(220.0));
@@ -270,14 +307,22 @@ fn parts(ui: &mut egui::Ui, model: &model::Model, filter: &mut String, warn: Col
                     .any(|s| s.to_lowercase().contains(&wanted))
         })
         .collect();
-    ui.label(RichText::new(format!("{} of {} parts", shown.len(), model.parts.len())).size(10.5));
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(format!("{} of {} parts", shown.len(), model.parts.len())).size(10.5));
+        if !wanted.is_empty() && !shown.is_empty() && ui.small_button("Show these in 3D").clicked() {
+            show = Some(shown.iter().map(|p| p.id).collect());
+        }
+    });
     egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-        egui::Grid::new("model parts").striped(true).num_columns(8).show(ui, |ui| {
-            for heading in ["Kind", "Profile", "Mark", "Assembly", "Material", "Feet", "Pounds", "Weight from"] {
+        egui::Grid::new("model parts").striped(true).num_columns(9).show(ui, |ui| {
+            for heading in ["", "Kind", "Profile", "Mark", "Assembly", "Material", "Feet", "Pounds", "Weight from"] {
                 ui.label(RichText::new(heading).strong().size(11.0));
             }
             ui.end_row();
             for p in shown {
+                if ui.small_button("3D").on_hover_text("Show this part in the model").clicked() {
+                    show = Some([p.id].into());
+                }
                 ui.label(p.kind.name());
                 ui.label(&p.profile);
                 ui.label(&p.mark);
@@ -293,6 +338,7 @@ fn parts(ui: &mut egui::Ui, model: &model::Model, filter: &mut String, warn: Col
             }
         });
     });
+    show
 }
 
 fn bolts(ui: &mut egui::Ui, model: &model::Model) {
