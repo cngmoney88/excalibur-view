@@ -335,10 +335,15 @@ impl App {
         let mut pick_revisions = false;
         let mut pick_older = false;
 
+        // A width it can't grow past: the file list and the path box fill
+        // whatever width they're given, and without a limit the window kept
+        // taking more of it until it reached both edges of the screen.
         egui::Window::new("Batch")
             .collapsible(false)
             .resizable(true)
             .default_width(620.0)
+            .min_width(440.0)
+            .max_width(760.0)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 // ---- what ---------------------------------------------------
