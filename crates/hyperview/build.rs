@@ -44,6 +44,13 @@ fn main() {
     };
     let pdfium = root.join("third_party").join("pdfium").join("embedded").join(engine);
     println!("cargo:rerun-if-changed={}", pdfium.display());
+    // Except on Android. There the engine is one of the app's own native
+    // libraries, packed by Gradle for each processor, and the loader finds it
+    // by name. The file here is the Linux desktop's, and carried inside an
+    // Android library it would be six megabytes of the wrong machine's code.
+    if target.contains("android") {
+        return;
+    }
     if pdfium.exists() {
         println!("cargo:rustc-cfg=embedded_pdfium");
         println!("cargo:rustc-env=HYPERVIEW_PDFIUM={}", pdfium.display());
