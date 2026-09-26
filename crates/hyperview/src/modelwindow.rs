@@ -55,12 +55,10 @@ pub struct Models {
 impl App {
     /// File ▸ Open Model (IFC)…
     pub fn pick_and_open_model(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Models (IFC)", &["ifc", "IFC"])
-            .pick_file()
-        {
-            self.open_model(path);
-        }
+        self.filing.one(
+            crate::files::Choose::open().filter("Models (IFC)", &["ifc", "IFC"]),
+            |app, path| app.open_model(path),
+        );
     }
 
     /// Reads a model on its own thread; a big one takes a few seconds and the
@@ -221,20 +219,32 @@ impl App {
         for (suggested, filter, bytes) in saves {
             self.save_model_file(&suggested, &filter, bytes);
         }
+        let pictures: Vec<(PathBuf, String)> = self
+            .models
+            .opened
+            .iter_mut()
+            .filter_map(|m| m.scene.picture_wanted.take().map(|stem| (m.path.clone(), stem)))
+            .collect();
+        for (model, stem) in pictures {
+            self.filing.one(
+                crate::files::Choose::save(format!("{stem}.png")).filter("PNG picture", &["png"]),
+                move |app, path| {
+                    if let Some(opened) = app.models.opened.iter_mut().find(|m| m.path == model) {
+                        opened.scene.save_picture_to(path);
+                    }
+                },
+            );
+        }
     }
 
     fn save_model_file(&mut self, suggested: &str, filter: &str, bytes: Vec<u8>) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(suggested)
-            .add_filter(filter, &["csv"])
-            .save_file()
-        else {
-            return;
-        };
-        match std::fs::write(&path, bytes) {
-            Ok(()) => self.status = format!("Written to {}", path.display()),
-            Err(e) => self.error = Some(format!("Could not write that file: {e}")),
-        }
+        self.filing.one(
+            crate::files::Choose::save(suggested).filter(filter, &["csv"]),
+            move |app, path| match std::fs::write(&path, bytes) {
+                Ok(()) => app.status = format!("Written to {}", path.display()),
+                Err(e) => app.error = Some(format!("Could not write that file: {e}")),
+            },
+        );
     }
 }
 

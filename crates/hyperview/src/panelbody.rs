@@ -535,29 +535,25 @@ impl App {
         );
 
         let suggested = crate::docops::beside(&doc.path, "takeoff summary");
-        let Some(to) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name(
-                suggested
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .as_ref(),
-            )
-            .save_file()
-        else {
-            return;
-        };
-        let to = crate::docops::free_name(&to);
-        // `None` is "wherever the program found pdfium", which is the same
-        // place the viewer's own worker found it.
-        match crate::render::write_report(None, &report, &to) {
-            Ok(done) => {
-                self.status = done.said;
-                self.open(to);
-            }
-            Err(why) => self.error = Some(why),
+        let mut choose = crate::files::Choose::save(
+            suggested.file_name().unwrap_or_default().to_string_lossy(),
+        )
+        .filter("PDF", &["pdf"]);
+        if let Some(folder) = suggested.parent() {
+            choose = choose.start_in(folder);
         }
+        self.filing.one(choose, move |app, to| {
+            let to = crate::docops::free_name(&to);
+            // `None` is "wherever the program found pdfium", which is the same
+            // place the viewer's own worker found it.
+            match crate::render::write_report(None, &report, &to) {
+                Ok(done) => {
+                    app.status = done.said;
+                    app.open(to);
+                }
+                Err(why) => app.error = Some(why),
+            }
+        });
     }
 
     // ---- thumbnails ------------------------------------------------------
@@ -795,16 +791,16 @@ impl App {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "drawing".into());
-        let mut dialog = rfd::FileDialog::new()
-            .set_title("Save the sheets as a PDF")
-            .set_file_name(crate::picks::file_name(&stem, &numbers))
-            .add_filter("PDF", &["pdf"]);
+        let mut choose = crate::files::Choose::save(crate::picks::file_name(&stem, &numbers))
+            .title("Save the sheets as a PDF")
+            .filter("PDF", &["pdf"]);
         if let Some(folder) = source.parent() {
-            dialog = dialog.set_directory(folder);
+            choose = choose.start_in(folder);
         }
-        let Some(mut to) = dialog.save_file() else {
-            return;
-        };
+        self.filing.one(choose, move |app, to| app.save_picked_sheets_to(to, source, pages, numbers));
+    }
+
+    fn save_picked_sheets_to(&mut self, mut to: PathBuf, source: PathBuf, pages: Vec<u32>, numbers: Vec<String>) {
         if !to
             .extension()
             .is_some_and(|e| e.to_string_lossy().eq_ignore_ascii_case("pdf"))
@@ -2458,13 +2454,14 @@ impl App {
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "drawing.pdf".into());
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(suggested)
-            .add_filter("PDF", &["pdf"])
-            .save_file()
-        else {
-            return;
-        };
+        let mut choose = crate::files::Choose::save(suggested).filter("PDF", &["pdf"]);
+        if let Some(folder) = doc.path.parent() {
+            choose = choose.start_in(folder);
+        }
+        self.filing.one(choose, |app, path| app.save_as_to(path));
+    }
+
+    fn save_as_to(&mut self, path: PathBuf) {
         let author = self.author.clone();
         let Some(doc) = self.doc_mut() else { return };
         // Point the document at the new file first, then save into it. The

@@ -954,23 +954,22 @@ impl App {
                             .desired_width(width),
                     );
                     if ui.button("Browse…").clicked() {
-                        let picked = if setting.job == Job::Split {
-                            rfd::FileDialog::new().pick_folder()
+                        let choose = if setting.job == Job::Split {
+                            crate::files::Choose::folder()
                         } else {
-                            rfd::FileDialog::new()
-                                .add_filter("Drawing sets (PDF)", &["pdf"])
-                                .set_file_name(
-                                    std::path::Path::new(&setting.to)
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .as_ref(),
-                                )
-                                .save_file()
+                            crate::files::Choose::save(
+                                std::path::Path::new(&setting.to)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy(),
+                            )
+                            .filter("Drawing sets (PDF)", &["pdf"])
                         };
-                        if let Some(picked) = picked {
-                            setting.to = picked.display().to_string();
-                        }
+                        self.filing.one(choose, |app, picked| {
+                            if let Some(setting) = app.doc_job.as_mut() {
+                                setting.to = picked.display().to_string();
+                            }
+                        });
                     }
                 });
                 ui.add_space(4.0);
@@ -1025,35 +1024,34 @@ impl App {
             });
 
         if pick_others && setting.job == Job::Seal {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Pictures", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"])
-                .set_title("The engineer's seal")
-                .pick_file()
-            {
-                setting.seal_picture = Some(path);
-            }
+            self.filing.one(
+                crate::files::Choose::open()
+                    .filter("Pictures", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"])
+                    .title("The engineer's seal"),
+                |app, path| {
+                    if let Some(setting) = app.doc_job.as_mut() {
+                        setting.seal_picture = Some(path);
+                    }
+                },
+            );
         } else if pick_others {
-            let picked = if setting.job == Job::FromPictures {
-                rfd::FileDialog::new()
-                    .add_filter(
+            let choose = if setting.job == Job::FromPictures {
+                crate::files::Choose::open_many()
+                    .filter(
                         "Pictures",
                         &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG", "tif", "tiff"],
                     )
-                    .set_title("The pictures to make a drawing set from")
-                    .pick_files()
+                    .title("The pictures to make a drawing set from")
             } else if setting.job == Job::Combine {
-                rfd::FileDialog::new()
-                    .add_filter("Drawing sets (PDF)", &["pdf"])
-                    .pick_files()
+                crate::files::Choose::open_many().filter("Drawing sets (PDF)", &["pdf"])
             } else {
-                rfd::FileDialog::new()
-                    .add_filter("Drawing sets (PDF)", &["pdf"])
-                    .pick_file()
-                    .map(|one| vec![one])
+                crate::files::Choose::open().filter("Drawing sets (PDF)", &["pdf"])
             };
-            if let Some(picked) = picked {
-                setting.others = picked;
-            }
+            self.filing.many(choose, |app, picked| {
+                if let Some(setting) = app.doc_job.as_mut() {
+                    setting.others = picked;
+                }
+            });
         }
 
         if go {

@@ -446,12 +446,15 @@ impl App {
                                     .desired_width(width),
                             );
                             if ui.button("Browse…").clicked() {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Drawing sets (PDF)", &["pdf"])
-                                    .save_file()
-                                {
-                                    batching.to = path.display().to_string();
-                                }
+                                self.filing.one(
+                                    crate::files::Choose::save("Combined.pdf")
+                                        .filter("Drawing sets (PDF)", &["pdf"]),
+                                    |app, path| {
+                                        if let Some(b) = app.batching.as_mut() {
+                                            b.to = path.display().to_string();
+                                        }
+                                    },
+                                );
                             }
                         });
                         ui.add_space(4.0);
@@ -920,12 +923,15 @@ impl App {
                                     .desired_width(width),
                             );
                             if ui.button("Browse…").clicked() {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("Reports (PDF)", &["pdf"])
-                                    .save_file()
-                                {
-                                    batching.report_to = path.display().to_string();
-                                }
+                                self.filing.one(
+                                    crate::files::Choose::save("Takeoff summary.pdf")
+                                        .filter("Reports (PDF)", &["pdf"]),
+                                    |app, path| {
+                                        if let Some(b) = app.batching.as_mut() {
+                                            b.report_to = path.display().to_string();
+                                        }
+                                    },
+                                );
                             }
                         });
                         ui.add_space(4.0);
@@ -978,9 +984,11 @@ impl App {
                                 .desired_width(width),
                         );
                         if ui.button("Browse…").clicked() {
-                            if let Some(path) = rfd::FileDialog::new().pick_folder() {
-                                batching.into = path.display().to_string();
-                            }
+                            self.filing.one(crate::files::Choose::folder(), |app, path| {
+                                if let Some(b) = app.batching.as_mut() {
+                                    b.into = path.display().to_string();
+                                }
+                            });
                         }
                     });
                 }
@@ -1072,15 +1080,18 @@ impl App {
             });
 
         if add_files {
-            if let Some(picked) = rfd::FileDialog::new()
-                .add_filter("Drawing sets (PDF)", &["pdf"])
-                .pick_files()
-            {
-                batching.files.extend(picked);
-            }
+            self.filing.many(
+                crate::files::Choose::open_many().filter("Drawing sets (PDF)", &["pdf"]),
+                |app, picked| {
+                    if let Some(b) = app.batching.as_mut() {
+                        b.files.extend(picked);
+                    }
+                },
+            );
         }
         if add_folder {
-            if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+            self.filing.one(crate::files::Choose::folder(), |app, folder| {
+                let Some(batching) = app.batching.as_mut() else { return };
                 let found = batch::pdfs_in(&folder);
                 if found.is_empty() {
                     batching.error = Some(format!(
@@ -1091,32 +1102,39 @@ impl App {
                     batching.error = None;
                     batching.files.extend(found);
                 }
-            }
+            });
         }
         if pick_seal {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Pictures", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"])
-                .set_title("The engineer's seal")
-                .pick_file()
-            {
-                batching.seal_picture = Some(path);
-            }
+            self.filing.one(
+                crate::files::Choose::open()
+                    .filter("Pictures", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"])
+                    .title("The engineer's seal"),
+                |app, path| {
+                    if let Some(b) = app.batching.as_mut() {
+                        b.seal_picture = Some(path);
+                    }
+                },
+            );
         }
         if pick_revisions {
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title("The folder of revisions")
-                .pick_folder()
-            {
-                batching.revisions = Some(folder);
-            }
+            self.filing.one(
+                crate::files::Choose::folder().title("The folder of revisions"),
+                |app, folder| {
+                    if let Some(b) = app.batching.as_mut() {
+                        b.revisions = Some(folder);
+                    }
+                },
+            );
         }
         if pick_older {
-            if let Some(folder) = rfd::FileDialog::new()
-                .set_title("The folder holding the older issue")
-                .pick_folder()
-            {
-                batching.older = Some(folder);
-            }
+            self.filing.one(
+                crate::files::Choose::folder().title("The folder holding the older issue"),
+                |app, folder| {
+                    if let Some(b) = app.batching.as_mut() {
+                        b.older = Some(folder);
+                    }
+                },
+            );
         }
         if copy_report {
             ctx.copy_text(batching.report.as_text());

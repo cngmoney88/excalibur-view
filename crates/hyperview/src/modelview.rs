@@ -155,6 +155,9 @@ pub struct Scene {
     marks: Vec<Probe>,
     probing: Option<mpsc::Receiver<Option<Probe>>>,
     saving: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    /// Save picture… was pressed: the name to suggest, waiting for somewhere
+    /// to put it. The window around this asks where.
+    pub picture_wanted: Option<String>,
     pub status: Option<String>,
     aspect: f32,
 }
@@ -208,6 +211,7 @@ impl Scene {
             marks: Vec::new(),
             probing: None,
             saving: None,
+            picture_wanted: None,
             status: None,
             aspect: 1.5,
         }
@@ -833,7 +837,7 @@ impl Scene {
             .on_hover_text("This view as a PNG, at twice the size it is on screen. With the Transparent background it drops onto a web page or a slide as it is.")
             .clicked()
         {
-            self.save_picture(stem);
+            self.picture_wanted = Some(stem.to_string());
         }
 
         ui.add_space(10.0);
@@ -933,15 +937,8 @@ impl Scene {
 
     /// Saves this view as a PNG at twice its size on screen, drawn and
     /// written off the window's thread.
-    fn save_picture(&mut self, stem: &str) {
+    pub fn save_picture_to(&mut self, path: PathBuf) {
         let Some(asked) = self.asked else { return };
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(format!("{stem}.png"))
-            .add_filter("PNG picture", &["png"])
-            .save_file()
-        else {
-            return;
-        };
         let (mut width, mut height) = (asked.width * 2, asked.height * 2);
         let longest = width.max(height);
         if longest > 7680 {

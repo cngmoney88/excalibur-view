@@ -145,6 +145,18 @@ pub fn combine_here(files: &[PathBuf]) -> bool {
     is_the_window() && folder().is_some_and(|root| hand_over(&root, files, true).is_ok())
 }
 
+/// Hands drawings to this program's own window from inside the program: what
+/// a tablet's app does with a drawing opened *with* Excalibur View from another
+/// app, once it has copied it somewhere the program can read.
+pub fn hand_to_window(files: &[PathBuf]) {
+    if let Some(root) = folder() {
+        let _ = std::fs::create_dir_all(inbox(&root));
+        if let Err(e) = hand_over(&root, files, false) {
+            log::warn!("could not hand {} file(s) to the window: {e}", files.len());
+        }
+    }
+}
+
 /// Leaves the drawings in the inbox for the window that is open. An empty
 /// request just brings it to the front.
 fn hand_over(root: &Path, files: &[PathBuf], combine: bool) -> std::io::Result<()> {

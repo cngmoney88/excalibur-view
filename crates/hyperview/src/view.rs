@@ -1498,10 +1498,15 @@ impl App {
 
     /// Asks for the picture an image markup is about to show, then places it.
     fn ask_for_picture(&mut self) {
-        let chosen = rfd::FileDialog::new()
-            .add_filter("Pictures", &["png", "jpg", "jpeg"])
-            .set_title("The picture to put on the sheet")
-            .pick_file();
+        self.filing.answer(
+            crate::files::Choose::open()
+                .filter("Pictures", &["png", "jpg", "jpeg"])
+                .title("The picture to put on the sheet"),
+            |app, mut chosen| app.place_picture(chosen.pop()),
+        );
+    }
+
+    fn place_picture(&mut self, chosen: Option<std::path::PathBuf>) {
         let Some(path) = chosen else {
             // Nothing chosen means nothing drawn: an empty box would be a
             // markup nobody asked for.

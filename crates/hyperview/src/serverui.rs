@@ -1379,24 +1379,24 @@ impl App {
             self.ask(Ask::NewProject { number, name });
         }
         if let Some(project) = actions.upload_to {
-            if let Some(files) = rfd::FileDialog::new()
-                .set_title("Put drawing sets on the server")
-                .add_filter("PDF drawings", &["pdf", "PDF"])
-                .pick_files()
-            {
-                if !files.is_empty() {
-                    self.ask(Ask::UploadSets { project, files });
-                }
-            }
+            self.filing.many(
+                crate::files::Choose::open_many()
+                    .title("Put drawing sets on the server")
+                    .filter("PDF drawings", &["pdf", "PDF"]),
+                move |app, files| {
+                    if !files.is_empty() {
+                        app.ask(Ask::UploadSets { project, files });
+                    }
+                },
+            );
         }
         if actions.share_chest {
-            if let Some(file) = rfd::FileDialog::new()
-                .set_title("Share a tool chest with the office")
-                .add_filter("Tool chest", &[chest::native::EXTENSION, "bpx", "BPX", "btx", "BTX"])
-                .pick_file()
-            {
-                self.ask(Ask::ShareChest(file));
-            }
+            self.filing.one(
+                crate::files::Choose::open()
+                    .title("Share a tool chest with the office")
+                    .filter("Tool chest", &[chest::native::EXTENSION, "bpx", "BPX", "btx", "BTX"]),
+                |app, file| app.ask(Ask::ShareChest(file)),
+            );
         }
         if actions.office {
             self.ask(Ask::Office);
@@ -2536,13 +2536,12 @@ impl App {
             self.status = crate::edition::not_in_this_copy("Adding a license");
             return;
         }
-        if let Some(file) = rfd::FileDialog::new()
-            .set_title("Add an Excalibur View Office license")
-            .add_filter("License", &[hub::license::EXTENSION])
-            .pick_file()
-        {
-            self.ask(Ask::AddLicense(file));
-        }
+        self.filing.one(
+            crate::files::Choose::open()
+                .title("Add an Excalibur View Office license")
+                .filter("License", &[hub::license::EXTENSION]),
+            |app, file| app.ask(Ask::AddLicense(file)),
+        );
     }
 }
 

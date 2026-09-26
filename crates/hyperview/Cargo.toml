@@ -63,7 +63,6 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
-rfd = "0.16"
 log = "0.4"
 env_logger = "0.11"
 directories = "6"
@@ -82,6 +81,12 @@ rust_xlsxwriter = { version = "0.90", default-features = false }
 # driver and a broken D3D12 one is rare, the reverse is rare, and having both
 # means wgpu picks whichever actually works instead of there being one thing
 # left to go wrong.
+# The operating system's own file dialogs. A tablet has none to borrow and
+# uses the program's own list instead (src/files.rs), so rfd, which has no
+# backend there, is left out of those builds.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rfd = "0.16"
+
 [target.'cfg(windows)'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["dx12", "vulkan"] }
 

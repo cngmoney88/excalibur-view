@@ -804,6 +804,9 @@ pub struct App {
     pub missing_tiles: usize,
     /// Drawings another start of the program handed to this window.
     pub inbox: crossbeam_channel::Receiver<crate::instance::Handed>,
+    /// Files being chosen: the system's dialog on a desktop, the program's own
+    /// list on a tablet. See [`crate::files`].
+    pub filing: crate::files::Choosing,
     /// What the assistant asks of this window, through the connector (`crate::desk`).
     pub desk: crossbeam_channel::Receiver<crate::desk::Ask>,
     /// Questions from the assistant waiting on something: a drawing opening, a check.
@@ -848,7 +851,17 @@ impl App {
         let mut style = (*cc.egui_ctx.style()).clone();
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
         style.spacing.item_spacing = egui::vec2(6.0, 6.0);
+        if crate::platform::tablet() {
+            // Fingers, not a mouse: every control a little taller and wider
+            // apart, and a touch that moves a few points still a tap.
+            style.spacing.button_padding = egui::vec2(10.0, 7.0);
+            style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+            style.spacing.interact_size.y = style.spacing.interact_size.y.max(30.0);
+            style.interaction.resize_grab_radius_side = 10.0;
+            style.interaction.resize_grab_radius_corner = 16.0;
+        }
         cc.egui_ctx.set_style(style);
+        crate::platform::wake_with(&cc.egui_ctx);
 
         let svc = render::Service::start(None, cc.egui_ctx.clone());
         let mut app = App {
@@ -963,6 +976,7 @@ impl App {
             update_note: None,
             status_seen: (String::new(), std::time::Instant::now()),
             inbox: crate::instance::listen(cc.egui_ctx.clone()),
+            filing: Default::default(),
             desk: crate::desk::listen(cc.egui_ctx.clone()),
             desk_waits: Vec::new(),
             turn_to: None,
@@ -1230,13 +1244,12 @@ impl App {
     }
 
     pub fn pick_and_open(&mut self) {
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Drawing sets (PDF)", &["pdf", "PDF"])
-            .add_filter("Models (IFC)", &["ifc", "IFC"])
-            .pick_file()
-        {
-            self.take_file(path);
-        }
+        self.filing.one(
+            crate::files::Choose::open()
+                .filter("Drawing sets (PDF)", &["pdf", "PDF"])
+                .filter("Models (IFC)", &["ifc", "IFC"]),
+            |app, path| app.take_file(path),
+        );
     }
 
     /// Reads a Revu profile and takes its tools, columns and unit weights.
@@ -1250,16 +1263,14 @@ impl App {
     /// time. The original is left where it was: somebody's chest lives in their
     /// own folders and this is not the program to start moving it about.
     pub fn pick_and_load_chest(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Tool chests", &[chest::native::EXTENSION, "bpx", "btx", "BPX", "BTX"])
-            .add_filter("Excalibur View tool chest", &[chest::native::EXTENSION])
-            .add_filter("Import from Revu (profile or tool set)", &["bpx", "btx", "BPX", "BTX"])
-            .set_title("Load a tool chest")
-            .pick_file()
-        else {
-            return;
-        };
-        self.load_chest_from(&path);
+        self.filing.one(
+            crate::files::Choose::open()
+                .filter("Tool chests", &[chest::native::EXTENSION, "bpx", "btx", "BPX", "BTX"])
+                .filter("Excalibur View tool chest", &[chest::native::EXTENSION])
+                .filter("Import from Revu (profile or tool set)", &["bpx", "btx", "BPX", "BTX"])
+                .title("Load a tool chest"),
+            |app, path| app.load_chest_from(&path),
+        );
     }
 
     /// Loads a tool chest file: chosen with Load Tool Chest, or dropped on
@@ -1327,20 +1338,21 @@ impl App {
             self.status = "There is no tool chest loaded to save.".into();
             return;
         };
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Excalibur View tool chest", &[chest::native::EXTENSION])
-            .set_file_name(format!("{}.{}", crate::server::safe(&profile.name), chest::native::EXTENSION))
-            .set_title("Save the tool chest")
-            .save_file()
-        else {
-            return;
-        };
-        match std::fs::write(&path, chest::native::write(&profile, "")) {
-            Ok(()) => {
-                self.status = format!("Saved {} tools to {}.", profile.tool_count(), path.display())
-            }
-            Err(e) => self.error = Some(format!("{}: {e}", path.display())),
-        }
+        self.filing.one(
+            crate::files::Choose::save(format!(
+                "{}.{}",
+                crate::server::safe(&profile.name),
+                chest::native::EXTENSION
+            ))
+            .filter("Excalibur View tool chest", &[chest::native::EXTENSION])
+            .title("Save the tool chest"),
+            move |app, path| match std::fs::write(&path, chest::native::write(&profile, "")) {
+                Ok(()) => {
+                    app.status = format!("Saved {} tools to {}.", profile.tool_count(), path.display())
+                }
+                Err(e) => app.error = Some(format!("{}: {e}", path.display())),
+            },
+        );
     }
 
     pub fn go_to(&mut self, page: u32) {
@@ -2042,6 +2054,7 @@ impl eframe::App for App {
         self.revision_window(ctx);
         self.plugin_windows(ctx);
         self.assistant_window(ctx);
+        self.answer_file_questions(ctx);
 
         crate::bench::mark(&mut marks, "dialogs");
         self.autosave();

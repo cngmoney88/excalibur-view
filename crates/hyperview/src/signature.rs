@@ -516,37 +516,13 @@ impl App {
             });
 
         if choose_scan {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Pictures", &["png", "jpg", "jpeg"])
-                .set_title("A scan or photo of your signature")
-                .pick_file()
-            {
-                match image::open(&path) {
-                    Ok(img) => {
-                        let scan = img.to_rgba8();
-                        match from_paper(&scan, 200) {
-                            Some(kept) => {
-                                let colour = egui::ColorImage::from_rgba_unmultiplied(
-                                    [kept.width() as usize, kept.height() as usize],
-                                    kept.as_raw(),
-                                );
-                                let handle = ctx.load_texture("signature-scan", colour, Default::default());
-                                if let Some(making) = self.signing.making.as_mut() {
-                                    making.scan = Some(scan);
-                                    making.kept = Some(kept);
-                                    making.kept_shown = Some(handle);
-                                }
-                                self.signing.error = None;
-                            }
-                            None => {
-                                self.signing.error =
-                                    Some("There's no ink in that picture that can be told from the paper.".into())
-                            }
-                        }
-                    }
-                    Err(e) => self.signing.error = Some(format!("{}: {e}", path.display())),
-                }
-            }
+            let ctx = ctx.clone();
+            self.filing.one(
+                crate::files::Choose::open()
+                    .filter("Pictures", &["png", "jpg", "jpeg"])
+                    .title("A scan or photo of your signature"),
+                move |app, path| app.take_signature_scan(&ctx, &path),
+            );
         }
         if keep_new {
             let made = self.signing.making.as_ref().and_then(|m| m.picture().map(|p| (m.name.clone(), p)));
@@ -591,6 +567,37 @@ impl App {
         if !open {
             self.signing.open = false;
             self.signing.making = None;
+        }
+    }
+}
+
+impl App {
+    /// A scan or photo of a signature, with the paper taken out of it.
+    fn take_signature_scan(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        match image::open(&path) {
+            Ok(img) => {
+                let scan = img.to_rgba8();
+                match from_paper(&scan, 200) {
+                    Some(kept) => {
+                        let colour = egui::ColorImage::from_rgba_unmultiplied(
+                            [kept.width() as usize, kept.height() as usize],
+                            kept.as_raw(),
+                        );
+                        let handle = ctx.load_texture("signature-scan", colour, Default::default());
+                        if let Some(making) = self.signing.making.as_mut() {
+                            making.scan = Some(scan);
+                            making.kept = Some(kept);
+                            making.kept_shown = Some(handle);
+                        }
+                        self.signing.error = None;
+                    }
+                    None => {
+                        self.signing.error =
+                            Some("There's no ink in that picture that can be told from the paper.".into())
+                    }
+                }
+            }
+            Err(e) => self.signing.error = Some(format!("{}: {e}", path.display())),
         }
     }
 }

@@ -480,6 +480,7 @@ mod windows_shell {
 /// Takes the program, its shortcuts and its Settings entry away. Nothing a
 /// person made is touched: drawings, markups and tool chests they saved are
 /// wherever they saved them, and the company's are on the company's server.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn uninstall() {
     let sure = rfd::MessageDialog::new()
         .set_title("Excalibur View")

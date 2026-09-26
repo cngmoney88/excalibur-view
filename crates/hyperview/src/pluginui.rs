@@ -156,14 +156,31 @@ impl App {
             .file_stem()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "sheet".into());
-        let Some(save_to) = rfd::FileDialog::new()
-            .set_title(if whole { "Save this drawing for a plugin test" } else { "Save this sheet for a plugin test" })
-            .set_file_name(if whole { format!("{stem}.json") } else { format!("{stem} - sheet {}.json", page + 1) })
-            .add_filter("Plugin input (JSON)", &["json"])
-            .save_file()
-        else {
+        let choose = crate::files::Choose::save(if whole {
+            format!("{stem}.json")
+        } else {
+            format!("{stem} - sheet {}.json", page + 1)
+        })
+        .title(if whole { "Save this drawing for a plugin test" } else { "Save this sheet for a plugin test" })
+        .filter("Plugin input (JSON)", &["json"]);
+        let ctx = ctx.clone();
+        self.filing.one(choose, move |app, save_to| {
+            app.save_plugin_input_to(&ctx, whole, doc_id, pages, save_to)
+        });
+    }
+
+    fn save_plugin_input_to(
+        &mut self,
+        ctx: &egui::Context,
+        whole: bool,
+        doc_id: u64,
+        pages: Vec<u32>,
+        save_to: std::path::PathBuf,
+    ) {
+        if self.plugin_job.is_some() {
+            self.status = "A plugin is running. Save the sheet once it has finished.".into();
             return;
-        };
+        }
         let command = Command {
             id: "test".into(),
             name: if whole { "Saving the drawing".into() } else { "Saving the sheet".into() },
@@ -382,14 +399,16 @@ impl App {
                 .into();
             return;
         }
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Add a plugin")
-            .add_filter("Excalibur View plugin", &[plugins::EXTENSION])
-            .pick_file()
-        else {
-            return;
-        };
-        match plugins::add_from_file(&crate::install::plugin_trusted(), &path) {
+        self.filing.one(
+            crate::files::Choose::open()
+                .title("Add a plugin")
+                .filter("Excalibur View plugin", &[plugins::EXTENSION]),
+            |app, path| app.add_plugin_from(&path),
+        );
+    }
+
+    fn add_plugin_from(&mut self, path: &std::path::Path) {
+        match plugins::add_from_file(&crate::install::plugin_trusted(), path) {
             Err(why) => self.status = why,
             Ok((plugin, _)) => {
                 let name = format!("{} {}", plugin.manifest.name, plugin.manifest.version);
@@ -683,13 +702,16 @@ impl App {
                                     ui.ctx().copy_text(table.to_csv().replace(',', "\t"));
                                 }
                                 if ui.button("Save as CSV…").clicked() {
-                                    if let Some(path) = rfd::FileDialog::new()
-                                        .set_file_name(format!("{}.csv", table.title))
-                                        .add_filter("CSV", &["csv"])
-                                        .save_file()
-                                    {
-                                        let _ = std::fs::write(path, table.to_csv());
-                                    }
+                                    let csv = table.to_csv();
+                                    self.filing.one(
+                                        crate::files::Choose::save(format!("{}.csv", table.title))
+                                            .filter("CSV", &["csv"]),
+                                        move |app, path| {
+                                            if let Err(e) = std::fs::write(&path, csv) {
+                                                app.error = Some(format!("Could not write {}: {e}", path.display()));
+                                            }
+                                        },
+                                    );
                                 }
                             });
                         });

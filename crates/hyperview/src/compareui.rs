@@ -235,14 +235,17 @@ impl App {
             });
 
         if pick_older {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Drawing sets (PDF)", &["pdf"])
-                .set_title("The older issue")
-                .pick_file()
-            {
-                comparing.older = Some(path);
-                comparing.found = None;
-            }
+            self.filing.one(
+                crate::files::Choose::open()
+                    .filter("Drawing sets (PDF)", &["pdf"])
+                    .title("The older issue"),
+                |app, path| {
+                    if let Some(comparing) = app.comparing.as_mut() {
+                        comparing.older = Some(path);
+                        comparing.found = None;
+                    }
+                },
+            );
         }
         if let Some(n) = show {
             if let Some(found) = comparing.found.as_mut() {
@@ -567,14 +570,17 @@ impl App {
             });
 
         if pick_older {
-            if let Some(path) = rfd::FileDialog::new()
-                .add_filter("Drawing sets (PDF)", &["pdf"])
-                .set_title("The other issue")
-                .pick_file()
-            {
-                overlaying.older = Some(path);
-                overlaying.picture = None;
-            }
+            self.filing.one(
+                crate::files::Choose::open()
+                    .filter("Drawing sets (PDF)", &["pdf"])
+                    .title("The other issue"),
+                |app, path| {
+                    if let Some(overlaying) = app.overlaying.as_mut() {
+                        overlaying.older = Some(path);
+                        overlaying.picture = None;
+                    }
+                },
+            );
         }
         if go {
             if let Some(older) = overlaying.older.clone() {

@@ -507,33 +507,40 @@ impl App {
         }
         let stem = listing.title.trim_end_matches(".pdf").trim_end_matches(".PDF").to_string();
         let suggested = format!("{stem} takeoff.{}", format.extension());
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(&suggested)
-            .add_filter(format.name(), &[format.extension()])
-            .save_file()
-        else {
-            return;
-        };
+        // Written now, while the list is to hand, and moved to wherever it is
+        // wanted once that has been chosen.
+        let staged = std::env::temp_dir().join(format!(
+            "excalibur-view-export-{}-{}.{}",
+            std::process::id(),
+            listing.lines.len(),
+            format.extension()
+        ));
         let written = match format {
-            Format::Csv => std::fs::write(&path, listing.to_csv()).map_err(|e| e.to_string()),
-            Format::Xml => std::fs::write(&path, listing.to_xml()).map_err(|e| e.to_string()),
-            Format::Html => std::fs::write(&path, listing.to_html()).map_err(|e| e.to_string()),
+            Format::Csv => std::fs::write(&staged, listing.to_csv()).map_err(|e| e.to_string()),
+            Format::Xml => std::fs::write(&staged, listing.to_xml()).map_err(|e| e.to_string()),
+            Format::Html => std::fs::write(&staged, listing.to_html()).map_err(|e| e.to_string()),
             Format::Json => serde_json::to_string_pretty(&listing.to_json())
                 .map_err(|e| e.to_string())
-                .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string())),
-            Format::Excel => crate::workbook::write(&listing, &path),
+                .and_then(|text| std::fs::write(&staged, text).map_err(|e| e.to_string())),
+            Format::Excel => crate::workbook::write(&listing, &staged),
             Format::Pdf => Ok(()),
         };
-        match written {
-            Ok(()) => {
-                self.status = format!(
-                    "{} markups written to {}.",
-                    listing.lines.len(),
-                    path.display()
-                )
-            }
-            Err(why) => self.error = Some(format!("Could not write {}: {why}", path.display())),
+        if let Err(why) = written {
+            self.error = Some(format!("Could not write the list: {why}"));
+            return;
         }
+        let count = listing.lines.len();
+        self.filing.one(
+            crate::files::Choose::save(suggested).filter(format.name(), &[format.extension()]),
+            move |app, path| {
+                let moved = std::fs::copy(&staged, &path);
+                let _ = std::fs::remove_file(&staged);
+                match moved {
+                    Ok(_) => app.status = format!("{count} markups written to {}.", path.display()),
+                    Err(why) => app.error = Some(format!("Could not write {}: {why}", path.display())),
+                }
+            },
+        );
     }
 }
 

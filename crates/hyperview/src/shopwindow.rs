@@ -618,17 +618,13 @@ impl App {
             ),
             None => format!("{what}.{extension}"),
         };
-        let Some(path) = rfd::FileDialog::new()
-            .set_file_name(suggested)
-            .add_filter(filter, &[extension])
-            .save_file()
-        else {
-            return;
-        };
-        match std::fs::write(&path, bytes) {
-            Ok(()) => self.status = format!("Written to {}", path.display()),
-            Err(e) => self.error = Some(format!("Could not write that file: {e}")),
-        }
+        self.filing.one(
+            crate::files::Choose::save(suggested).filter(filter, &[extension]),
+            move |app, path| match std::fs::write(&path, bytes) {
+                Ok(()) => app.status = format!("Written to {}", path.display()),
+                Err(e) => app.error = Some(format!("Could not write that file: {e}")),
+            },
+        );
     }
 
     /// The cut list as a PDF, laid out with the same machinery as the takeoff
@@ -646,27 +642,23 @@ impl App {
         let report = report_of(list, nests, buying, unit, &drawing, &self.author, &sheet, rule);
 
         let suggested = crate::docops::beside(&doc.path, "shop list");
-        let Some(to) = rfd::FileDialog::new()
-            .add_filter("PDF", &["pdf"])
-            .set_file_name(
-                suggested
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .as_ref(),
-            )
-            .save_file()
-        else {
-            return;
-        };
-        let to = crate::docops::free_name(&to);
-        match crate::render::write_report(None, &report, &to) {
-            Ok(done) => {
-                self.status = done.said;
-                self.open(to);
-            }
-            Err(why) => self.error = Some(why),
+        let mut choose = crate::files::Choose::save(
+            suggested.file_name().unwrap_or_default().to_string_lossy(),
+        )
+        .filter("PDF", &["pdf"]);
+        if let Some(folder) = suggested.parent() {
+            choose = choose.start_in(folder);
         }
+        self.filing.one(choose, move |app, to| {
+            let to = crate::docops::free_name(&to);
+            match crate::render::write_report(None, &report, &to) {
+                Ok(done) => {
+                    app.status = done.said;
+                    app.open(to);
+                }
+                Err(why) => app.error = Some(why),
+            }
+        });
     }
 }
 
