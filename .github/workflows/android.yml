@@ -1,0 +1,120 @@
+# Builds the Android app: a debug APK to put on a phone or a Chromebook by
+# hand, and the release App Bundle that Play takes.
+#
+# What this holds, and what it deliberately does not:
+#
+#   It can hold Play's upload key. That says "this bundle came from Excalibur
+#   Construction Technologies" to Play, and nothing more: Play re-signs what
+#   it delivers with a key of its own, and a leaked upload key is reset in
+#   Play Console. Without the key the bundle comes out unsigned, which is
+#   still the whole build, just not one Play will accept.
+#
+#   It does NOT have the Excalibur signing key, and the Android app has no use
+#   for it: Play installs the updates, not the program.
+#
+# Started by hand only for now. See mobile/android/build.sh, which is what it
+# runs and what builds the same thing on anybody's own machine.
+
+name: Android build
+
+on:
+  workflow_dispatch:
+
+# Never on a pull request. A pull request can come from anybody's fork and
+# would run their code with the upload key in reach.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      # The NDK release the build is made and checked with: r28c. r28 is the
+      # first that links for 16 KB pages without being asked.
+      NDK_VERSION: "28.2.13676358"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust, for phones and for Chromebooks
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Gradle and the Android plugin run on Java. 17 is the oldest the plugin
+      # accepts.
+      - name: Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+          cache-dependency-path: |
+            mobile/android/*.gradle.kts
+            mobile/android/app/*.gradle.kts
+            mobile/android/gradle/wrapper/gradle-wrapper.properties
+
+      # The runner already carries an Android SDK. This adds exactly the
+      # platform, build tools and NDK the app is built against, so an update
+      # to the runner image does not quietly change what goes into the app.
+      - name: Android SDK and NDK
+        run: |
+          set -euo pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platforms;android-36" "build-tools;36.1.0" "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # Play's upload key, when the repository has one. Written to a file made
+      # for this job and thrown away with the machine.
+      - name: Play's upload key
+        env:
+          UPLOAD_KEYSTORE: ${{ secrets.ANDROID_UPLOAD_KEYSTORE }}
+          UPLOAD_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEYSTORE_PASSWORD }}
+          UPLOAD_KEY_ALIAS: ${{ secrets.ANDROID_UPLOAD_KEY_ALIAS }}
+          UPLOAD_KEY_PASSWORD: ${{ secrets.ANDROID_UPLOAD_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "$UPLOAD_KEYSTORE" ]; then
+            echo "No upload key in this repository's secrets: the bundle will be unsigned."
+            exit 0
+          fi
+          echo "$UPLOAD_KEYSTORE" | base64 --decode > "$RUNNER_TEMP/upload.jks"
+          {
+            echo "EXV_KEYSTORE=$RUNNER_TEMP/upload.jks"
+            echo "EXV_KEYSTORE_PASSWORD=$UPLOAD_KEYSTORE_PASSWORD"
+            echo "EXV_KEY_ALIAS=$UPLOAD_KEY_ALIAS"
+            echo "EXV_KEY_PASSWORD=$UPLOAD_KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
+      - name: Build
+        run: mobile/android/build.sh
+
+      - name: What came out
+        id: files
+        run: |
+          set -euo pipefail
+          version="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          ls -lh dist/android
+          sha256sum dist/android/*
+
+      - name: Hand them over
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-${{ steps.files.outputs.version }}
+          path: |
+            dist/android/*.apk
+            dist/android/*.aab
+            dist/android/native-debug-symbols-*.zip
+          if-no-files-found: error
+          retention-days: 30
