@@ -7086,10 +7086,23 @@ impl Engine {
             })();
             unsafe { b.FPDF_CloseDocument(check) };
             verdict?;
+            let now = lines.iter().filter(|l| !l.is_empty()).count();
+            let was = found.lines.len();
+            // Nothing below a note moves out of its way, here or in any PDF
+            // editor. So a note that has grown says so, rather than leaving
+            // somebody to find its last line printed over the next note.
+            let grew = if now > was {
+                format!(
+                    " It runs to {now} lines now where it had {was}, and the new {} may sit on \
+                     whatever is under it. Shorten it, or Undo.",
+                    if now - was == 1 { "one" } else { "ones" }
+                )
+            } else {
+                String::new()
+            };
             let said = format!(
-                "The words are changed in the drawing: {} line{}.{note}",
-                lines.iter().filter(|l| !l.is_empty()).count(),
-                if lines.len() == 1 { "" } else { "s" }
+                "The words are changed in the drawing: {now} line{}.{note}{grew}",
+                if now == 1 { "" } else { "s" }
             );
             Ok((bytes, said))
         })();
