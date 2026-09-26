@@ -193,6 +193,9 @@ pub struct Chrome {
     fired: Vec<String>,
     /// Commands that cannot be used right now, with the reason.
     disabled: BTreeMap<String, String>,
+    /// Commands this copy of the program leaves out altogether: they belong
+    /// to a desktop, and a tablet shows no button for them.
+    hidden: std::collections::BTreeSet<String>,
     /// What the Plugins menu lists: the office's own tools, which are not
     /// commands this program was built with.
     pub plugins: Vec<PluginItem>,
@@ -223,8 +226,18 @@ impl Chrome {
             toggles: BTreeMap::new(),
             fired: Vec::new(),
             disabled: BTreeMap::new(),
+            hidden: Default::default(),
             plugins: Vec::new(),
         }
+    }
+
+    /// Leaves a command out of every menu and toolbar.
+    pub fn hide(&mut self, id: &str) {
+        self.hidden.insert(id.to_string());
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.contains(id)
     }
 
     /// Everything clicked since this was last called.
@@ -450,7 +463,7 @@ impl Chrome {
                         }
                     }
                     chest::profile::Item::Command { id, visible } => {
-                        if !visible {
+                        if !visible || self.hidden.contains(id.as_str()) {
                             continue;
                         }
                         self.button(ui, id);
@@ -594,6 +607,9 @@ impl Chrome {
     }
 
     fn menu_item(&mut self, ui: &mut Ui, id: &str, label: Option<&str>) {
+        if self.hidden.contains(id) {
+            return;
+        }
         let Some(command) = command::find(id) else {
             return;
         };

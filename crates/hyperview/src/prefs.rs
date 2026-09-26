@@ -85,6 +85,32 @@ pub struct Prefs {
     /// The increment cut lengths are rounded **up** to.
     #[serde(default = "an_inch")]
     pub cut_step: f64,
+    /// How big the controls are drawn on a tablet, as a multiple of their
+    /// desktop size. Nought is the tablet's own default.
+    #[serde(default)]
+    pub control_size: f32,
+}
+
+/// The sizes a tablet's controls can be drawn at, with their names.
+pub const CONTROL_SIZES: [(f32, &str); 3] = [(1.0, "Standard"), (1.15, "Larger"), (1.3, "Largest")];
+
+impl Prefs {
+    /// How big a tablet draws its controls. A point on an Android tablet is a
+    /// 160th of an inch and on an iPad a 132nd, against about a 96th on a
+    /// desktop screen, so the same controls come out smaller under a finger
+    /// than they are under a mouse; they start a size up to make up for it.
+    pub fn control_scale(&self) -> f32 {
+        if self.control_size > 0.0 {
+            return self.control_size.clamp(0.8, 1.6);
+        }
+        if cfg!(target_os = "android") {
+            1.15
+        } else if crate::platform::tablet() {
+            1.1
+        } else {
+            1.0
+        }
+    }
 }
 
 fn yes() -> bool {
@@ -130,6 +156,7 @@ impl Default for Prefs {
             kerf: an_eighth(),
             worth_keeping: two_feet(),
             cut_step: an_inch(),
+            control_size: 0.0,
         }
     }
 }

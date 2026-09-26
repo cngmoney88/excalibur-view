@@ -383,6 +383,13 @@ impl Engine for WindowsOcr {
 /// after it, for a Linux box or a machine where somebody has installed it
 /// deliberately.
 pub fn engine_here() -> Option<Box<dyn Engine>> {
+    // A tablet's own, which is the only one a tablet has.
+    if let Some(system) = crate::platform::recogniser() {
+        return Some(system);
+    }
+    if cfg!(any(target_os = "android", target_os = "ios")) {
+        return None;
+    }
     #[cfg(windows)]
     {
         if WindowsOcr::available() {

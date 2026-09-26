@@ -701,6 +701,10 @@ pub struct App {
     pub lasso: Option<Vec<[f64; 2]>>,
     /// Markups being dragged to a new place with Select.
     pub moving: Option<Moving>,
+    /// Fingers on the glass: what the sheet's draft was when the first one
+    /// came down, so a second finger turning the touch into a pinch can put
+    /// back whatever the first one started. See `view::touch`.
+    pub touch: crate::view::Touch,
     /// A grip on the selected markup, while it is being dragged.
     pub gripping: Option<crate::grips::Gripping>,
     /// A Cloud+'s cloud has been dragged out and is waiting for a click on
@@ -951,6 +955,7 @@ impl App {
             reopen_to: None,
             pen: crate::pen::Pen::default(),
             choosing: None,
+            touch: Default::default(),
             asking_depth: None,
             shop: Default::default(),
             models: Default::default(),
@@ -1001,11 +1006,22 @@ impl App {
             editing_prefs: None,
         };
         app.chrome.plugins = app.plugins.menu();
+        if crate::platform::tablet() {
+            // What belongs to a desktop rather than a tablet: connecting a
+            // desktop assistant app, and looking for updates, which the app
+            // store brings.
+            for id in ["Help.ConnectAssistant", "Help.TestAssistant", "Help.CheckForUpdates"] {
+                app.chrome.hide(id);
+            }
+        }
         // Settings from the file win over the defaults filled in above.
         app.prefs = crate::prefs::Prefs::load();
         app.units = app.prefs.units;
         app.denominator = app.prefs.denominator;
         app.wheel_zooms = app.prefs.wheel_zooms;
+        if crate::platform::tablet() {
+            cc.egui_ctx.set_zoom_factor(app.prefs.control_scale());
+        }
         if !app.prefs.author.trim().is_empty() {
             app.author = app.prefs.author.clone();
         }

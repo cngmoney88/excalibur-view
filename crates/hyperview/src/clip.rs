@@ -827,6 +827,13 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
+        // A tablet can attach it for real: the share sheet hands the file to
+        // Mail, or to anything else that sends files.
+        if crate::platform::can_share() {
+            crate::platform::share(&path);
+            self.status = format!("Sending {name}…");
+            return;
+        }
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
         let subject = urlencode(&name);
@@ -882,6 +889,9 @@ fn urlencode(text: &str) -> String {
 
 /// Hands something to whatever the machine opens that kind of thing with.
 fn open_it(what: &str) -> Result<(), String> {
+    if crate::platform::open_url(what) {
+        return Ok(());
+    }
     #[cfg(windows)]
     let mut command = {
         let mut c = std::process::Command::new("cmd");

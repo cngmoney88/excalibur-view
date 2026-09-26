@@ -38,6 +38,17 @@ pub trait Bridge: Send + Sync {
     fn print(&self, pdf: &Path, name: &str);
     /// Opens a web page in the browser.
     fn open_url(&self, url: &str);
+    /// Reads the words off a greyscale picture (one byte a pixel, rows from
+    /// the top) with the system's own text recogniser. Called off the
+    /// window's thread and allowed to take its time. `None` when this system
+    /// has no recogniser to offer.
+    fn read_words(&self, _grey: &[u8], _width: u32, _height: u32) -> Option<Result<Vec<crate::ocr::Word>, String>> {
+        None
+    }
+    /// Whether [`Bridge::read_words`] will answer.
+    fn reads_words(&self) -> bool {
+        false
+    }
 }
 
 static BRIDGE: OnceLock<Box<dyn Bridge>> = OnceLock::new();
@@ -167,6 +178,30 @@ pub fn open_url(url: &str) -> bool {
             true
         }
         None => false,
+    }
+}
+
+/// The system's text recogniser, as an OCR engine, when it has one.
+pub fn recogniser() -> Option<Box<dyn crate::ocr::Engine>> {
+    BRIDGE.get().filter(|b| b.reads_words()).map(|_| Box::new(SystemReader) as Box<dyn crate::ocr::Engine>)
+}
+
+struct SystemReader;
+
+impl crate::ocr::Engine for SystemReader {
+    fn read(&self, grey: &[u8], width: u32, height: u32) -> Result<Vec<crate::ocr::Word>, String> {
+        match BRIDGE.get().and_then(|b| b.read_words(grey, width, height)) {
+            Some(read) => read,
+            None => Err("this device has no text recogniser".into()),
+        }
+    }
+
+    fn name(&self) -> String {
+        if cfg!(target_os = "ios") {
+            "the text recogniser built into iPadOS".into()
+        } else {
+            "the text recogniser built into this device".into()
+        }
     }
 }
 

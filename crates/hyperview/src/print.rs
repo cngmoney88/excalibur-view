@@ -195,6 +195,12 @@ pub fn read_range(text: &str, sheets: usize) -> Vec<u32> {
 /// registered for printing, the file is opened instead and they can press
 /// Ctrl-P — better than a dead button and a shrug.
 pub fn send_to_printer(path: &std::path::Path) -> Result<bool, String> {
+    // A tablet prints the way everything on it prints: the system's own
+    // printing, with its own list of printers.
+    let name = path.file_stem().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    if crate::platform::print(path, &name) {
+        return Ok(true);
+    }
     #[cfg(windows)]
     {
         let quoted = path.display().to_string().replace('\'', "''");

@@ -681,7 +681,13 @@ impl List {
                             1 => "Use 1 file".to_string(),
                             n => format!("Use {n} files"),
                         };
-                        if ui.add_enabled(n > 0, egui::Button::new(label).min_size(egui::vec2(160.0, 36.0))).clicked() {
+                        if ui
+                            .add_enabled(
+                                n > 0,
+                                egui::Button::new(label).min_size(egui::vec2(160.0, 36.0)).fill(theme.accent),
+                            )
+                            .clicked()
+                        {
                             outcome = Outcome::Chosen(self.ticked.clone());
                         }
                         let files: Vec<PathBuf> =
@@ -705,7 +711,9 @@ impl List {
                         if edit.changed() {
                             self.replacing = None;
                         }
-                        if big_button(ui, "Save here").clicked()
+                        if ui
+                            .add(egui::Button::new("Save here").min_size(egui::vec2(120.0, 36.0)).fill(theme.accent))
+                            .clicked()
                             || (edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))
                         {
                             save = true;
@@ -737,7 +745,7 @@ impl List {
                 Kind::Folder => {
                     ui.horizontal(|ui| {
                         if ui
-                            .add(egui::Button::new("Use this folder").min_size(egui::vec2(160.0, 36.0)))
+                            .add(egui::Button::new("Use this folder").min_size(egui::vec2(160.0, 36.0)).fill(theme.accent))
                             .clicked()
                         {
                             outcome = Outcome::Chosen(vec![self.here.clone()]);
@@ -754,8 +762,17 @@ impl List {
     }
 }
 
+/// A button a finger finds: framed and filled, where the program's own
+/// toolbar buttons are drawn flat for a mouse.
 fn big_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
-    ui.add(egui::Button::new(text).min_size(egui::vec2(0.0, 36.0)))
+    let visuals = ui.visuals();
+    let (fill, line) = (visuals.widgets.inactive.weak_bg_fill, visuals.widgets.noninteractive.bg_stroke);
+    ui.add(
+        egui::Button::new(text)
+            .min_size(egui::vec2(0.0, 36.0))
+            .fill(fill.gamma_multiply(1.6))
+            .stroke(egui::Stroke::new(1.0, line.color)),
+    )
 }
 
 fn size_of(bytes: u64) -> String {

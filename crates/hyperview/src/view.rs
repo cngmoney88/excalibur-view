@@ -634,7 +634,73 @@ impl App {
         }
     }
 
+    /// Two fingers move and zoom the sheet, whatever tool is in hand, and a
+    /// touch that becomes two fingers takes back whatever its first finger had
+    /// started: the start of a box, a stroke of ink, a markup nudged, a loop
+    /// being drawn. One finger on bare paper with the Select tool moves the
+    /// sheet, which is what a finger on a tablet expects to do.
+    ///
+    /// True while the fingers have the sheet, when no tool should act on it.
+    fn touch(&mut self, ui: &mut egui::Ui, response: &egui::Response) -> bool {
+        let (touching, pinch) = ui.input(|i| (i.any_touches(), i.multi_touch()));
+        if !touching {
+            // The last finger has come off. If the fingers had the sheet,
+            // nothing they did is a tool's: not on this frame, where the
+            // lift arrives, and not on the next, where a lift that never
+            // moved can still read as a tap.
+            let was = std::mem::take(&mut self.touch);
+            if was.pinching || was.panning {
+                self.touch.settling = true;
+                return true;
+            }
+            return false;
+        }
+        self.touch.settling = false;
+        if !self.touch.down {
+            self.touch.down = true;
+            self.touch.draft_before = self.doc().map(|d| d.draft.clone());
+        }
+        if let Some(pinch) = pinch.filter(|p| p.num_touches >= 2) {
+            if !self.touch.pinching {
+                self.touch.pinching = true;
+                self.touch.panning = false;
+                self.lasso = None;
+                if let Some(moving) = self.moving.take() {
+                    if moving.moved {
+                        if let Some(doc) = self.doc_mut() {
+                            doc.undo();
+                        }
+                    }
+                }
+                if let (Some(before), Some(doc)) = (self.touch.draft_before.take(), self.doc_mut()) {
+                    doc.draft = before;
+                }
+            }
+            if let Some(doc) = self.doc_mut() {
+                doc.view.offset += pinch.translation_delta;
+                if pinch.zoom_delta != 1.0 {
+                    doc.view.zoom_at(pinch.center_pos, pinch.zoom_delta);
+                }
+            }
+            ui.ctx().request_repaint();
+            return true;
+        }
+        if self.touch.pinching {
+            return true;
+        }
+        if self.touch.panning {
+            if let Some(doc) = self.doc_mut() {
+                doc.view.offset += response.drag_delta();
+            }
+            return true;
+        }
+        false
+    }
+
     fn navigate(&mut self, ui: &mut egui::Ui, response: &egui::Response, area: Rect) {
+        if self.touch(ui, response) {
+            return;
+        }
         let wheel_zooms = self.wheel_zooms;
         let space = ui.input(|i| i.key_down(egui::Key::Space));
         let panning = self.tool == Tool::Pan || space;
@@ -1015,7 +1081,7 @@ impl App {
     }
 
     fn tool_input(&mut self, ui: &mut egui::Ui, response: &egui::Response, _area: Rect) {
-        if self.tool == Tool::Pan {
+        if self.tool == Tool::Pan || self.touch.pinching || self.touch.panning || self.touch.settling {
             return;
         }
         // Words being typed into a box on the sheet have the pointer to
@@ -1191,6 +1257,12 @@ impl App {
                     }
                     return;
                 }
+            }
+            if response.drag_started() && self.touch.down && crate::platform::tablet() {
+                // A finger on bare paper moves the sheet. Picking several
+                // markups at once is the Lasso tool's job on a tablet.
+                self.touch.panning = true;
+                return;
             }
             if response.drag_started() {
                 self.lasso = Some(vec![at]);
@@ -2781,6 +2853,22 @@ fn fill_shape(painter: &egui::Painter, points: &[egui::Pos2], colour: Color32) {
     if let Some(mesh) = ui::tess::filled(points, colour) {
         painter.add(egui::Shape::mesh(mesh));
     }
+}
+
+/// What the fingers are doing on the sheet, between the first touching the
+/// glass and the last leaving it.
+#[derive(Default)]
+pub struct Touch {
+    /// A finger is down.
+    pub down: bool,
+    /// Two or more, moving and zooming the sheet.
+    pub pinching: bool,
+    /// One, on bare paper with the Select tool: moving the sheet.
+    pub panning: bool,
+    /// The fingers have just let go of the sheet.
+    pub settling: bool,
+    /// The sheet's draft when the first finger came down.
+    pub draft_before: Option<Option<crate::sheet::Draft>>,
 }
 
 #[cfg(test)]

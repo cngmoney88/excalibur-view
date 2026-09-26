@@ -176,7 +176,14 @@ impl App {
                         ui.add(egui::Label::new(RichText::new(&self.status).color(theme.accent_text)).truncate())
                             .on_hover_text(&self.status);
                     } else {
-                        ui.add(egui::Label::new(RichText::new(self.tool.hint()).weak()).truncate());
+                        let hint = match self.tool {
+                            Tool::Pan | Tool::Select if crate::platform::tablet() => {
+                                "Tap a markup to select it; drag it to move it. Press and hold for its menu. \
+                                 Two fingers move and zoom the sheet."
+                            }
+                            tool => tool.hint(),
+                        };
+                        ui.add(egui::Label::new(RichText::new(hint).weak()).truncate());
                     }
                 });
             });
@@ -600,14 +607,12 @@ impl App {
         ui.horizontal(|ui| {
             ui.set_min_height(20.0);
             if doc.picks.is_empty() {
-                ui.label(
-                    RichText::new(format!(
-                        "{}-click to pick sheets, Shift-click for a run",
-                        command_key()
-                    ))
-                    .color(theme.faint)
-                    .size(10.0),
-                );
+                let how = if crate::platform::tablet() {
+                    "Press and hold a sheet to pick it, then tap others".to_string()
+                } else {
+                    format!("{}-click to pick sheets, Shift-click for a run", command_key())
+                };
+                ui.label(RichText::new(how).color(theme.faint).size(10.0));
             } else {
                 ui.label(
                     RichText::new(format!("{} picked", doc.picks.count()))
@@ -642,7 +647,12 @@ impl App {
                     let (rect, response) =
                         ui.allocate_exact_size(egui::vec2(width, row - 6.0), egui::Sense::click());
                     if response.clicked() {
-                        let how = crate::picks::Click::from(click_modifiers(ui));
+                        let mut how = crate::picks::Click::from(click_modifiers(ui));
+                        // No Ctrl key on a tablet: once a sheet is picked, a
+                        // tap adds another or takes it back off.
+                        if crate::platform::tablet() && picking && how == crate::picks::Click::Plain {
+                            how = crate::picks::Click::Toggle;
+                        }
                         if doc.picks.click(page, how, current, &shown) {
                             go = Some(page);
                         }
@@ -2321,6 +2331,20 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_min_width(460.0);
 
+                if crate::platform::tablet() {
+                    ui.label(RichText::new("Size of the controls").strong());
+                    ui.horizontal(|ui| {
+                        let now = draft.control_scale();
+                        for (size, name) in crate::prefs::CONTROL_SIZES {
+                            if ui.selectable_label((now - size).abs() < 0.01, name).clicked() {
+                                draft.control_size = size;
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                }
                 ui.label(RichText::new("Your name on a markup").strong());
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.author)
@@ -2425,6 +2449,9 @@ impl App {
             });
 
         if apply {
+            if crate::platform::tablet() {
+                ctx.set_zoom_factor(draft.control_scale());
+            }
             self.units = draft.units;
             self.denominator = draft.denominator;
             self.wheel_zooms = draft.wheel_zooms;

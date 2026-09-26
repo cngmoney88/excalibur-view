@@ -2808,6 +2808,20 @@ fn choosing(
     ui.add_space(14.0);
     ui.separator();
     ui.add_space(8.0);
+    if crate::platform::tablet() {
+        // A tablet joins a server; it never is one. It sleeps, it leaves the
+        // building, and the office would lose its drawings with it.
+        ui.label(
+            RichText::new(
+                "An office's Excalibur View server is set up once, from Excalibur View on \
+                 Windows or a Mac, on whichever machine keeps the drawings. Ask whoever \
+                 looks after it for its address.",
+            )
+            .color(theme.faint)
+            .size(11.0),
+        );
+        return;
+    }
     ui.label(
         RichText::new("Haven't got a server yet?")
             .color(theme.faint)
