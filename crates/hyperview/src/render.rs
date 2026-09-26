@@ -507,6 +507,12 @@ fn bind(library: Option<PathBuf>) -> Result<Box<dyn PdfiumLibraryBindings>, Stri
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // An iPad app carries a library inside a framework of its own,
+            // in the app's Frameworks folder: the only way the App Store
+            // takes one.
+            if cfg!(target_os = "ios") {
+                candidates.push(dir.join("Frameworks").join("pdfium.framework").join("pdfium"));
+            }
             candidates.push(Pdfium::pdfium_platform_library_name_at_path(dir));
             candidates.push(Pdfium::pdfium_platform_library_name_at_path(
                 &dir.join("pdfium"),
@@ -1036,6 +1042,11 @@ impl Board {
 /// How many helpers: one fewer than the processor has cores, up to three, so
 /// the window itself always has a core. `HYPERVIEW_TILE_THREADS` overrides it.
 fn helper_count() -> usize {
+    // An iPad will only load code the app was signed with, and a helper's
+    // copy of the library is not; one pair of hands draws everything there.
+    if cfg!(target_os = "ios") {
+        return 0;
+    }
     if let Some(n) = std::env::var("HYPERVIEW_TILE_THREADS").ok().and_then(|v| v.parse().ok()) {
         return n;
     }

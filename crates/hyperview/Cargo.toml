@@ -47,7 +47,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # drivers — or over any remote desktop session — Windows quietly falls back to
 # its *software* OpenGL implementation and the whole program crawls with nothing
 # on the screen. Linux keeps glow, which is what works there.
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow", "wgpu", "wayland", "x11"] }
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu"] }
 egui = "0.32"
 egui_extras = { version = "0.32", features = ["image"] }
 model = { path = "../model", features = ["geometry"] }
@@ -81,6 +81,12 @@ rust_xlsxwriter = { version = "0.90", default-features = false }
 # driver and a broken D3D12 one is rare, the reverse is rare, and having both
 # means wgpu picks whichever actually works instead of there being one thing
 # left to go wrong.
+# OpenGL, the second renderer, and the Linux window systems. Everywhere but an
+# iPad: there the window is drawn with Metal through wgpu and nothing else,
+# and eframe's OpenGL half does not build for iOS at all.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+eframe = { version = "0.32", default-features = false, features = ["glow", "wayland", "x11"] }
+
 # The operating system's own file dialogs. A tablet has none to borrow and
 # uses the program's own list instead (src/files.rs), so rfd, which has no
 # backend there, is left out of those builds.

@@ -49,3 +49,14 @@ log = "0.4"
 ui = { path = "../ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 
+[target.'cfg(target_os = "ios")'.dependencies]
+# The App Store edition, for the same reasons as Android's. See
+# `hyperview::edition`.
+hyperview = { path = "../hyperview", features = ["store"] }
+egui_extras = { version = "0.32", features = ["image"] }
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu"] }
+egui = "0.32"
+# Metal, which every iPad that runs the app has.
+wgpu = { version = "25", default-features = false, features = ["metal"] }
+env_logger = "0.11"
+log = "0.4"

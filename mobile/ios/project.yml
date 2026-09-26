@@ -1,0 +1,65 @@
+# The iPad app's Xcode project, as XcodeGen writes it: `xcodegen generate`
+# in this folder, which build.sh does. The .xcodeproj is made fresh each time
+# and never kept, so the project is only ever what this file says.
+#
+# The app is the Rust library (crates/mobile, built by build.sh into
+# build/ExcaliburViewCore.xcframework) with a little Swift around it, and the
+# PDF engine as a framework of its own (build/pdfium.xcframework).
+
+name: ExcaliburView
+
+options:
+  bundleIdPrefix: com.excaliburct
+  deploymentTarget:
+    # The PDF engine's own minimum.
+    iOS: "17.0"
+  createIntermediateGroups: true
+
+targets:
+  ExcaliburView:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Sources
+      - path: Resources
+        excludes:
+          - Info.plist
+    # Written by build.sh: the version, and the system libraries the Rust
+    # library says it needs (`rustc --print native-static-libs`).
+    configFiles:
+      Debug: build/app.xcconfig
+      Release: build/app.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.excaliburct.view
+        PRODUCT_NAME: ExcaliburView
+        INFOPLIST_FILE: Resources/Info.plist
+        TARGETED_DEVICE_FAMILY: "2"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        SWIFT_VERSION: "5.0"
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/ExcaliburView-Bridging-Header.h
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_STYLE: Automatic
+        ENABLE_BITCODE: NO
+        # Rust's standard library brings no dSYM of its own; this keeps the
+        # archive's symbols for crash reports without asking for one.
+        DEBUG_INFORMATION_FORMAT: dwarf-with-dsym
+        DEAD_CODE_STRIPPING: YES
+    dependencies:
+      - framework: build/ExcaliburViewCore.xcframework
+        embed: false
+      - framework: build/pdfium.xcframework
+        embed: true
+        codeSign: true
+      - sdk: Metal.framework
+      - sdk: QuartzCore.framework
+      - sdk: CoreGraphics.framework
+      - sdk: UIKit.framework
+      - sdk: Vision.framework
+      - sdk: UniformTypeIdentifiers.framework
+      - sdk: Security.framework
+      - sdk: SystemConfiguration.framework
+    scheme: {}

@@ -44,11 +44,12 @@ fn main() {
     };
     let pdfium = root.join("third_party").join("pdfium").join("embedded").join(engine);
     println!("cargo:rerun-if-changed={}", pdfium.display());
-    // Except on Android. There the engine is one of the app's own native
-    // libraries, packed by Gradle for each processor, and the loader finds it
-    // by name. The file here is the Linux desktop's, and carried inside an
-    // Android library it would be six megabytes of the wrong machine's code.
-    if target.contains("android") {
+    // Except on Android and the iPad. On Android the engine is one of the
+    // app's own native libraries, packed by Gradle for each processor, and the
+    // loader finds it by name. On an iPad it is a framework inside the app
+    // (mobile/ios/build.sh). The file here is a desktop's, and carried inside
+    // either it would be six megabytes of the wrong machine's code.
+    if target.contains("android") || target.contains("apple-ios") {
         return;
     }
     if pdfium.exists() {

@@ -2097,7 +2097,20 @@ impl eframe::App for App {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.closing();
+    }
+
+    #[cfg(target_os = "ios")]
+    fn on_exit(&mut self) {
+        self.closing();
+    }
+}
+
+impl App {
+    /// What happens when the window closes: the drawing in front is saved.
+    fn closing(&mut self) {
         let author = self.author.clone();
         if let Some(doc) = self.doc_mut() {
             let _ = doc.save(&author);

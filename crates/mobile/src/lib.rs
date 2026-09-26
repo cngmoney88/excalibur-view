@@ -1,4 +1,4 @@
-//! Excalibur View on Android.
+//! Excalibur View on Android, and on the iPad (see `ios.rs`).
 //!
 //! Android does not start a program at `main`. It starts an activity, and the
 //! activity (GameActivity, see `mobile/android`) loads this library and calls
@@ -27,3 +27,5 @@
 mod android;
 #[cfg(target_os = "android")]
 mod android_bridge;
+#[cfg(target_os = "ios")]
+mod ios;

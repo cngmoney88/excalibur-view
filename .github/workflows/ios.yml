@@ -1,0 +1,108 @@
+# Builds the iPad app on one of GitHub's Macs: the Rust library, the Xcode
+# project, and a Simulator build that proves the whole thing compiles and
+# links. With "archive" ticked it also makes the App Store archive, signed by
+# Apple's automatic signing, and with "upload" it sends it to App Store Connect,
+# where it shows up in TestFlight.
+#
+# What this holds, and what it deliberately does not:
+#
+#   It uses the App Store Connect API key the Mac build already has
+#   (APPLE_API_KEY_P8, APPLE_API_KEY_ID, APPLE_API_ISSUER). For an archive the
+#   key needs the App Manager or Admin role, because Xcode uses it to make the
+#   signing certificate and profile it needs. The team is read from
+#   MACOS_SIGN_IDENTITY, which names it in brackets.
+#
+#   It does NOT have the Excalibur signing key, and the iPad app has no use
+#   for it: the App Store installs the updates, not the program.
+#
+# Started by hand only. See mobile/ios/build.sh, which is what it runs and what
+# builds the same thing on a Mac of your own.
+
+name: iPad build
+
+on:
+  workflow_dispatch:
+    inputs:
+      archive:
+        description: "Make the signed App Store archive"
+        type: boolean
+        default: false
+      upload:
+        description: "Send the archive to App Store Connect (TestFlight)"
+        type: boolean
+        default: false
+
+# Never on a pull request. A pull request can come from anybody's fork and
+# would run their code with the API key in reach.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ipad-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Xcode 26, which App Store Connect has required since April 2026.
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust, for an iPad and for the Simulator
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: XcodeGen
+        run: brew install xcodegen
+
+      - name: The App Store Connect key
+        if: ${{ inputs.archive || inputs.upload }}
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: |
+          set -euo pipefail
+          echo "$API_KEY_P8" | base64 --decode > "$RUNNER_TEMP/appstore.p8"
+          team="$(printf '%s' "$SIGN_IDENTITY" | sed -n 's/.*(\([A-Z0-9]\{10\}\)).*/\1/p')"
+          test -n "$team" || { echo "no team ID in MACOS_SIGN_IDENTITY" >&2; exit 1; }
+          echo "TEAM_ID=$team" >> "$GITHUB_ENV"
+          echo "API_KEY_PATH=$RUNNER_TEMP/appstore.p8" >> "$GITHUB_ENV"
+
+      - name: Build
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          # Rises with every run, as App Store Connect needs it to.
+          BUILD_NUMBER: ${{ github.run_number }}
+          STEPS: >-
+            native project simulator
+            ${{ (inputs.archive || inputs.upload) && 'archive' || '' }}
+            ${{ inputs.upload && 'upload' || '' }}
+        run: mobile/ios/build.sh
+
+      - name: Keep the Simulator build
+        uses: actions/upload-artifact@v4
+        with:
+          name: excalibur-view-ipad-simulator
+          path: mobile/ios/build/simulator/Build/Products/Release-iphonesimulator/ExcaliburView.app
+          if-no-files-found: warn
+
+      - name: Keep the .ipa
+        if: ${{ inputs.archive && !inputs.upload }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: excalibur-view-ipad
+          path: mobile/ios/build/export/*.ipa
+          if-no-files-found: warn
+
+      - name: Forget the key
+        if: always()
+        run: rm -f "$RUNNER_TEMP/appstore.p8"

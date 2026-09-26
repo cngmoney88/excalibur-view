@@ -1,4 +1,5 @@
-//! Writes the Android launcher icons, and the one Play shows on the store page.
+//! Writes the Android launcher icons, the one Play shows on the store page, and
+//! the iPad app's icon.
 //!
 //! Scan-filled from the same vector the program draws (`ui::mark`), as the
 //! Windows icon is, so there is one mark and not a second drawing of it that
@@ -56,7 +57,20 @@ fn main() {
 
     let store = centred(STORE, STORE_MARK, BACKGROUND);
     write(&android.join("play/icon-512.png"), &store);
+
+    // The iPad's: one 1024-pixel square, opaque (the App Store refuses an
+    // icon with transparency in it), which iPadOS rounds and shrinks itself.
+    let ios = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../mobile/ios");
+    let icon = centred(IOS, IOS * STORE_MARK / STORE, BACKGROUND);
+    let path = ios.join("Resources/Assets.xcassets/AppIcon.appiconset/icon-1024.png");
+    // No alpha channel at all, not merely an opaque one: App Store Connect
+    // refuses an icon that has one.
+    image::DynamicImage::ImageRgba8(icon).to_rgb8().save(&path).expect("could not write the icon");
+    println!("{} (1024×1024, no alpha)", path.display());
 }
+
+/// The iPad app's icon.
+const IOS: u32 = 1024;
 
 /// A `size` square of `under`, with the mark `mark` pixels across in the middle.
 fn centred(size: u32, mark: u32, under: [u8; 4]) -> image::RgbaImage {
