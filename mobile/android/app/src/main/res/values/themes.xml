@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- GameActivity is an AppCompatActivity, so the theme is an AppCompat one.
+         The program draws its own menus and title, so no action bar. -->
+    <style name="Theme.ExcaliburView" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/chrome</item>
+        <item name="colorPrimaryDark">@color/chrome</item>
+    </style>
+</resources>

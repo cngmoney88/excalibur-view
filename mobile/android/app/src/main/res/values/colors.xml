@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The dark theme's chrome (ui::Theme::dark), so the strips behind the
+         status and navigation bars are the program's own colour, and so is
+         the moment before the first frame. -->
+    <color name="chrome">#161D28</color>
+    <!-- Behind the shield on the launcher. -->
+    <color name="icon_background">#FFFFFF</color>
+</resources>

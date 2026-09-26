@@ -1,0 +1,12 @@
+# Built by Gradle and by build.sh; none of it is source.
+/.gradle/
+/build/
+/app/build/
+/local.properties
+/.idea/
+*.iml
+# The Rust library and the PDF engine are copied in by build.sh on each build.
+/app/src/main/jniLibs/
+# Signing keys are never committed. See build.sh.
+*.jks
+*.keystore
