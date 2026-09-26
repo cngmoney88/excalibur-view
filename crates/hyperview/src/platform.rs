@@ -190,10 +190,12 @@ struct SystemReader;
 
 impl crate::ocr::Engine for SystemReader {
     fn read(&self, grey: &[u8], width: u32, height: u32) -> Result<Vec<crate::ocr::Word>, String> {
-        match BRIDGE.get().and_then(|b| b.read_words(grey, width, height)) {
-            Some(read) => read,
-            None => Err("this device has no text recogniser".into()),
-        }
+        let Some(bridge) = BRIDGE.get() else {
+            return Err("this device has no text recogniser".into());
+        };
+        read_in_tiles(grey, width, height, TILE, OVERLAP, |tile, w, h| {
+            bridge.read_words(tile, w, h).unwrap_or_else(|| Err("this device has no text recogniser".into()))
+        })
     }
 
     fn name(&self) -> String {
@@ -203,6 +205,122 @@ impl crate::ocr::Engine for SystemReader {
             "the text recogniser built into this device".into()
         }
     }
+}
+
+/// A tablet's recogniser reads a picture a few thousand pixels across; a
+/// whole sheet rendered for reading is several times that, and shrunk to fit
+/// its small print would be lost. So it is read in pieces this size, each
+/// overlapping the next by enough to hold a word cut in two.
+const TILE: u32 = 2048;
+const OVERLAP: u32 = 160;
+
+/// Reads a large picture in overlapping pieces. A word belongs to the piece
+/// its middle falls in the core of, so a word read twice in an overlap is
+/// kept once, and one cut in half at a piece's edge is kept from the piece
+/// that saw it whole.
+pub fn read_in_tiles(
+    grey: &[u8],
+    width: u32,
+    height: u32,
+    tile: u32,
+    overlap: u32,
+    mut read: impl FnMut(&[u8], u32, u32) -> Result<Vec<crate::ocr::Word>, String>,
+) -> Result<Vec<crate::ocr::Word>, String> {
+    if width <= tile && height <= tile {
+        return read(grey, width, height);
+    }
+    let step = tile - overlap;
+    let starts = |size: u32| -> Vec<u32> {
+        let mut at: Vec<u32> = (0..).map(|n| n * step).take_while(|s| *s + overlap < size.max(1)).collect();
+        if at.is_empty() {
+            at.push(0);
+        }
+        at
+    };
+    let mut words = Vec::new();
+    for &y0 in &starts(height) {
+        for &x0 in &starts(width) {
+            let (w, h) = (tile.min(width - x0), tile.min(height - y0));
+            let mut piece = Vec::with_capacity((w * h) as usize);
+            for row in y0..y0 + h {
+                let from = (row * width + x0) as usize;
+                piece.extend_from_slice(&grey[from..from + w as usize]);
+            }
+            // The core: everything but the half of each overlap that the
+            // neighbouring piece owns.
+            let half = (overlap / 2) as f32;
+            let left = if x0 == 0 { f32::MIN } else { x0 as f32 + half };
+            let top = if y0 == 0 { f32::MIN } else { y0 as f32 + half };
+            let right = if x0 + w >= width { f32::MAX } else { (x0 + w) as f32 - half };
+            let bottom = if y0 + h >= height { f32::MAX } else { (y0 + h) as f32 - half };
+            for mut word in read(&piece, w, h)? {
+                word.area = [
+                    word.area[0] + x0 as f32,
+                    word.area[1] + y0 as f32,
+                    word.area[2] + x0 as f32,
+                    word.area[3] + y0 as f32,
+                ];
+                let (cx, cy) = ((word.area[0] + word.area[2]) / 2.0, (word.area[1] + word.area[3]) / 2.0);
+                if cx >= left && cx < right && cy >= top && cy < bottom {
+                    words.push(word);
+                }
+            }
+        }
+    }
+    Ok(words)
+}
+
+/// Words as a tablet's recogniser reports them across the bridge: one a
+/// line, left, top, right and bottom in pixels, a confidence from nought to
+/// one, and the word, separated by tabs. Lines that don't read are dropped.
+pub fn words_from_lines(text: &str) -> Vec<crate::ocr::Word> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(6, '\t');
+            let mut number = || parts.next()?.trim().parse::<f32>().ok();
+            let area = [number()?, number()?, number()?, number()?];
+            let confidence = number()?;
+            let word = parts.next()?.trim().to_string();
+            (!word.is_empty()).then_some(crate::ocr::Word { text: word, area, confidence })
+        })
+        .collect()
+}
+
+/// What turns the text in a soft keyboard's box from `before` into `after`,
+/// as the keys and text egui understands: a backspace for every character
+/// taken off the end of what the two share, then what was added, with a new
+/// line as Enter. A keyboard that corrects a word takes the old one back and
+/// types the new one, and that comes out as exactly that. Zero-width spaces,
+/// which the app keeps in the box so a backspace always has something to
+/// take, never reach a drawing.
+pub fn keyboard_events(before: &str, after: &str) -> Vec<egui::Event> {
+    let old: Vec<char> = before.chars().collect();
+    let new: Vec<char> = after.chars().collect();
+    let shared = old.iter().zip(new.iter()).take_while(|(a, b)| a == b).count();
+    let key = |key: egui::Key, pressed: bool| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let mut events = Vec::new();
+    for _ in shared..old.len() {
+        events.push(key(egui::Key::Backspace, true));
+        events.push(key(egui::Key::Backspace, false));
+    }
+    let added: String = new[shared..].iter().filter(|c| **c != '\u{200B}').collect();
+    for piece in added.split_inclusive('\n') {
+        let text = piece.trim_end_matches('\n');
+        if !text.is_empty() {
+            events.push(egui::Event::Text(text.to_string()));
+        }
+        if piece.ends_with('\n') {
+            events.push(key(egui::Key::Enter, true));
+            events.push(key(egui::Key::Enter, false));
+        }
+    }
+    events
 }
 
 /// A drawing opened *with* Excalibur View from another app, already copied
@@ -225,6 +343,95 @@ mod tests {
         assert_eq!(take_imported(900_002), vec![vec![PathBuf::from("b.pdf"), PathBuf::from("c.pdf")]]);
         assert_eq!(take_imported(900_001), vec![vec![PathBuf::from("a.pdf")]]);
         assert!(take_imported(900_001).is_empty());
+    }
+
+    #[test]
+    fn a_recognisers_words_come_across_with_their_boxes_and_bad_lines_are_dropped() {
+        let words = words_from_lines("10\t20\t110\t40\t0.9\tW12x26\nnonsense\n5\t5\t9\t9\t0.5\t\n1\t2\t3\t4\t0.8\tTYP\tmore\n");
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text, "W12x26");
+        assert_eq!(words[0].area, [10.0, 20.0, 110.0, 40.0]);
+        assert!((words[0].confidence - 0.9).abs() < 1e-6);
+        assert_eq!(words[1].text, "TYP\tmore");
+    }
+
+    fn keys(events: &[egui::Event]) -> String {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::Text(t) => Some(t.clone()),
+                egui::Event::Key { key: egui::Key::Backspace, pressed: true, .. } => Some("<".into()),
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => Some("⏎".into()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn what_a_soft_keyboard_types_reaches_the_program_as_keys() {
+        let seed = "\u{200B}";
+        assert_eq!(keys(&keyboard_events(seed, &format!("{seed}B"))), "B");
+        assert_eq!(keys(&keyboard_events(&format!("{seed}Bea"), &format!("{seed}Beam "))), "m ");
+        // A correction: "teh" becomes "the".
+        assert_eq!(keys(&keyboard_events(&format!("{seed}teh"), &format!("{seed}the"))), "<<he");
+        // Backspace past everything typed takes the seed, and still counts.
+        assert_eq!(keys(&keyboard_events(seed, "")), "<");
+        assert_eq!(keys(&keyboard_events(seed, &format!("{seed}ok\nnext"))), "ok⏎next");
+    }
+
+    #[test]
+    fn a_big_picture_is_read_in_pieces_and_every_word_is_kept_once_where_it_really_is() {
+        // A 500 × 300 picture with a "word" every 40 pixels, read 128 at a
+        // time with 32 of overlap. The reader finds a word wherever a whole
+        // 20 × 10 box of it is in its piece.
+        let (width, height) = (500u32, 300u32);
+        let truth: Vec<[f32; 4]> = (0..12)
+            .flat_map(|i| (0..7).map(move |j| [5.0 + i as f32 * 40.0, 5.0 + j as f32 * 40.0]))
+            .map(|[x, y]| [x, y, x + 20.0, y + 10.0])
+            .collect();
+        let grey = vec![255u8; (width * height) as usize];
+        let mut pieces = 0;
+        let mut origin = (0u32, 0u32);
+        let found = read_in_tiles(&grey, width, height, 128, 32, |_, w, h| {
+            pieces += 1;
+            // Work out where this piece is from how many came before it.
+            let per_row = (0..).map(|n| n * 96).take_while(|s: &u32| s + 32 < width).count() as u32;
+            let n = pieces - 1;
+            origin = ((n % per_row) * 96, (n / per_row) * 96);
+            Ok(truth
+                .iter()
+                .filter(|b| {
+                    b[0] >= origin.0 as f32
+                        && b[1] >= origin.1 as f32
+                        && b[2] <= (origin.0 + w) as f32
+                        && b[3] <= (origin.1 + h) as f32
+                })
+                .map(|b| crate::ocr::Word {
+                    text: format!("{},{}", b[0], b[1]),
+                    area: [b[0] - origin.0 as f32, b[1] - origin.1 as f32, b[2] - origin.0 as f32, b[3] - origin.1 as f32],
+                    confidence: 1.0,
+                })
+                .collect())
+        })
+        .unwrap();
+        assert!(pieces > 4);
+        let mut areas: Vec<[f32; 4]> = found.iter().map(|w| w.area).collect();
+        areas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mut expected = truth.clone();
+        expected.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(areas, expected, "every word once, in the whole picture's pixels");
+    }
+
+    #[test]
+    fn a_small_picture_is_read_whole() {
+        let mut calls = 0;
+        read_in_tiles(&[0u8; 100], 10, 10, 2048, 160, |_, w, h| {
+            calls += 1;
+            assert_eq!((w, h), (10, 10));
+            Ok(Vec::new())
+        })
+        .unwrap();
+        assert_eq!(calls, 1);
     }
 
     #[test]

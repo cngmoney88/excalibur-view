@@ -20,6 +20,15 @@ fn android_main(app: AndroidApp) {
         None => log::warn!("Android gave this app no data folder; settings will not be kept"),
     }
 
+    match crate::android_bridge::Android::new(&app) {
+        Ok(bridge) => hyperview::platform::install(Box::new(bridge)),
+        Err(why) => log::error!("the file picker, printing and sharing are not available: {why}"),
+    }
+    // The window holds the inbox, so a drawing opened with the app from
+    // somewhere else, before or after this, finds its way to a tab.
+    let _ = hyperview::instance::start(&[], false);
+
+    let keyboard = app.clone();
     let options = eframe::NativeOptions {
         android_app: Some(app),
         renderer: eframe::Renderer::Wgpu,
@@ -29,9 +38,10 @@ fn android_main(app: AndroidApp) {
     let started = eframe::run_native(
         "Excalibur View",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             egui_extras::install_image_loaders(&cc.egui_ctx);
-            Ok(Box::new(hyperview::app::App::new(cc, Vec::new())))
+            let program = hyperview::app::App::new(cc, Vec::new());
+            Ok(Box::new(crate::android_bridge::Tablet::new(program, keyboard)))
         }),
     );
     if let Err(e) = started {

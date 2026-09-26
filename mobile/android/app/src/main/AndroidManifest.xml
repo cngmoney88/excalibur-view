@@ -66,6 +66,26 @@
                 <data android:scheme="file" />
                 <data android:mimeType="application/pdf" />
             </intent-filter>
+
+            <!-- Excalibur View in the share sheet, for one PDF or several. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
         </activity>
+
+        <!-- Lends a drawing or an export to the app it is shared with, for as
+             long as that app needs it, without a permission on storage. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

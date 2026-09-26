@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The folders a file can be shared from: the drawings, wherever they are
+     kept, and the program's own and temporary folders, where exports are
+     written before they go anywhere. -->
+<paths>
+    <external-files-path name="drawings" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="temporary" path="." />
+</paths>

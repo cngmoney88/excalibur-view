@@ -41,6 +41,14 @@ fun secret(environment: String, property: String): String? =
 
 val keystore = secret("EXV_KEYSTORE", "exv.keystore")
 
+// The processors the program was built for, which are the only ones the app
+// may claim. ML Kit carries its recogniser for four; an app that listed a
+// processor the Rust library was not built for would install on it and close
+// the moment it opened.
+val builtAbis: List<String> = listOf("arm64-v8a", "x86_64").filter { abi ->
+    layout.projectDirectory.file("src/main/jniLibs/$abi/libexcalibur_view_mobile.so").asFile.exists()
+}
+
 android {
     namespace = "com.excaliburct.view"
     compileSdk = 36
@@ -52,6 +60,9 @@ android {
         targetSdk = 36
         versionCode = workspaceVersionCode
         versionName = workspaceVersion
+        ndk {
+            abiFilters += builtAbis
+        }
     }
 
     signingConfigs {
@@ -105,6 +116,9 @@ dependencies {
     // new one. A project with Kotlin in it has the Kotlin plugin line them
     // up; this one is Java, so the Kotlin BOM does.
     implementation(platform("org.jetbrains.kotlin:kotlin-bom:1.8.22"))
+    // Reading words off a scanned sheet (OCR), on the device. The bundled
+    // model: nothing is downloaded later and nothing leaves the tablet.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 }
 
 // An APK without the Rust library installs perfectly and then closes the moment

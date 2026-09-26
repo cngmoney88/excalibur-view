@@ -173,6 +173,29 @@ impl Choosing {
     }
 }
 
+/// The kinds of file a question takes, as MIME types, for a system picker
+/// that is asked that way. Empty — every file — when any of them has no
+/// name this knows: better a picker that shows too much than one that hides
+/// the very file somebody came for.
+pub fn mime_types(filters: &[Filter]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for ext in filters.iter().flat_map(|f| f.extensions.iter()) {
+        let mime = match ext.to_ascii_lowercase().as_str() {
+            "pdf" => "application/pdf",
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "tif" | "tiff" => "image/tiff",
+            "csv" => "text/csv",
+            "json" => "application/json",
+            _ => return Vec::new(),
+        };
+        if !out.contains(&mime) {
+            out.push(mime);
+        }
+    }
+    out
+}
+
 /// Whether this program uses the operating system's dialogs. Everywhere but a
 /// tablet it does; `HYPERVIEW_TABLET=1` gives a desktop the tablet's list, to
 /// see it and to test it.
@@ -866,6 +889,16 @@ mod tests {
         assert_eq!(cleaned_name("Report.PDF", &pdf).as_deref(), Some("Report.PDF"));
         assert_eq!(cleaned_name("  ..  ", &pdf), None);
         assert_eq!(cleaned_name("notes", &Choose::save("")).as_deref(), Some("notes"));
+    }
+
+    #[test]
+    fn a_picker_is_asked_for_the_kinds_it_can_name_or_for_everything() {
+        let pdf = Choose::open().filter("Drawing sets (PDF)", &["pdf", "PDF"]);
+        assert_eq!(mime_types(&pdf.filters), vec!["application/pdf"]);
+        let pictures = Choose::open().filter("Pictures", &["png", "jpg", "jpeg"]);
+        assert_eq!(mime_types(&pictures.filters), vec!["image/png", "image/jpeg"]);
+        let chest = Choose::open().filter("Tool chests", &["evtools", "bpx"]);
+        assert!(mime_types(&chest.filters).is_empty());
     }
 
     #[test]

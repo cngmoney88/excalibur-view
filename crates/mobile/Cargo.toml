@@ -5,13 +5,19 @@ edition.workspace = true
 rust-version.workspace = true
 publish = false
 
-# The Android app. The whole program is the `hyperview` library; this crate is
-# only the door Android comes in through, and the Gradle project in
-# `mobile/android` packs the result into an APK and a Play bundle. Build it with
-# `mobile/android/build.sh`, which says what it needs.
+# The Android and iPad apps. The whole program is the `hyperview` library; this
+# crate is only the door each system comes in through.
 #
-# Everything here is Android-only. On any other platform this crate is empty,
-# so `cargo test --workspace` on a desktop builds nothing extra.
+# Android: the Gradle project in `mobile/android` packs the result (a cdylib)
+# into an APK and a Play bundle. Build it with `mobile/android/build.sh`.
+#
+# iPad: `mobile/ios/build.sh` builds this crate as a static library
+# (`cargo rustc --crate-type staticlib`) and the Xcode project in `mobile/ios`
+# links it into the app, around a few lines of Swift that do what only UIKit
+# can.
+#
+# On every other platform this crate is empty, so `cargo test --workspace` on
+# a desktop builds nothing extra.
 [lib]
 crate-type = ["cdylib"]
 path = "src/lib.rs"
@@ -31,6 +37,10 @@ android-activity = { version = "0.6", features = ["game-activity"] }
 # not fit to use. Without a backend wgpu compiles and then panics on start-up.
 wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }
 android_logger = "0.15"
+# Calling the activity's Java side (mobile/android/.../Bridge.java) for the
+# system's file picker, sharing, printing and text recognition.
+jni = "0.21"
+egui = "0.32"
 env_filter = "0.1"
 log = "0.4"
 
@@ -38,3 +48,4 @@ log = "0.4"
 [dev-dependencies]
 ui = { path = "../ui" }
 image = { version = "0.25", default-features = false, features = ["png"] }
+
