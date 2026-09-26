@@ -22,6 +22,9 @@ hyperview-signing.key
 # model. The one IFC that is carried is written by hand, for the tests.
 *.pdf
 *.ifc
+# Except the tablet app's fictional samples (crates/mobile/src/samples.rs).
+!crates/mobile/samples/*.pdf
+!crates/mobile/samples/*.ifc
 !/crates/model/tests/two-bays.ifc
 /research/
 /private/

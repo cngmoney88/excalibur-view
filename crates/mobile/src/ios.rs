@@ -46,6 +46,7 @@ pub extern "C" fn excalibur_view_main() {
         std::env::set_var("EXV_DRAWINGS", &documents);
     }
     hyperview::platform::install(Box::new(Ipad));
+    crate::samples::put_in_place();
     let _ = hyperview::instance::start(&[], false);
 
     let options = eframe::NativeOptions {

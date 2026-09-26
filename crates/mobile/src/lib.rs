@@ -29,3 +29,5 @@ mod android;
 mod android_bridge;
 #[cfg(target_os = "ios")]
 mod ios;
+#[cfg(any(target_os = "android", target_os = "ios"))]
+mod samples;

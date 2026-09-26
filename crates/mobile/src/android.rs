@@ -24,6 +24,7 @@ fn android_main(app: AndroidApp) {
         Ok(bridge) => hyperview::platform::install(Box::new(bridge)),
         Err(why) => log::error!("the file picker, printing and sharing are not available: {why}"),
     }
+    crate::samples::put_in_place();
     // The window holds the inbox, so a drawing opened with the app from
     // somewhere else, before or after this, finds its way to a tab.
     let _ = hyperview::instance::start(&[], false);
