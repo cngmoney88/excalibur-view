@@ -1,0 +1,40 @@
+[package]
+name = "excalibur-view-mobile"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The Android app. The whole program is the `hyperview` library; this crate is
+# only the door Android comes in through, and the Gradle project in
+# `mobile/android` packs the result into an APK and a Play bundle. Build it with
+# `mobile/android/build.sh`, which says what it needs.
+#
+# Everything here is Android-only. On any other platform this crate is empty,
+# so `cargo test --workspace` on a desktop builds nothing extra.
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# The store edition: no updating itself (Play does that, and its policy forbids
+# anything else), no selling or links to buy, plugins run by the office server.
+# See `hyperview::edition`.
+hyperview = { path = "../hyperview", features = ["store"] }
+egui_extras = { version = "0.32", features = ["image"] }
+# GameActivity rather than NativeActivity: it is what the soft keyboard works
+# through, and it is an ordinary AndroidX activity, so the Gradle and Play side
+# is the usual one.
+eframe = { version = "0.32", default-features = false, features = ["default_fonts", "wgpu", "android-game-activity"] }
+android-activity = { version = "0.6", features = ["game-activity"] }
+# Vulkan first; OpenGL ES for the phones whose Vulkan driver is missing or
+# not fit to use. Without a backend wgpu compiles and then panics on start-up.
+wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }
+android_logger = "0.15"
+env_filter = "0.1"
+log = "0.4"
+
+# For the launcher icon example, which runs on the machine doing the building.
+[dev-dependencies]
+ui = { path = "../ui" }
+image = { version = "0.25", default-features = false, features = ["png"] }
