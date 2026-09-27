@@ -77,7 +77,7 @@ mobile/ios/build.sh
 ```
 
 That builds the Rust library for an iPad and for the Simulator, wraps the PDF
-engine as a framework, writes `mobile/ios/build/ExcaliburView.xcodeproj`, and
+engine as a framework, writes `mobile/ios/ExcaliburView.xcodeproj`, and
 makes a Simulator build. Open the project in Xcode to run it on the Simulator
 or on an iPad on a cable.
 

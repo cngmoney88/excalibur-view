@@ -25,8 +25,9 @@
 #   API_KEY_ID       its key ID
 #   API_ISSUER       its issuer ID
 #
-# What it leaves behind, in mobile/ios/build:
-#   ExcaliburView.xcodeproj                 open in Xcode to run it on an iPad
+# What it leaves behind:
+#   mobile/ios/ExcaliburView.xcodeproj      open in Xcode to run it on an iPad
+# and in mobile/ios/build:
 #   simulator/.../ExcaliburView.app         the Simulator build
 #   ExcaliburView.xcarchive, export/*.ipa   with "archive"
 
@@ -128,10 +129,14 @@ fi
 if wants project; then
     say "The Xcode project"
     command -v xcodegen > /dev/null || fail "XcodeGen is not installed: brew install xcodegen"
-    (cd "$here" && xcodegen generate --spec project.yml --project "$work")
+    # Written beside project.yml, not into build/: every path in the spec,
+    # and the Info.plist and bridging header settings Xcode reads from the
+    # project's own folder, are relative to this folder. Written into build/
+    # they all pointed one folder too deep.
+    (cd "$here" && xcodegen generate --spec project.yml)
 fi
 
-project="$work/ExcaliburView.xcodeproj"
+project="$here/ExcaliburView.xcodeproj"
 
 # ---- a Simulator build: does it all compile and link -------------------------
 

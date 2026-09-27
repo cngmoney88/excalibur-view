@@ -40,6 +40,9 @@ targets:
         SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
         SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
         SWIFT_VERSION: "5.0"
+        # The Rust library and the PDF engine are built for Apple silicon
+        # Simulators only, which is every Mac Xcode 26 runs on for this.
+        "EXCLUDED_ARCHS[sdk=iphonesimulator*]": x86_64
         SWIFT_OBJC_BRIDGING_HEADER: Sources/ExcaliburView-Bridging-Header.h
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         CODE_SIGN_STYLE: Automatic
