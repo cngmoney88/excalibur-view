@@ -13,6 +13,7 @@ pub mod filters;
 pub mod repair;
 pub mod object;
 pub mod opening;
+pub mod pages;
 pub mod parse;
 pub mod random;
 pub mod text;

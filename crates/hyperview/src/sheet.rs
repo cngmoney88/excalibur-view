@@ -446,6 +446,9 @@ pub struct Step {
     /// A change to a sheet's own drawing — its words, changed with Edit
     /// Text — that stepping back or forward puts back or does again.
     pub file: Option<PageSwap>,
+    /// A change to which sheets are in the set and in what order, which
+    /// stepping back or forward writes back or does again.
+    pub sheets: Option<crate::reorder::Sheets>,
 }
 
 /// A sheet's drawing before and after a change to it. The page points at its
@@ -594,6 +597,22 @@ pub struct Doc {
     /// Move both panes together. Off by default: the usual reason to split is
     /// to look at two different places at once.
     pub sync_panes: bool,
+    /// The sheets were moved, added or taken out, and the renderer has not
+    /// read the new order yet: what it sends back meanwhile is for the old
+    /// order and is turned away.
+    pub reshuffled: bool,
+    /// The renderer still has to be told the sheets changed.
+    pub sheets_changed: bool,
+    /// Sheet numbers have to be read again once the renderer has the new order.
+    pub relabel: bool,
+    /// Who the last save was made as, for the saves Undo makes on its own.
+    pub saved_by: String,
+    /// Times the renderer has been asked to read the file again and has not
+    /// yet said it has.
+    pub refreshes_owed: u32,
+    /// The password the file was opened with, empty for most. Kept in memory
+    /// only, so the file can be read again after a save.
+    pub password: String,
 }
 
 /// How the sheet area is divided.
@@ -667,30 +686,7 @@ impl Doc {
             .map(|m| m.permissions().readonly())
             .unwrap_or(false);
         let count = file.page_count();
-        let mut pages = Vec::with_capacity(count);
-        let mut frames = Vec::with_capacity(count);
-        for i in 0..count {
-            match file.page(i) {
-                Some(page) => {
-                    let area = file.page_box(&page);
-                    let rotation = file.page_rotation(&page);
-                    let frame = Frame::new(area, rotation);
-                    let (width, height) = frame.size();
-                    pages.push(PageSize {
-                        width: width as f32,
-                        height: height as f32,
-                    });
-                    frames.push(frame);
-                }
-                None => {
-                    pages.push(PageSize {
-                        width: 612.0,
-                        height: 792.0,
-                    });
-                    frames.push(Frame::new([0.0, 0.0, 612.0, 792.0], 0));
-                }
-            }
-        }
+        let (pages, frames) = sizes(&file);
         let mut doc = Doc {
             id: 0,
             path,
@@ -734,6 +730,12 @@ impl Doc {
             fresh_from: 0,
             paragraphs: HashMap::new(),
             paragraphs_asked: HashSet::new(),
+            reshuffled: false,
+            sheets_changed: false,
+            relabel: false,
+            saved_by: String::new(),
+            refreshes_owed: 0,
+            password: password.to_string(),
         };
         doc.reload_marks();
         Ok(doc)
@@ -888,6 +890,7 @@ impl Doc {
             what: what.to_string(),
             marks: self.marks.clone(),
             file: None,
+            sheets: None,
         });
         if self.undo.len() > REMEMBERED_STEPS {
             self.undo.remove(0);
@@ -907,6 +910,20 @@ impl Doc {
         let Some(previous) = self.undo.pop() else {
             return false;
         };
+        if let Some(sheets) = previous.sheets.clone() {
+            if let Err(why) = self.swap_sheets(&sheets, false) {
+                log::warn!("could not put the sheets back: {why}");
+                self.undo.push(previous);
+                return false;
+            }
+            self.redo.push(Step {
+                what: previous.what,
+                marks: self.marks.clone(),
+                file: None,
+                sheets: Some(sheets),
+            });
+            return true;
+        }
         if let Some(swap) = &previous.file {
             if let Err(why) = self.swap_page(swap, false) {
                 log::warn!("could not step back a change to the drawing: {why}");
@@ -918,6 +935,7 @@ impl Doc {
             what: previous.what.clone(),
             marks: self.marks.clone(),
             file: previous.file.clone(),
+            sheets: None,
         };
         self.restore(previous.marks);
         self.redo.push(forward);
@@ -929,6 +947,20 @@ impl Doc {
         let Some(forward) = self.redo.pop() else {
             return false;
         };
+        if let Some(sheets) = forward.sheets.clone() {
+            if let Err(why) = self.swap_sheets(&sheets, true) {
+                log::warn!("could not change the sheets again: {why}");
+                self.redo.push(forward);
+                return false;
+            }
+            self.undo.push(Step {
+                what: forward.what,
+                marks: self.marks.clone(),
+                file: None,
+                sheets: Some(sheets),
+            });
+            return true;
+        }
         if let Some(swap) = &forward.file {
             if let Err(why) = self.swap_page(swap, true) {
                 log::warn!("could not put back a change to the drawing: {why}");
@@ -940,10 +972,26 @@ impl Doc {
             what: forward.what.clone(),
             marks: self.marks.clone(),
             file: forward.file.clone(),
+            sheets: None,
         };
         self.restore(forward.marks);
         self.undo.push(back);
         true
+    }
+
+    /// The file as it now is, read again, and opened with the same password
+    /// when it has one.
+    ///
+    /// A locked set has to be opened again after every save. Read without
+    /// its password, every word in it is ciphertext: markups came back with
+    /// scrambled names, and the next save added plain objects to a locked
+    /// file, which no reader can make sense of.
+    pub fn read_again(&self, bytes: Vec<u8>) -> pdf::Document {
+        let mut file = pdf::Document::from_bytes(bytes);
+        if file.encrypted && !file.unlock(&self.password) {
+            log::warn!("{} could not be opened again with its password", self.path.display());
+        }
+        file
     }
 
     /// Points a sheet at its drawing from before a change, or after it, as
@@ -974,7 +1022,7 @@ impl Doc {
         update.replace(swap.page, pdf::Object::Dict(page));
         let bytes = update.apply(&self.file);
         write_into_place(&self.path, &bytes)?;
-        self.file = pdf::Document::from_bytes(bytes);
+        self.file = self.read_again(bytes);
         self.on_disk = stamp(&self.path);
         if let Some(index) = self.file.pages().iter().position(|r| *r == swap.page) {
             let index = index as u32;
@@ -1204,6 +1252,9 @@ impl Doc {
 
     /// Writes everything into the file, by incremental update.
     pub fn save(&mut self, author: &str) -> Result<usize, String> {
+        if !author.is_empty() {
+            self.saved_by = author.to_string();
+        }
         if !self.dirty {
             return Ok(0);
         }
@@ -1311,7 +1362,7 @@ impl Doc {
         }
 
         // Reopen so every markup now has a place in the file.
-        self.file = pdf::Document::from_bytes(bytes);
+        self.file = self.read_again(bytes);
         self.marks.retain(|m| !m.gone);
         self.reload_marks();
         self.scales.clear();
@@ -1328,9 +1379,12 @@ impl Doc {
     /// Markups are matched by name, which Revu and Hyperview both give every
     /// markup and which survives any number of saves by either program.
     fn catch_up(&mut self) -> Result<usize, String> {
-        let fresh = pdf::Document::open(&self.path)
+        let bytes = std::fs::read(&self.path)
             .map_err(|e| format!("{} changed on disk and could not be read again: {e}", self.path.display()))?;
-        if fresh.page_count() != self.pages.len() {
+        let fresh = self.read_again(bytes);
+        // The same sheets in the same order, or markups would land on the
+        // wrong ones: somebody else may have moved sheets about.
+        if *fresh.pages() != *self.file.pages() {
             return Err(format!(
                 "{} was changed somewhere else while it was open here, and its sheets are \
                  not the same any more. Nothing has been lost: use Save As to keep your \
@@ -1474,6 +1528,36 @@ impl Doc {
         self.selected = held.as_ref().and_then(|k| find(&self.marks, k));
         self.also = also.iter().filter_map(|k| find(&self.marks, k)).collect();
     }
+}
+
+/// Every sheet's size as it is seen, and how its page space sits on it.
+pub fn sizes(file: &pdf::Document) -> (Vec<PageSize>, Vec<Frame>) {
+    let count = file.page_count();
+    let mut pages = Vec::with_capacity(count);
+    let mut frames = Vec::with_capacity(count);
+    for i in 0..count {
+        match file.page(i) {
+            Some(page) => {
+                let area = file.page_box(&page);
+                let rotation = file.page_rotation(&page);
+                let frame = Frame::new(area, rotation);
+                let (width, height) = frame.size();
+                pages.push(PageSize {
+                    width: width as f32,
+                    height: height as f32,
+                });
+                frames.push(frame);
+            }
+            None => {
+                pages.push(PageSize {
+                    width: 612.0,
+                    height: 792.0,
+                });
+                frames.push(Frame::new([0.0, 0.0, 612.0, 792.0], 0));
+            }
+        }
+    }
+    (pages, frames)
 }
 
 /// A file as it stands on disk: its size and when it was last written.

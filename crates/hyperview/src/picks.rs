@@ -142,6 +142,13 @@ impl Picks {
         }
     }
 
+    /// Moves each pick to where its sheet went, dropping any whose sheet is
+    /// gone, after the sheets were put in a new order.
+    pub fn follow(&mut self, went: impl Fn(u32) -> Option<u32>) {
+        self.sheets = self.sheets.iter().filter_map(|p| went(*p)).collect();
+        self.anchor = self.anchor.and_then(&went);
+    }
+
     /// Drops picks past the end, for when a drawing has fewer sheets than it did.
     pub fn keep_within(&mut self, count: usize) {
         self.sheets.retain(|p| (*p as usize) < count);

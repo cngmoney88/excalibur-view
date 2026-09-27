@@ -827,7 +827,7 @@ impl crate::app::App {
             self.rewording = Some(r);
             return;
         }
-        let fresh = pdf::Document::from_bytes(bytes.clone());
+        let fresh = doc.read_again(bytes.clone());
         let page_ref = doc.file.pages().get(page as usize).copied();
         let sides = page_ref.and_then(|p| crate::sheet::Drawing::either_side(&doc.file, &fresh, p));
         if let Err(why) = crate::sheet::write_into_place(&doc.path, &bytes) {
@@ -842,6 +842,7 @@ impl crate::app::App {
                 what: "Change the words".into(),
                 marks: doc.marks.clone(),
                 file: Some(crate::sheet::PageSwap { page: page_ref, before, after }),
+                sheets: None,
             });
             if doc.undo.len() > crate::sheet::REMEMBERED_STEPS {
                 doc.undo.remove(0);

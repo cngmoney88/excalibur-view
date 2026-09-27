@@ -52,6 +52,7 @@ pub mod sheet;
 pub mod shopwindow;
 pub mod signature;
 pub mod render;
+pub mod reorder;
 pub mod repeat;
 pub mod revisionwindow;
 pub mod report;

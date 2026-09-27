@@ -846,6 +846,10 @@ pub struct App {
     pub last_canvas_whole: egui::Rect,
     /// The Preferences window, and the copy being edited in it.
     pub editing_prefs: Option<crate::prefs::Prefs>,
+    /// Sheets being dragged to a new place in the Thumbnails list.
+    pub sheet_drag: Option<crate::reorder::Dragging>,
+    /// Where the Thumbnails list's rows were last drawn.
+    pub sheet_rows: Option<crate::reorder::Rows>,
 }
 
 impl App {
@@ -1004,6 +1008,8 @@ impl App {
                 egui::vec2(1000.0, 700.0),
             ),
             editing_prefs: None,
+            sheet_drag: None,
+            sheet_rows: None,
         };
         app.chrome.plugins = app.plugins.menu();
         if crate::platform::tablet() {
@@ -1438,7 +1444,7 @@ impl App {
                         "sheet {page}: {} lines read for snapping in {millis} ms",
                         geometry.segments.len()
                     );
-                    if let Some(open) = self.docs.iter_mut().find(|d| d.id == doc) {
+                    if let Some(open) = self.docs.iter_mut().find(|d| d.id == doc && !d.reshuffled) {
                         open.geometry.insert(page, geometry);
                         // The sheet in hand and a few either side; line-work
                         // for a hundred sheets is a lot of memory for nothing.
@@ -1595,7 +1601,7 @@ impl App {
                     }
                 }
                 FromWorker::Paragraphs { doc: id, page, found } => {
-                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id && !d.reshuffled) {
                         match found {
                             Ok(found) => {
                                 doc.paragraphs.insert(page, found);
@@ -1610,6 +1616,16 @@ impl App {
                 FromWorker::Rewritten { doc, job, page, result } => self.rewritten(doc, job, page, result),
                 FromWorker::Refreshed { doc: id, generation } => {
                     if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                        doc.refreshes_owed = doc.refreshes_owed.saturating_sub(1);
+                        // Once the renderer has read every change asked of
+                        // it, what it sends is for the sheets as they are.
+                        if doc.reshuffled && doc.refreshes_owed == 0 {
+                            doc.reshuffled = false;
+                            if std::mem::take(&mut doc.relabel) {
+                                self.svc.send(ToWorker::ScanLabels(id));
+                            }
+                            self.svc.send(ToWorker::Preview { doc: id, page: doc.page });
+                        }
                         doc.fresh_from = generation;
                         let pages = std::mem::take(&mut doc.redrawing);
                         doc.tiles.mark_stale(&pages);
@@ -1634,7 +1650,7 @@ impl App {
                     // To whichever tab it belongs, not to whichever is in
                     // front: a tile that arrives while somebody is switching
                     // tabs belongs to the drawing that asked for it.
-                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == key.doc) {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == key.doc && !d.reshuffled) {
                         let handle = ctx.load_texture(
                             format!("t{}-{}-{}-{}-{}", key.doc, key.page, key.bucket, key.tx, key.ty),
                             image,
@@ -1645,7 +1661,7 @@ impl App {
                     }
                 }
                 FromWorker::Preview { doc: id, page, scale, image } => {
-                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id && !d.reshuffled) {
                         let handle = ctx.load_texture(
                             format!("p{id}-{page}"),
                             image,
@@ -1667,7 +1683,7 @@ impl App {
                     }
                 }
                 FromWorker::Thumb { doc: id, page, image } => {
-                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id && !d.reshuffled) {
                         let handle = ctx.load_texture(
                             format!("h{id}-{page}"),
                             image,
@@ -1694,7 +1710,7 @@ impl App {
                     }
                 }
                 FromWorker::Labels { doc: id, first, labels } => {
-                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) {
+                    if let Some(doc) = self.docs.iter_mut().find(|d| d.id == id && !d.reshuffled) {
                         let count = labels.len() as u32;
                         for (i, label) in labels.into_iter().enumerate() {
                             let at = first as usize + i;
@@ -1886,12 +1902,14 @@ impl App {
 
     /// Has every drawing whose markups were saved read again for drawing.
     fn refresh_saved(&mut self) {
+        self.sheets_to_renderer();
         for doc in self.docs.iter_mut() {
             if doc.redraw.is_empty() {
                 continue;
             }
             let pages = std::mem::take(&mut doc.redraw);
             doc.redrawing.extend(pages);
+            doc.refreshes_owed += 1;
             self.svc.send(ToWorker::Refresh { doc: doc.id });
         }
     }
@@ -2253,11 +2271,64 @@ impl App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
+        if dropped.is_empty() {
+            return;
+        }
+        // PDFs let go over the Thumbnails list go into the drawing, in front
+        // of the sheet they were let go on.
+        let pdfs: Vec<PathBuf> = dropped.iter().filter(|p| crate::reorder::is_pdf(p)).cloned().collect();
+        let front = self.doc().map(|d| d.id);
+        let before = match (self.sheet_rows.as_ref(), crate::platform::pointer_now(ctx)) {
+            (Some(rows), Some(at)) if self.panel == "Thumbnails" && Some(rows.doc) == front => {
+                rows.before_at(at)
+            }
+            _ => None,
+        };
+        if let (Some(before), false) = (before, pdfs.is_empty()) {
+            self.change_sheets(crate::reorder::Plan::Insert { files: pdfs.clone(), before });
+            for path in dropped.into_iter().filter(|p| !pdfs.contains(p)) {
+                self.take_file(path);
+            }
+            return;
+        }
         // A drawing set is usually more than one file, so every PDF dropped
-        // opens. A tool chest dropped is loaded, and a license file added,
-        // the same as choosing them from the menus.
+        // anywhere else opens. A tool chest dropped is loaded, and a license
+        // file added, the same as choosing them from the menus.
         for path in dropped {
             self.take_file(path);
+        }
+    }
+
+    /// Changes the sheets of the drawing in front: moves them, adds them,
+    /// turns them or takes them out. Undo takes it back.
+    pub fn change_sheets(&mut self, plan: crate::reorder::Plan) {
+        let author = self.author.clone();
+        let Some(doc) = self.doc_mut() else { return };
+        match doc.change_sheets(&plan, &author) {
+            Ok(said) => self.status = said,
+            Err(why) => self.error = Some(why),
+        }
+        self.sheets_to_renderer();
+    }
+
+    /// Tells the renderer about drawings whose sheets changed, before it is
+    /// asked for anything else about them.
+    pub fn sheets_to_renderer(&mut self) {
+        let front = self.doc().map(|d| d.id);
+        let mut clear_search = false;
+        for doc in self.docs.iter_mut() {
+            if !doc.sheets_changed {
+                continue;
+            }
+            doc.sheets_changed = false;
+            doc.refreshes_owed += 1;
+            self.svc.send(ToWorker::Refresh { doc: doc.id });
+            clear_search |= Some(doc.id) == front;
+        }
+        // A search's answers are sheets by their place in the set, and the
+        // places just changed.
+        if clear_search {
+            self.search.clear();
         }
     }
 

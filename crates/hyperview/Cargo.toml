@@ -123,6 +123,11 @@ windows = { version = "0.58", features = [
 # current macOS has it, and it is what the system itself draws with.
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["metal"] }
+# Where the pointer is while a file is dragged in from the Finder, which the
+# window is not told: a PDF let go over the Thumbnails list goes in there.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSEvent", "NSScreen"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wgpu = { version = "25", default-features = false, features = ["vulkan", "gles"] }

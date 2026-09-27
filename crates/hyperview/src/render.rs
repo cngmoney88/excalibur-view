@@ -1339,7 +1339,14 @@ impl Queue {
                             let _ = tx.send(FromWorker::Refreshed { doc, generation });
                             ctx.request_repaint();
                         }
-                        Err(why) => log::warn!("could not read {} again: {}", path.display(), why.said),
+                        Err(why) => {
+                            log::warn!("could not read {} again: {}", path.display(), why.said);
+                            // Said all the same, so a window waiting on it
+                            // does not wait for ever.
+                            let generation = self.board.generation_of(doc);
+                            let _ = tx.send(FromWorker::Refreshed { doc, generation });
+                            ctx.request_repaint();
+                        }
                     }
                 }
             }

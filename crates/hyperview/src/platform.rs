@@ -331,6 +331,55 @@ pub fn opened_elsewhere(files: Vec<PathBuf>) {
     wake();
 }
 
+/// Where the pointer is over the window, asking the system itself where it
+/// can.
+///
+/// While a file is being dragged in from another program the window hears
+/// nothing from the mouse, so egui's idea of where the pointer is stays
+/// wherever it was last seen. Windows and macOS can be asked; anywhere else
+/// the last place egui saw it is the best there is.
+pub fn pointer_now(ctx: &egui::Context) -> Option<egui::Pos2> {
+    #[cfg(windows)]
+    if let Some(at) = windows_pointer(ctx) {
+        return Some(at);
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(at) = mac_pointer(ctx) {
+        return Some(at);
+    }
+    ctx.input(|i| i.pointer.latest_pos())
+}
+
+#[cfg(windows)]
+fn windows_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    let mut at = POINT::default();
+    unsafe { GetCursorPos(&mut at) }.ok()?;
+    // The window's inside corner, in the same points egui measures in: the
+    // screen's pixels over the points-to-pixels scale in use.
+    let inner = ctx.input(|i| i.viewport().inner_rect)?;
+    let ppp = ctx.pixels_per_point();
+    Some(egui::pos2(at.x as f32 / ppp - inner.min.x, at.y as f32 / ppp - inner.min.y))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_pointer(ctx: &egui::Context) -> Option<egui::Pos2> {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSEvent, NSScreen};
+    let main = MainThreadMarker::new()?;
+    let at = NSEvent::mouseLocation();
+    // The system counts up from the bottom of the first screen; the window
+    // counts down from the top of it.
+    let height = NSScreen::screens(main).firstObject()?.frame().size.height;
+    let inner = ctx.input(|i| i.viewport().inner_rect)?;
+    let zoom = ctx.zoom_factor();
+    Some(egui::pos2(
+        at.x as f32 / zoom - inner.min.x,
+        (height - at.y) as f32 / zoom - inner.min.y,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

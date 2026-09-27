@@ -156,6 +156,13 @@ impl Update {
         reference
     }
 
+    /// Sets aside a number for an object that is filled in later with
+    /// [`Update::replace`] — for objects that point at each other, where one
+    /// has to have a number before the other can be written.
+    pub fn reserve(&mut self) -> Ref {
+        self.add(Object::Null)
+    }
+
     /// Replaces an existing object. The generation stays as it was, because a
     /// reference elsewhere in the file still names it.
     pub fn replace(&mut self, reference: Ref, object: Object) {

@@ -566,14 +566,36 @@ impl App {
     // ---- thumbnails ------------------------------------------------------
 
     pub fn thumbnails(&mut self, ui: &mut egui::Ui) {
+        use crate::reorder::{self, Plan};
         let theme = self.chrome.theme;
         let mut go: Option<u32> = None;
         let mut action: Option<PickAction> = None;
+        let mut plan: Option<Plan> = None;
+        let mut insert_from_file: Option<u32> = None;
+        let tablet = crate::platform::tablet();
+        let ctx = ui.ctx().clone();
+        // Sheets are dragged about with the mouse. On a tablet a finger on
+        // the list scrolls it, so there the sheet's menu moves them instead.
+        let mut dragging = self.sheet_drag.take();
+        let files_over = !tablet && ctx.input(|i| !i.raw.hovered_files.is_empty());
+        let pointer = if files_over {
+            // Nothing is heard from the mouse while a file is dragged in, so
+            // the list is drawn again as it moves to keep the marker with it.
+            ctx.request_repaint_after(std::time::Duration::from_millis(30));
+            crate::platform::pointer_now(&ctx)
+        } else {
+            ctx.input(|i| i.pointer.latest_pos())
+        };
         let Some(doc) = self.doc_mut() else {
+            self.sheet_rows = None;
             ui.add_space(8.0);
             ui.weak("No drawing open.");
             return;
         };
+        if dragging.as_ref().is_some_and(|d| d.doc != doc.id) {
+            dragging = None;
+        }
+        let stays = doc.why_sheets_stay();
         ui.add_space(4.0);
         ui.add(
             egui::TextEdit::singleline(&mut doc.filter)
@@ -594,6 +616,7 @@ impl App {
             .collect();
         doc.picks.keep_within(doc.pages.len());
         let current = doc.page;
+        let count = doc.pages.len();
         ui.add_space(4.0);
         ui.label(
             RichText::new(format!("{} of {} sheets", shown.len(), doc.pages.len()))
@@ -606,13 +629,26 @@ impl App {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.set_min_height(20.0);
-            if doc.picks.is_empty() {
-                let how = if crate::platform::tablet() {
+            if let Some(drag) = &dragging {
+                let what = match drag.pages.as_slice() {
+                    [one] => doc.sheet_name(*one),
+                    many => format!("{} sheets", many.len()),
+                };
+                ui.label(
+                    RichText::new(format!("Moving {what}: let go where it goes. Esc stops."))
+                        .color(theme.text)
+                        .size(10.0),
+                );
+            } else if doc.picks.is_empty() {
+                let how = if tablet {
                     "Press and hold a sheet to pick it, then tap others".to_string()
                 } else {
-                    format!("{}-click to pick sheets, Shift-click for a run", command_key())
+                    format!(
+                        "{}-click to pick sheets, Shift-click for a run. Drag to move them; drop a PDF in to add it",
+                        command_key()
+                    )
                 };
-                ui.label(RichText::new(how).color(theme.faint).size(10.0));
+                ui.add(egui::Label::new(RichText::new(how).color(theme.faint).size(10.0)).wrap());
             } else {
                 ui.label(
                     RichText::new(format!("{} picked", doc.picks.count()))
@@ -635,22 +671,44 @@ impl App {
         let row = 70.0;
         let picking = !doc.picks.is_empty();
         let mut wanted: Vec<u32> = Vec::new();
+        let mut rows: Vec<(usize, egui::Rect)> = Vec::new();
+        let mut list = egui::Rect::NOTHING;
+        let moving: Vec<u32> = dragging.as_ref().map(|d| d.pages.clone()).unwrap_or_default();
+        let well = if theme.classic {
+            // A classic list sits in a sunken white well.
+            egui::Frame::canvas(ui.style()).inner_margin(egui::Margin::same(2))
+        } else {
+            egui::Frame::new()
+        };
+        well.show(ui, |ui| {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row, shown.len(), |ui, range| {
+                list = ui.clip_rect();
                 for index in range {
                     let page = shown[index];
                     if !doc.thumbs.contains_key(&page) && doc.asked.insert(page) {
                         wanted.push(page);
                     }
                     let width = ui.available_width();
-                    let (rect, response) =
-                        ui.allocate_exact_size(egui::vec2(width, row - 6.0), egui::Sense::click());
+                    let sense = if tablet { egui::Sense::click() } else { egui::Sense::click_and_drag() };
+                    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, row - 6.0), sense);
+                    rows.push((index, rect));
+                    if response.drag_started() && dragging.is_none() {
+                        // The picked sheets move together when the one taken
+                        // hold of is one of them; otherwise just that one.
+                        let pages = if doc.picks.contains(page) {
+                            doc.picks.sheets(current)
+                        } else {
+                            vec![page]
+                        };
+                        dragging = Some(reorder::Dragging { doc: doc.id, pages });
+                    }
                     if response.clicked() {
                         let mut how = crate::picks::Click::from(click_modifiers(ui));
                         // No Ctrl key on a tablet: once a sheet is picked, a
                         // tap adds another or takes it back off.
-                        if crate::platform::tablet() && picking && how == crate::picks::Click::Plain {
+                        if tablet && picking && how == crate::picks::Click::Plain {
                             how = crate::picks::Click::Toggle;
                         }
                         if doc.picks.click(page, how, current, &shown) {
@@ -661,7 +719,8 @@ impl App {
                         doc.picks.right_click(page, current);
                     }
                     response.context_menu(|ui| {
-                        let n = doc.picks.sheets(current).len();
+                        let these_pages = doc.picks.sheets(current);
+                        let n = these_pages.len();
                         let these = if n == 1 {
                             "this sheet".to_string()
                         } else {
@@ -675,6 +734,57 @@ impl App {
                             action = Some(PickAction::Save);
                             ui.close();
                         }
+                        ui.separator();
+                        // What changes the drawing itself. Undo takes each
+                        // of these back.
+                        let why = stays.clone().unwrap_or_default();
+                        let can = stays.is_none();
+                        let mut item = |ui: &mut egui::Ui, label: &str, then: Plan| {
+                            let button = ui.add_enabled(can, egui::Button::new(label));
+                            if button.on_disabled_hover_text(&why).clicked() {
+                                plan = Some(then);
+                                ui.close();
+                            }
+                        };
+                        let after = these_pages.iter().max().copied().unwrap_or(page) + 1;
+                        if ui
+                            .add_enabled(can, egui::Button::new("Insert Pages from a File…"))
+                            .on_hover_text("Another PDF's sheets, after this one.")
+                            .on_disabled_hover_text(&why)
+                            .clicked()
+                        {
+                            insert_from_file = Some(after);
+                            ui.close();
+                        }
+                        item(ui, "Insert a Blank Sheet", Plan::Blank { before: after });
+                        ui.separator();
+                        item(
+                            ui,
+                            "Move to the Top",
+                            Plan::Move { pages: these_pages.clone(), before: 0 },
+                        );
+                        item(
+                            ui,
+                            "Move to the Bottom",
+                            Plan::Move { pages: these_pages.clone(), before: count as u32 },
+                        );
+                        ui.separator();
+                        item(
+                            ui,
+                            "Rotate Right",
+                            Plan::Turn { pages: these_pages.clone(), quarter_turns: 1 },
+                        );
+                        item(
+                            ui,
+                            "Rotate Left",
+                            Plan::Turn { pages: these_pages.clone(), quarter_turns: 3 },
+                        );
+                        ui.separator();
+                        item(
+                            ui,
+                            &format!("Delete {these}"),
+                            Plan::Remove { pages: these_pages.clone() },
+                        );
                         ui.separator();
                         if ui.button("Pick every sheet in the list").clicked() {
                             action = Some(PickAction::All);
@@ -697,7 +807,7 @@ impl App {
                     let selected = if picking { doc.picks.contains(page) } else { here };
                     if selected {
                         painter.rect_filled(rect, egui::CornerRadius::same(4), theme.accent);
-                    } else if response.hovered() {
+                    } else if response.hovered() && dragging.is_none() {
                         painter.rect_filled(rect, egui::CornerRadius::same(4), theme.hover);
                     }
                     if picking && here {
@@ -761,12 +871,100 @@ impl App {
                     job.wrap.overflow_character = Some('\u{2026}');
                     let galley = painter.layout_job(job);
                     painter.galley(text_left + egui::vec2(0.0, 22.0), galley, theme.faint);
+                    // The sheets being moved stay where they are, faded,
+                    // until they are let go.
+                    if moving.contains(&page) {
+                        painter.rect_filled(rect, egui::CornerRadius::same(4), theme.chrome.gamma_multiply(0.6));
+                    }
+                }
+
+                // Where they would go: a bar across the gap under the pointer,
+                // for sheets being dragged or a PDF coming in from outside.
+                let carrying = dragging.is_some() || files_over;
+                if let (true, Some(at)) = (carrying, pointer.filter(|p| list.contains(*p))) {
+                    if dragging.is_some() {
+                        // Near either end the list scrolls to follow.
+                        let edge = 28.0;
+                        let speed = if at.y < list.top() + edge {
+                            (list.top() + edge - at.y) * 0.5
+                        } else if at.y > list.bottom() - edge {
+                            -(at.y - (list.bottom() - edge)) * 0.5
+                        } else {
+                            0.0
+                        };
+                        if speed != 0.0 {
+                            ui.scroll_with_delta(egui::vec2(0.0, speed));
+                            ui.ctx().request_repaint();
+                        }
+                    }
+                    if let Some(g) = reorder::gap(&rows, at.y) {
+                        let before = reorder::before_gap(&shown, g, count);
+                        let pointless = dragging
+                            .as_ref()
+                            .is_some_and(|d| !reorder::moves_anything(count, &d.pages, before));
+                        if !pointless {
+                            let y = match rows.iter().find(|(i, _)| *i == g) {
+                                Some((_, r)) => r.top() - 3.0,
+                                None => rows.last().map(|(_, r)| r.bottom() + 3.0).unwrap_or(list.top()),
+                            };
+                            // As wide as the rows, inside the list.
+                            let (left, right) = rows
+                                .first()
+                                .map(|(_, r)| (r.left() + 2.0, r.right() - 2.0))
+                                .unwrap_or((list.left() + 2.0, list.right() - 2.0));
+                            let bar = egui::Rect::from_min_max(
+                                egui::pos2(left, y - 1.5),
+                                egui::pos2(right, y + 1.5),
+                            );
+                            let painter = ui.painter();
+                            painter.rect_filled(bar, egui::CornerRadius::same(1), theme.accent_text);
+                            for x in [bar.left(), bar.right()] {
+                                painter.circle_filled(egui::pos2(x, y), 4.0, theme.accent_text);
+                            }
+                        }
+                    }
                 }
             });
-        match action {
-            Some(PickAction::All) => doc.picks.all(&shown),
-            Some(PickAction::Clear) => doc.picks.clear(),
-            _ => {}
+        });
+
+        // Let go, or given up on.
+        if let Some(drag) = dragging.take() {
+            let (down, escape) = ctx.input(|i| (i.pointer.primary_down(), i.key_pressed(egui::Key::Escape)));
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+            if escape {
+                // Dropped nowhere: nothing moves.
+            } else if down {
+                dragging = Some(drag);
+            } else if let Some(at) = pointer.filter(|p| list.contains(*p)) {
+                if let Some(g) = reorder::gap(&rows, at.y) {
+                    let before = reorder::before_gap(&shown, g, count);
+                    if reorder::moves_anything(count, &drag.pages, before) {
+                        match &stays {
+                            Some(why) => self.error = Some(why.clone()),
+                            None => plan = Some(Plan::Move { pages: drag.pages, before }),
+                        }
+                    }
+                }
+            }
+        }
+        // Where the rows are, for a PDF let go over them before the list is
+        // drawn again.
+        if let Some(doc) = self.doc() {
+            self.sheet_rows = Some(reorder::Rows {
+                doc: doc.id,
+                list,
+                rows,
+                shown: shown.clone(),
+                count,
+            });
+        }
+        self.sheet_drag = dragging;
+        if let Some(doc) = self.doc_mut() {
+            match action {
+                Some(PickAction::All) => doc.picks.all(&shown),
+                Some(PickAction::Clear) => doc.picks.clear(),
+                _ => {}
+            }
         }
         if !wanted.is_empty() {
             if let Some(id) = self.doc().map(|d| d.id) {
@@ -780,6 +978,22 @@ impl App {
             Some(PickAction::Print) => self.begin_print(),
             Some(PickAction::Save) => self.save_picked_sheets(),
             _ => {}
+        }
+        if let Some(plan) = plan {
+            self.change_sheets(plan);
+        }
+        if let Some(before) = insert_from_file {
+            let mut choose = crate::files::Choose::open_many()
+                .title("Insert pages from")
+                .filter("PDF", &["pdf", "PDF"]);
+            if let Some(folder) = self.doc().and_then(|d| d.path.parent().map(|p| p.to_path_buf())) {
+                choose = choose.start_in(folder);
+            }
+            self.filing.many(choose, move |app, files| {
+                if !files.is_empty() {
+                    app.change_sheets(Plan::Insert { files, before });
+                }
+            });
         }
     }
 
@@ -1897,19 +2111,39 @@ impl App {
                 }
                 "Edit.Undo" => {
                     if let Some(doc) = self.doc_mut() {
-                        if !doc.undo() {
-                            self.status = "Nothing left to undo.".into();
-                        } else {
+                        let step = doc.undo.last().map(|s| (s.what.clone(), s.sheets.is_some()));
+                        if doc.undo() {
+                            // Sheets moving back is worth a word: the list
+                            // changes under the pointer.
+                            if let Some((what, true)) = step {
+                                self.status = format!("Undone: {what}.");
+                            }
                             self.save_soon();
+                        } else if let Some((what, _)) = step {
+                            self.status = format!(
+                                "Could not undo \"{what}\": the drawing could not be written. \
+                                 Is it open in another program?"
+                            );
+                        } else {
+                            self.status = "Nothing left to undo.".into();
                         }
                     }
                 }
                 "Edit.Redo" => {
                     if let Some(doc) = self.doc_mut() {
-                        if !doc.redo() {
-                            self.status = "Nothing left to put back.".into();
-                        } else {
+                        let step = doc.redo.last().map(|s| (s.what.clone(), s.sheets.is_some()));
+                        if doc.redo() {
+                            if let Some((what, true)) = step {
+                                self.status = format!("Done again: {what}.");
+                            }
                             self.save_soon();
+                        } else if let Some((what, _)) = step {
+                            self.status = format!(
+                                "Could not redo \"{what}\": the drawing could not be written. \
+                                 Is it open in another program?"
+                            );
+                        } else {
+                            self.status = "Nothing left to put back.".into();
                         }
                     }
                 }
