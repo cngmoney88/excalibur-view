@@ -112,6 +112,14 @@ fn the_program_works_perfectly_well_with_no_tool_chest_at_all() {
     assert!(ready.is_ok(), "the panel is there whether or not a chest is");
 }
 
+/// The tablet apps' sample set, which a tablet opens with so there is
+/// something to try: a building made up for the purpose, drawn by Excalibur,
+/// not anybody's project. Only that one folder, by name, so a real set put
+/// anywhere else is still caught.
+fn is_our_sample(path: &str) -> bool {
+    path.replace('\\', "/").contains("crates/mobile/samples/")
+}
+
 #[test]
 fn no_drawing_set_is_part_of_the_source() {
     let root = repository();
@@ -121,6 +129,7 @@ fn no_drawing_set_is_part_of_the_source() {
         .iter()
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("pdf"))
         .filter(|p| !p.components().any(|c| c.as_os_str() == "research"))
+        .filter(|p| !is_our_sample(&p.to_string_lossy()))
         .map(|p| p.display().to_string())
         .collect();
     assert!(
@@ -165,6 +174,7 @@ fn nothing_of_anybody_else_s_is_tracked_by_the_repository() {
 
     let mustnt: Vec<&String> = tracked
         .iter()
+        .filter(|path| !is_our_sample(path))
         .filter(|path| {
             let lower = path.to_lowercase();
             lower.ends_with(".bpx")
