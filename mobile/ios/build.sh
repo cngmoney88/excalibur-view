@@ -62,9 +62,14 @@ if wants native; then
         log="$work/rustc-$target.log"
         # --print native-static-libs: the system libraries and frameworks the
         # library needs linked beside it, which a static library cannot carry.
-        cargo rustc -p excalibur-view-mobile --release --target "$target" \
+        # Without colour: with it, as GitHub's runners ask for, the last flag
+        # came out as "-lm" and a colour code, which no linker can find.
+        cargo rustc --color never -p excalibur-view-mobile --release --target "$target" \
             --crate-type staticlib -- --print native-static-libs 2>&1 | tee "$log"
-        flags="$(sed -n 's/.*native-static-libs: //p' "$log" | tail -1)"
+        # And any colour code that got in anyway is taken out.
+        esc="$(printf '\033')"
+        flags="$(LC_ALL=C sed -e "s/${esc}\[[0-9;]*[A-Za-z]//g" "$log" \
+            | sed -n 's/.*native-static-libs: //p' | tail -1)"
         [[ -n "$flags" ]] || fail "rustc did not say what $target links against"
         link_flags="$flags"
         libraries+=(-library "$target_dir/$target/release/libexcalibur_view_mobile.a")
