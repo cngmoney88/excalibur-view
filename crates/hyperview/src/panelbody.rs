@@ -1930,6 +1930,19 @@ impl App {
                     };
                     self.chrome.theme.apply(ctx);
                 }
+                "View.ClassicLook" => {
+                    let on = self.chrome.is_on("View.ClassicLook");
+                    self.set_look(ctx, on);
+                    self.prefs.classic = on;
+                    if let Err(e) = self.prefs.save() {
+                        self.error = Some(format!("Could not keep the setting: {e}"));
+                    }
+                    self.status = if on {
+                        "Classic look. View → Classic Look again goes back.".into()
+                    } else {
+                        "Excalibur's own look again.".into()
+                    };
+                }
                 "Markup.Signature" => {
                     self.finish_draft();
                     self.begin_signature();
@@ -2316,6 +2329,30 @@ pub fn twist(painter: &egui::Painter, rect: egui::Rect, open: bool, colour: Colo
 impl App {
     // ---- preferences -----------------------------------------------------
 
+    /// Switches between the Classic look and the program's own.
+    ///
+    /// Invert only flips the program's own look between dark and light, so it
+    /// stands down while Classic is on, and says why.
+    pub fn set_look(&mut self, ctx: &egui::Context, classic: bool) {
+        self.chrome.theme = if classic {
+            ui::Theme::classic()
+        } else if self.chrome.is_on("View.InvertColors") {
+            ui::Theme::light()
+        } else {
+            ui::Theme::dark()
+        };
+        self.chrome.theme.apply(ctx);
+        self.chrome.set("View.ClassicLook", classic);
+        if classic {
+            self.chrome.disable(
+                "View.InvertColors",
+                "The Classic look has one set of colours. Turn it off in View → Classic Look to invert.",
+            );
+        } else {
+            self.chrome.enable("View.InvertColors");
+        }
+    }
+
     pub fn prefs_dialog(&mut self, ctx: &egui::Context) {
         let Some(mut draft) = self.editing_prefs.take() else {
             return;
@@ -2345,6 +2382,22 @@ impl App {
                     ui.separator();
                     ui.add_space(6.0);
                 }
+                ui.label(RichText::new("Look").strong());
+                ui.checkbox(&mut draft.classic, "Classic look");
+                ui.label(
+                    RichText::new(
+                        "Grey, with raised buttons, sunken boxes and a navy band on the window in \
+                         front, the way office computers looked in the late nineties. Everything \
+                         works the same; only the look changes.",
+                    )
+                    .color(theme.faint)
+                    .size(11.0),
+                );
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(6.0);
+
                 ui.label(RichText::new("Your name on a markup").strong());
                 ui.add(
                     egui::TextEdit::singleline(&mut draft.author)
@@ -2451,6 +2504,9 @@ impl App {
         if apply {
             if crate::platform::tablet() {
                 ctx.set_zoom_factor(draft.control_scale());
+            }
+            if draft.classic != self.prefs.classic {
+                self.set_look(ctx, draft.classic);
             }
             self.units = draft.units;
             self.denominator = draft.denominator;

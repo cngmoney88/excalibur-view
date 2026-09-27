@@ -1016,6 +1016,9 @@ impl App {
         }
         // Settings from the file win over the defaults filled in above.
         app.prefs = crate::prefs::Prefs::load();
+        if app.prefs.classic {
+            app.set_look(&cc.egui_ctx, true);
+        }
         app.units = app.prefs.units;
         app.denominator = app.prefs.denominator;
         app.wheel_zooms = app.prefs.wheel_zooms;

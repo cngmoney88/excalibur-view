@@ -89,6 +89,9 @@ pub struct Prefs {
     /// desktop size. Nought is the tablet's own default.
     #[serde(default)]
     pub control_size: f32,
+    /// The Classic look: grey, with raised buttons and sunken boxes.
+    #[serde(default)]
+    pub classic: bool,
 }
 
 /// The sizes a tablet's controls can be drawn at, with their names.
@@ -157,6 +160,7 @@ impl Default for Prefs {
             worth_keeping: two_feet(),
             cut_step: an_inch(),
             control_size: 0.0,
+            classic: false,
         }
     }
 }

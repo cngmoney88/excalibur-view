@@ -257,6 +257,7 @@ pub const ALL: &[Command] = &[
     Command { id: "View.SyncPanes", label: "Sync Panes", shortcut: None, glyph: Some(icon::LINK), kind: Kind::Toggle, hint: "Move both halves of a split together." },
     Command { id: "View.UnSplit", label: "Unsplit", shortcut: Some("Ctrl+Shift+2"), glyph: Some(icon::FIT_PAGE), kind: Kind::Toggle, hint: "Back to one view." },
     Command { id: "View.InvertColors", label: "Invert", shortcut: Some("Ctrl+3"), glyph: Some(icon::INVERT), kind: Kind::Toggle, hint: "White lines on black, for a dark room." },
+    Command { id: "View.ClassicLook", label: "Classic Look", shortcut: None, glyph: Some(icon::PANEL), kind: Kind::Toggle, hint: "Grey with raised buttons and sunken boxes, the look of an office computer from the late nineties. Kept for next time." },
     Command { id: "View.PageFirst", label: "First Sheet", shortcut: Some("Home"), glyph: Some(icon::FIRST), kind: Kind::Button, hint: "Go to the first sheet." },
     Command { id: "View.PagePrevious", label: "Previous Sheet", shortcut: Some("PageUp"), glyph: Some(icon::PREVIOUS), kind: Kind::Button, hint: "Back one sheet." },
     Command { id: "View.PageNext", label: "Next Sheet", shortcut: Some("PageDown"), glyph: Some(icon::NEXT), kind: Kind::Button, hint: "On one sheet." },

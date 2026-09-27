@@ -1,6 +1,7 @@
 //! The program's chrome: commands, icons, panels and the markups grid.
 
 pub mod chrome;
+pub mod classic;
 pub mod command;
 pub mod icon;
 pub mod mark;

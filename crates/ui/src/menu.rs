@@ -220,6 +220,7 @@ pub const VIEW: &[Entry] = &[
     Entry::Item("View.SnapToMarkup"),
     Entry::Line,
     Entry::Item("View.InvertColors"),
+    Entry::Item("View.ClassicLook"),
     Entry::Item("Split.Dimmer"),
     Entry::Line,
     Entry::Item("Toggle.FullScreen"),

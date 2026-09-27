@@ -30,6 +30,10 @@ pub struct Theme {
     pub accent_text: Color32,
     pub warn: Color32,
     pub surround: Color32,
+    /// The Classic look: grey, raised and sunken, square-cornered. Drawn
+    /// differently in places, not just coloured differently (see
+    /// [`crate::classic`]).
+    pub classic: bool,
 }
 
 impl Theme {
@@ -52,6 +56,7 @@ impl Theme {
             accent_text: Color32::from_rgb(127, 176, 222),
             warn: Color32::from_rgb(217, 164, 65),
             surround: Color32::from_rgb(31, 42, 56),
+            classic: false,
         }
     }
 
@@ -72,6 +77,30 @@ impl Theme {
             accent_text: Color32::from_rgb(35, 72, 104),
             warn: Color32::from_rgb(168, 113, 15),
             surround: Color32::from_rgb(154, 167, 182),
+            classic: false,
+        }
+    }
+
+    /// The Classic look: the grey of the office machines of the late
+    /// nineties, black type, navy for whatever is chosen, and a mid-grey
+    /// round the sheet the way an old program's workspace was.
+    pub fn classic() -> Theme {
+        use crate::classic::{FACE, NAVY, SHADOW};
+        Theme {
+            chrome: FACE,
+            bar: FACE,
+            sunken: Color32::WHITE,
+            line: SHADOW,
+            text: Color32::BLACK,
+            faint: Color32::from_rgb(78, 76, 72),
+            glyph: Color32::from_rgb(20, 20, 20),
+            hover: Color32::from_rgb(226, 223, 216),
+            pressed: Color32::from_rgb(190, 186, 178),
+            accent: NAVY,
+            accent_text: NAVY,
+            warn: Color32::from_rgb(150, 75, 0),
+            surround: SHADOW,
+            classic: true,
         }
     }
 
@@ -115,9 +144,36 @@ impl Theme {
                 egui::ThemePreference::Light
             };
         });
+        // Classic scroll bars are always there and as wide as a button, the
+        // way they were; the others fade in when wanted.
+        let classic = self.classic;
+        ctx.all_styles_mut(|style| {
+            style.spacing.scroll = if classic {
+                let mut solid = egui::style::ScrollStyle::solid();
+                solid.bar_width = 14.0;
+                solid.handle_min_length = 16.0;
+                solid.bar_inner_margin = 0.0;
+                solid.bar_outer_margin = 0.0;
+                solid
+            } else {
+                egui::style::ScrollStyle::default()
+            };
+        });
+        if classic {
+            crate::classic::install(ctx);
+        }
+        // New type only when the look changes: fonts are costly to swap.
+        let id = egui::Id::new("excalibur-classic-type");
+        if ctx.data(|d| d.get_temp::<bool>(id)) != Some(classic) {
+            ctx.data_mut(|d| d.insert_temp(id, classic));
+            set_fonts(ctx, classic);
+        }
     }
 
     fn visuals(&self) -> egui::Visuals {
+        if self.classic {
+            return crate::classic::visuals();
+        }
         let mut visuals = if self.is_dark() {
             egui::Visuals::dark()
         } else {
@@ -158,9 +214,15 @@ impl Theme {
 static SYMBOLS: &[u8] = include_bytes!("../fonts/symbols.ttf");
 
 /// Adds the symbols as the last fallback of every font family. Call once,
-/// when the window is made.
+/// when the window is made; [`Theme::apply`] swaps the type after that.
 pub fn fonts(ctx: &egui::Context) {
+    set_fonts(ctx, false);
+    ctx.data_mut(|d| d.insert_temp(egui::Id::new("excalibur-classic-type"), false));
+}
+
+fn set_fonts(ctx: &egui::Context, classic: bool) {
     let mut fonts = egui::FontDefinitions::default();
+    crate::classic::add_fonts(&mut fonts, classic);
     fonts.font_data.insert(
         "excalibur-symbols".into(),
         std::sync::Arc::new(egui::FontData::from_static(SYMBOLS)),
@@ -317,8 +379,33 @@ impl Chrome {
         let off = self.why_disabled(id).map(|s| s.to_string());
         let active = self.looks_active(command);
         let painter = ui.painter();
-        let tiled = wears_a_tile(command) && command.glyph.is_some();
-        let colour = if tiled {
+        // The Classic look has no tiles: its tools are flat until the pointer
+        // comes over them, as a toolbar's were then.
+        let tiled = wears_a_tile(command) && command.glyph.is_some() && !self.theme.classic;
+        let mut rect = rect;
+        let colour = if self.theme.classic {
+            let ppp = ui.ctx().pixels_per_point();
+            let down = response.is_pointer_button_down_on() && off.is_none();
+            let face = rect.shrink(1.0);
+            use crate::classic::{HIGHLIGHT, PUSHED_IN, SHADOW};
+            if command.kind == Kind::Combo {
+                // Drawn below as a box of its own.
+            } else if active {
+                painter.add(crate::classic::thin(face, SHADOW, HIGHLIGHT, PUSHED_IN, ppp));
+            } else if down {
+                painter.add(crate::classic::thin(face, SHADOW, HIGHLIGHT, Color32::TRANSPARENT, ppp));
+            } else if response.hovered() && off.is_none() {
+                painter.add(crate::classic::thin(face, HIGHLIGHT, SHADOW, Color32::TRANSPARENT, ppp));
+            }
+            // Pushed in, a button's picture moves down and right a pixel.
+            if (active || down) && command.kind != Kind::Combo {
+                rect = rect.translate(Vec2::splat(1.0));
+            }
+            match &off {
+                Some(_) => self.theme.unavailable(),
+                None => self.theme.glyph,
+            }
+        } else if tiled {
             // The drawing and measuring tools sit on an accent tile, so the
             // things that put marks on a drawing stand apart from the rest of
             // the row at a glance.
@@ -370,6 +457,39 @@ impl Chrome {
             }
         };
         match command.kind {
+            Kind::Combo if self.theme.classic => {
+                // A drop-down list: a sunken white box with a raised arrow
+                // button at its right-hand end.
+                let ppp = ui.ctx().pixels_per_point();
+                let field = rect.shrink2(Vec2::new(1.0, 2.0));
+                painter.add(crate::classic::bevel(
+                    field,
+                    crate::classic::SUNKEN_EDGES,
+                    Color32::WHITE,
+                    ppp,
+                ));
+                let w = crate::classic::line_width(ppp);
+                let arrow = Rect::from_min_max(
+                    egui::pos2(field.right() - 2.0 * w - 15.0, field.top() + 2.0 * w),
+                    egui::pos2(field.right() - 2.0 * w, field.bottom() - 2.0 * w),
+                );
+                let pressed = response.is_pointer_button_down_on();
+                painter.add(crate::classic::bevel(
+                    arrow,
+                    if pressed { crate::classic::PRESSED_EDGES } else { crate::classic::RAISED_EDGES },
+                    crate::classic::FACE,
+                    ppp,
+                ));
+                painter.text(
+                    egui::pos2(field.left() + 6.0, field.center().y),
+                    Align2::LEFT_CENTER,
+                    command.label,
+                    FontId::proportional(12.0),
+                    colour,
+                );
+                let nudge = if pressed { 1.0 } else { 0.0 };
+                chevron(painter, arrow.center() + Vec2::splat(nudge), colour);
+            }
             Kind::Combo => {
                 painter.rect_stroke(
                     rect.shrink(2.0),
@@ -507,6 +627,12 @@ impl Chrome {
     pub fn menu_bar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
+            if self.theme.classic {
+                // A classic menu bar is words on the face, not a row of
+                // buttons: nothing round them until one is pointed at.
+                egui::containers::menu::menu_style(ui.style_mut());
+                ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
+            }
             for m in menu::BAR {
                 if m.name == "Help" {
                     ui.menu_button("Plugins", |ui| {
@@ -590,6 +716,16 @@ impl Chrome {
                 Entry::Line => {
                     ui.separator();
                 }
+                Entry::More(name, inner) if self.theme.classic => {
+                    // Lined up with the entries beside it, past the tick.
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.menu_button(*name, |ui| {
+                            ui.set_min_width(240.0);
+                            self.entries(ui, inner);
+                        });
+                    });
+                }
                 Entry::More(name, inner) => {
                     ui.menu_button(*name, |ui| {
                         ui.set_min_width(240.0);
@@ -616,6 +752,19 @@ impl Chrome {
         let name = label.unwrap_or(command.label);
         let off = self.why_disabled(id).map(|s| s.to_string());
         let ticked = self.looks_active(command);
+
+        if self.theme.classic {
+            if self.classic_menu_item(ui, command, name, off.as_deref(), ticked) {
+                if command.is_tool() {
+                    self.tool = command.id.to_string();
+                } else if command.kind == Kind::Toggle {
+                    self.turn(command.id);
+                }
+                self.fired.push(command.id.to_string());
+                ui.close();
+            }
+            return;
+        }
 
         let response = ui.add_enabled_ui(off.is_none(), |ui| {
             ui.horizontal(|ui| {
@@ -653,6 +802,92 @@ impl Chrome {
             ui.close();
         }
     }
+}
+
+impl Chrome {
+    /// One menu entry in the Classic look: the whole row goes navy under the
+    /// pointer, with white words; one that cannot be used is greyed and cut
+    /// into the face. True when it was clicked.
+    fn classic_menu_item(
+        &self,
+        ui: &mut Ui,
+        command: &Command,
+        name: &str,
+        off: Option<&str>,
+        ticked: bool,
+    ) -> bool {
+        use crate::classic::{HIGHLIGHT, NAVY, SHADOW};
+        let font = FontId::proportional(13.0);
+        let small = FontId::proportional(12.0);
+        let label = ui.fonts(|f| f.layout_no_wrap(name.to_string(), font.clone(), Color32::BLACK));
+        let keys = command
+            .shortcut
+            .map(|k| ui.fonts(|f| f.layout_no_wrap(k.to_string(), small.clone(), Color32::BLACK)));
+        let needed = 26.0 + label.size().x + 36.0 + keys.as_ref().map_or(0.0, |k| k.size().x) + 10.0;
+        let width = ui.available_width().max(needed);
+        let sense = if off.is_none() { Sense::click() } else { Sense::hover() };
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 22.0), sense);
+        let lit = off.is_none() && (response.hovered() || response.has_focus());
+        let painter = ui.painter();
+        if lit {
+            painter.rect_filled(rect, CornerRadius::ZERO, NAVY);
+        }
+        let ink = if lit { Color32::WHITE } else { Color32::BLACK };
+        // Greyed type in a classic menu is cut in: a lit copy a pixel down
+        // and right, and the grey on top of it.
+        let write = |at: egui::Pos2, galley: std::sync::Arc<egui::Galley>| {
+            if off.is_some() {
+                painter.galley_with_override_text_color(at + Vec2::splat(1.0), galley.clone(), HIGHLIGHT);
+                painter.galley_with_override_text_color(at, galley, SHADOW);
+            } else {
+                painter.galley_with_override_text_color(at, galley, ink);
+            }
+        };
+        if ticked {
+            let c = egui::pos2(rect.left() + 12.0, rect.center().y);
+            painter.add(egui::Shape::line(
+                vec![
+                    egui::pos2(c.x - 4.0, c.y),
+                    egui::pos2(c.x - 1.0, c.y + 3.5),
+                    egui::pos2(c.x + 4.5, c.y - 4.0),
+                ],
+                Stroke::new(1.8, if off.is_some() { SHADOW } else { ink }),
+            ));
+        }
+        write(egui::pos2(rect.left() + 26.0, rect.center().y - label.size().y * 0.5), label);
+        if let Some(keys) = keys {
+            let at = egui::pos2(rect.right() - 10.0 - keys.size().x, rect.center().y - keys.size().y * 0.5);
+            write(at, keys);
+        }
+        let response = match off {
+            Some(why) => response.on_hover_text(why),
+            None => response,
+        };
+        response.clicked()
+    }
+}
+
+/// A panel's title. In the Classic look, white on a navy band the way a
+/// window's title was; otherwise plain strong type.
+pub fn panel_title(ui: &mut Ui, theme: Theme, title: &str, extra: impl FnOnce(&mut Ui)) {
+    if !theme.classic {
+        ui.horizontal(|ui| {
+            extra(ui);
+            ui.label(egui::RichText::new(title).strong());
+        });
+        return;
+    }
+    let ppp = ui.ctx().pixels_per_point();
+    let height = 22.0;
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+    ui.painter().add(crate::classic::band(rect, ppp));
+    ui.painter().text(
+        egui::pos2(rect.left() + 6.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        title,
+        FontId::new(12.5, egui::FontFamily::Name(crate::classic::BOLD.into())),
+        Color32::WHITE,
+    );
 }
 
 fn chevron(painter: &egui::Painter, at: egui::Pos2, colour: Color32) {
@@ -1042,7 +1277,7 @@ mod tests {
 
     #[test]
     fn the_dark_and_light_themes_both_keep_text_readable() {
-        for theme in [Theme::dark(), Theme::light()] {
+        for theme in [Theme::dark(), Theme::light(), Theme::classic()] {
             let contrast = |a: Color32, b: Color32| {
                 let l = |c: Color32| {
                     0.2126 * c.r() as f32 + 0.7152 * c.g() as f32 + 0.0722 * c.b() as f32

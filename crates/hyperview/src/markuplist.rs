@@ -321,6 +321,17 @@ impl App {
                     })
                     .collect();
 
+                if theme.classic {
+                    // A classic list sits in a sunken white well.
+                    let well = ui.available_rect_before_wrap();
+                    let ppp = ui.ctx().pixels_per_point();
+                    ui.painter().add(ui::classic::bevel(
+                        well,
+                        ui::classic::SUNKEN_EDGES,
+                        Color32::WHITE,
+                        ppp,
+                    ));
+                }
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {

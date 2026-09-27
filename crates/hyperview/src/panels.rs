@@ -304,20 +304,25 @@ impl App {
                         let (rect, response) =
                             ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
                         let painter = ui.painter();
-                        if open {
+                        let mut middle = rect.center();
+                        if theme.classic {
+                            if rail_button(painter, rect, open, response.hovered() && ready.is_ok()) {
+                                middle += egui::vec2(1.0, 1.0);
+                            }
+                        } else if open {
                             ui::icon::tile(painter, rect.shrink(1.0), ui::icon::Tile::Chosen, theme.chrome);
                         } else if response.hovered() && ready.is_ok() {
                             painter.rect_filled(rect, egui::CornerRadius::same(3), theme.hover);
                         }
                         let colour = match (ready, open) {
                             (Err(_), _) => theme.unavailable(),
-                            (Ok(()), true) => ui::icon::ON_TILE,
-                            (Ok(()), false) => theme.glyph,
+                            (Ok(()), true) if !theme.classic => ui::icon::ON_TILE,
+                            (Ok(()), _) => theme.glyph,
                         };
                         ui::icon::draw(
                             painter,
                             ui::chrome::panel_glyph(name),
-                            egui::Rect::from_center_size(rect.center(), egui::vec2(17.0, 17.0)),
+                            egui::Rect::from_center_size(middle, egui::vec2(17.0, 17.0)),
                             colour,
                             1.0,
                         );
@@ -332,7 +337,12 @@ impl App {
                     ui.add_space(6.0);
                     let (rect, response) =
                         ui.allocate_exact_size(egui::vec2(28.0, 28.0), egui::Sense::click());
-                    if self.show_markups {
+                    let mut middle = rect.center();
+                    if theme.classic {
+                        if rail_button(ui.painter(), rect, self.show_markups, response.hovered()) {
+                            middle += egui::vec2(1.0, 1.0);
+                        }
+                    } else if self.show_markups {
                         ui::icon::tile(ui.painter(), rect.shrink(1.0), ui::icon::Tile::Chosen, theme.chrome);
                     } else if response.hovered() {
                         ui.painter()
@@ -341,8 +351,8 @@ impl App {
                     ui::icon::draw(
                         ui.painter(),
                         ui::icon::GRID,
-                        egui::Rect::from_center_size(rect.center(), egui::vec2(17.0, 17.0)),
-                        if self.show_markups { ui::icon::ON_TILE } else { theme.glyph },
+                        egui::Rect::from_center_size(middle, egui::vec2(17.0, 17.0)),
+                        if self.show_markups && !theme.classic { ui::icon::ON_TILE } else { theme.glyph },
                         1.0,
                     );
                     if response.on_hover_text("Markups list\nEverything picked up, and what it totals.").clicked() {
@@ -365,17 +375,21 @@ impl App {
             )
             .width_range(220.0..=560.0)
             .show(ctx, |ui| {
-                ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    if name == "Server" || name == "Studio" {
+                ui.add_space(if theme.classic { 3.0 } else { 6.0 });
+                let studio = name == "Server" || name == "Studio";
+                ui::chrome::panel_title(ui, theme, &name, |ui| {
+                    if studio {
                         let (mark, _) =
                             ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                         ui::mark::draw(ui.painter(), mark, theme);
                         ui.add_space(2.0);
                     }
-                    ui.label(RichText::new(&name).strong());
                 });
-                ui.separator();
+                if theme.classic {
+                    ui.add_space(2.0);
+                } else {
+                    ui.separator();
+                }
                 match name.as_str() {
                     "Thumbnails" => self.thumbnails(ui),
                     "Tool Chest" => self.tool_chest(ui),
@@ -397,6 +411,20 @@ impl App {
                 }
             });
     }
+}
+
+/// A button on the rail in the Classic look: pushed in while its panel is
+/// open, standing up under the pointer. True when it is pushed in, so the
+/// picture on it can move down and right the way a pressed button's did.
+fn rail_button(painter: &egui::Painter, rect: egui::Rect, open: bool, hovered: bool) -> bool {
+    use ui::classic::{HIGHLIGHT, PUSHED_IN, SHADOW};
+    let ppp = painter.ctx().pixels_per_point();
+    if open {
+        painter.add(ui::classic::thin(rect, SHADOW, HIGHLIGHT, PUSHED_IN, ppp));
+    } else if hovered {
+        painter.add(ui::classic::thin(rect, HIGHLIGHT, SHADOW, Color32::TRANSPARENT, ppp));
+    }
+    open
 }
 
 pub fn bar_frame(fill: Color32) -> egui::Frame {
@@ -461,7 +489,9 @@ impl App {
                                     sw: 0,
                                     se: 0,
                                 };
-                                if open {
+                                if theme.classic {
+                                    classic_tab(painter, rect, open);
+                                } else if open {
                                     painter.rect_filled(rect, corner, theme.bar);
                                     painter.rect_filled(
                                         egui::Rect::from_min_max(
@@ -560,6 +590,26 @@ impl App {
             self.svc.send(crate::render::ToWorker::ScanLabels(id));
         }
     }
+}
+
+/// One tab in the Classic look: lit along the top and left, shaded down the
+/// right, and the one in front a little taller and joined to what is below.
+fn classic_tab(painter: &egui::Painter, rect: egui::Rect, open: bool) {
+    use ui::classic::{DARK, FACE, HIGHLIGHT, SHADOW};
+    let ppp = painter.ctx().pixels_per_point();
+    let w = ui::classic::line_width(ppp);
+    let r = if open { rect } else { egui::Rect::from_min_max(rect.min + egui::vec2(0.0, 2.0), rect.max) };
+    let mut mesh = egui::Mesh::default();
+    mesh.add_colored_rect(r, FACE);
+    mesh.add_colored_rect(egui::Rect::from_min_max(r.min + egui::vec2(w, 0.0), egui::pos2(r.max.x - w, r.min.y + w)), HIGHLIGHT);
+    mesh.add_colored_rect(egui::Rect::from_min_max(r.min + egui::vec2(0.0, w), egui::pos2(r.min.x + w, r.max.y)), HIGHLIGHT);
+    mesh.add_colored_rect(egui::Rect::from_min_max(egui::pos2(r.max.x - w, r.min.y + w), r.max), DARK);
+    mesh.add_colored_rect(egui::Rect::from_min_max(egui::pos2(r.max.x - 2.0 * w, r.min.y + w), egui::pos2(r.max.x - w, r.max.y)), SHADOW);
+    if !open {
+        // Behind the one in front: the line along the bottom shows.
+        mesh.add_colored_rect(egui::Rect::from_min_max(egui::pos2(r.min.x, r.max.y - w), r.max), HIGHLIGHT);
+    }
+    painter.add(egui::Shape::mesh(mesh));
 }
 
 /// A close cross, drawn. Two strokes, in any font and at any size.
