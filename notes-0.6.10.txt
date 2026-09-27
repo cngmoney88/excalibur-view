@@ -1,72 +1,4 @@
-Change a drawing's own words, reshape markups after they're down, fill and blend boxes, Cloud+, your signature, and print or save just the sheets you pick.
-
-EDITING THE DRAWING'S WORDS
-
-Edit -> Edit Text outlines every paragraph on the sheet. Click one and
-retype it where it is. The strip above it sets the size, colour, bold,
-italic and alignment. Done or Ctrl+Enter writes it into the drawing, and
-Esc or Cancel leaves it as it was.
-
-The lines of a note are treated as one paragraph and wrap to the width the
-note already had. The next numbered note stays a paragraph of its own.
-
-The words keep the drawing's own font when it has every letter they need.
-Many PDFs only carry the letters the drawing already used, so a new letter
-sends the paragraph to the nearest standard font, and the status line says
-which one and why.
-
-Before the change is kept, the rest of the sheet is drawn again and has to
-come out exactly as it was. If it doesn't, nothing is written. Undo puts
-the words back.
-
-Lettering that a CAD program drew as lines isn't text and can't be retyped.
-For those, a white-filled box over the old words and a text box on top
-does the job.
-
-MARKUPS AFTER THEY'RE PLACED
-
-Pick a markup and it shows handles. Drag a corner or a side to resize it,
-drag a point to move just that point, and drag a callout's tip to aim its
-leader somewhere else. Pictures and signatures keep their shape unless you
-hold Shift.
-
-Double-click a text box or a callout to retype it on the sheet.
-
-Boxes, circles and clouds now stay the size they were drawn. Before, each
-redraw could make them a little bigger.
-
-Stamps, pictures and signatures that came in with a file keep their look
-when you move or resize them.
-
-A moved markup no longer leaves a faint copy behind where it was.
-
-FILL, OUTLINE AND BLEND
-
-Right-click a markup for its fill, outline, line weight and see-through,
-with any colour you like. Multiply blends a fill into the drawing the way
-a highlighter does, so the linework under it still shows. The pen chooser
-has the same.
-
-CLOUD+
-
-Cloud+ is on the Markup menu and the text toolbar. Drag out the cloud,
-click where the words go, and type. A leader runs from the cloud to the
-words.
-
-The cloud and its words move, copy and delete as one. Drag the words box
-by itself to put it somewhere else and the leader follows. Double-click
-the cloud to change the words. Other PDF programs see an ordinary cloud
-and callout, grouped together.
-
-YOUR SIGNATURE
-
-Markup -> Signature. The first time, draw it with the mouse or a pen, or
-load a photo or scan of it on paper and the paper is taken out. It is kept
-on this computer, so after that it's one click. Initials work the same
-way, and you can keep more than one.
-
-A signature goes down as a stamp that blends into the drawing, so the
-lines under it still show. Move and resize it like any other markup.
+Pick sheets in Thumbnails, then print just those or save them as a PDF.
 
 PICKING SHEETS
 
@@ -80,33 +12,16 @@ The line above the list says how many are picked, with Print, Save as PDF
 and Clear beside it. Right-click a sheet for the same, or to pick every
 sheet a search is showing.
 
+PRINTING THEM
+
 Print opens on the picked sheets. Ctrl+P does too.
+
+SAVING THEM AS A PDF
 
 Save as PDF writes the picked sheets, markups and all, into a new file
 wherever you put it. The drawing you're in stays as it is and stays open.
 
-Rotate, Extract, Delete, Crop, Flatten and the other Document jobs that
-work on chosen sheets open with the picked ones already filled in.
+THE DOCUMENT MENU
 
-LOCKING A FILE
-
-Already there, in case it was missed: Document -> Security (Ctrl+L) locks
-a file with AES-256, with a password to open it, a password for the owner,
-and what others may do with it: print it, copy text out of it, mark it up,
-change it, fill in forms. Locked
-files open with their password.
-
-FIXED
-
-Pasting a box, circle, cloud, stamp or text box could leave a thin sliver
-instead of the shape you copied. Pasted markups now keep their size, a
-callout's leader comes with it, and a pasted Cloud+ is a new Cloud+ of its
-own.
-
-A save that only changed markups already in the file could leave it saying
-it held fewer objects than it did. Excalibur View read past that, but
-stricter PDF readers could lose part of the file. Saves now count every
-object.
-
-A long message at the bottom of the window is cut to fit instead of
-running over the sheet name. Point at it to read all of it.
+Rotate, Extract, Delete, Crop, Flatten and the other jobs that work on
+chosen sheets open with the picked ones already filled in.

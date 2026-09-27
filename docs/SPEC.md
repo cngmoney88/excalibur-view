@@ -525,6 +525,28 @@ so the taskbar and the About box cannot show two different marks. It reads at
 sixteen pixels. Rounded corners, a tinted tool with an accent bar under it
 rather than a solid block, and navy rather than grey behind a white sheet.
 
+**The Classic look** (View → Classic Look, and in Preferences) is the one other
+palette: the grey face of an office computer from the late nineties, raised
+buttons, sunken white fields and lists, `#0A246A` navy for anything chosen and
+across the window in front, and DejaVu Sans, cut down and renamed in
+`crates/ui/fonts`. egui draws a widget's frame as one rectangle in one colour
+and a bevel is four edges in four, so the Classic visuals mark each kind of
+frame with a colour of its own and `ui::classic::finish` swaps each one for its
+bevel at the end of every frame. Anything it does not recognise is drawn as
+egui drew it. The chrome's own buttons, the rail, the tabs and the panel titles
+draw their classic selves directly.
+
+**Sheets are moved in Thumbnails, in the file.** Dragging a sheet, or several
+picked ones, puts them where they are let go; a PDF dropped on the list goes
+in there; a sheet's menu adds a blank one, turns sheets or takes them out.
+`pdf::pages` does it as one incremental update: the page tree is flattened to
+the root in the new order, anything a sheet inherited from a node above it is
+written onto the sheet first, and sheets from another file are copied in with
+everything they use, once each. Markups are annotations on their sheets, so
+they travel with them. Undo writes the root back as it was. Everything the
+window keeps by a sheet's place in the set, from its thumbnail to its sheet
+number, is carried to the sheet's new place rather than read again.
+
 ## 6c. The server, the API and updates
 
 Hyperview is built to be sold as well as used. A company runs one
