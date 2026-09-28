@@ -385,6 +385,91 @@ pub fn move_box_only(m: &mut Markup, dx: f64, dy: f64) {
     }
 }
 
+/// Sizes a text box to its words, the way a box put down with a click grows
+/// as it is typed into: as wide as its longest line, as tall as its lines,
+/// with the same room off the edges the saved drawing leaves.
+///
+/// It is held by the side its leader comes in on, so a callout's words grow
+/// away from what they point at, and the leader stays on the middle of that
+/// side. A box with no leader is held by its top left corner, where it was
+/// put. Comes back true when the box changed.
+pub fn fit_to_words(markup: &mut Markup, text: &str) -> bool {
+    let Some(b) = markup.drawn_box() else { return false };
+    let setting = annot::text::Setting::of(markup);
+    let pad = 2.0 + markup.width().max(0.0);
+    let longest = text
+        .split('\n')
+        .map(|line| annot::content::width_of(line, setting.size, setting.bold))
+        .fold(0.0_f64, f64::max);
+    let lines = text.split('\n').count().max(1) as f64;
+    // Room for the caret after the last letter, and never so narrow that
+    // an empty box cannot be seen.
+    let w = (longest + setting.size * 0.6).max(setting.size * 4.0) + pad * 2.0;
+    let h = lines * setting.size * 1.18 + pad * 2.0;
+    let mut line = leader(markup);
+    let side = line.last().map(|end| {
+        let away = [(end[0] - b[0]).abs(), (end[0] - b[2]).abs(), (end[1] - b[1]).abs(), (end[1] - b[3]).abs()];
+        (0..4).min_by(|a, c| away[*a].total_cmp(&away[*c])).unwrap_or(0)
+    });
+    // PDF space: y runs up, so the top of the box is b[3].
+    let now = match side {
+        // Held on the right: grows to the left.
+        Some(1) => [b[2] - w, b[3] - h, b[2], b[3]],
+        // Held on the bottom: grows upward.
+        Some(2) => [b[0], b[1], b[0] + w, b[1] + h],
+        // Held on the left, the top, or nothing: grows right and down.
+        _ => [b[0], b[3] - h, b[0] + w, b[3]],
+    };
+    if now.iter().zip(b.iter()).all(|(a, c)| (a - c).abs() < 0.01) {
+        return false;
+    }
+    markup.set_box(now);
+    if let (Some(side), Some(last)) = (side, line.last_mut()) {
+        let (mx, my) = ((now[0] + now[2]) * 0.5, (now[1] + now[3]) * 0.5);
+        *last = match side {
+            0 => [now[0], my],
+            1 => [now[2], my],
+            2 => [mx, now[1]],
+            _ => [mx, now[3]],
+        };
+        set_leader(markup, &line);
+    }
+    true
+}
+
+/// Makes a text box of a set width tall enough for its words as they wrap,
+/// the way Revu's grows downward as the lines run past the bottom. It never
+/// gets shorter than it was drawn: a box dragged out tall stays tall. Comes
+/// back true when the box changed.
+pub fn taller_for_words(markup: &mut Markup, text: &str) -> bool {
+    let Some(b) = markup.drawn_box() else { return false };
+    let setting = annot::text::Setting::of(markup);
+    let pad = 2.0 + markup.width().max(0.0);
+    let lines = annot::text::wrap(text, (b[2] - b[0] - pad * 2.0).max(1.0), &setting)
+        .len()
+        .max(1) as f64;
+    // A new line with nothing on it yet still needs its room.
+    let lines = if text.ends_with('\n') { lines + 1.0 } else { lines };
+    let needed = lines * setting.size * 1.18 + pad * 2.0;
+    if needed <= b[3] - b[1] + 0.01 {
+        return false;
+    }
+    // Downward, from where the words start, unless a leader holds the bottom.
+    let held_below = leader(markup)
+        .last()
+        .is_some_and(|end| (end[1] - b[1]).abs() < (end[1] - b[3]).abs() && (end[1] - b[1]).abs() < 0.5);
+    let now = if held_below {
+        [b[0], b[1], b[2], b[1] + needed]
+    } else {
+        [b[0], b[3] - needed, b[2], b[3]]
+    };
+    markup.set_box(now);
+    if !leader(markup).is_empty() {
+        reattach_leader(markup);
+    }
+    true
+}
+
 /// Where a Cloud+'s leader starts and ends, for a cloud and a box: from the
 /// cloud's edge nearest the box, to the box's edge nearest that.
 pub fn leader_between(cloud: [f64; 4], words: [f64; 4]) -> Vec<[f64; 2]> {
@@ -419,6 +504,62 @@ fn set_points(m: &mut Markup, points: &[[f64; 2]]) {
 
 #[cfg(test)]
 mod tests {
+    fn words_box(at: [f64; 4]) -> Markup {
+        let mut m = Markup::new(annot::Subtype::FreeText);
+        m.set_box(at);
+        m.set_width(1.0);
+        m
+    }
+
+    #[test]
+    fn a_clicked_text_box_grows_with_its_words_from_where_it_was_put() {
+        let mut m = words_box([100.0, 480.0, 172.0, 500.0]);
+        assert!(fit_to_words(&mut m, "Mech opening moved"));
+        let b = m.drawn_box().unwrap();
+        // Held at its top left.
+        assert_eq!((b[0], b[3]), (100.0, 500.0));
+        // Wide enough for the words and the border's room either side.
+        let words = annot::content::width_of("Mech opening moved", 12.0, false);
+        assert!(b[2] - b[0] >= words + 6.0, "{b:?}");
+        // One line high.
+        assert!((b[3] - b[1] - (12.0 * 1.18 + 6.0)).abs() < 1e-9, "{b:?}");
+        // A second line makes it taller, downward, and no wider than it needs.
+        assert!(fit_to_words(&mut m, "Mech opening moved\nRFI 014"));
+        let two = m.drawn_box().unwrap();
+        assert_eq!((two[0], two[3], two[2]), (100.0, 500.0, b[2]));
+        assert!(two[1] < b[1]);
+        // Nothing changes when nothing needs to.
+        assert!(!fit_to_words(&mut m, "Mech opening moved\nRFI 014"));
+    }
+
+    #[test]
+    fn a_dragged_text_box_keeps_its_width_and_grows_down_as_its_lines_wrap() {
+        let mut m = words_box([100.0, 460.0, 200.0, 500.0]);
+        assert!(!taller_for_words(&mut m, "Short"), "one line fits as drawn");
+        assert_eq!(m.drawn_box().unwrap(), [100.0, 460.0, 200.0, 500.0]);
+        let long = "Verify embed plate locations with the GC before fabrication starts.";
+        assert!(taller_for_words(&mut m, long));
+        let b = m.drawn_box().unwrap();
+        assert_eq!((b[0], b[2], b[3]), (100.0, 200.0, 500.0), "same width, same top");
+        let setting = annot::text::Setting::of(&m);
+        let lines = annot::text::wrap(long, 100.0 - 6.0, &setting).len() as f64;
+        assert!((b[3] - b[1] - (lines * 12.0 * 1.18 + 6.0)).abs() < 1e-9, "{b:?}");
+    }
+
+    #[test]
+    fn a_callout_grows_away_from_what_it_points_at() {
+        // The words to the left of the thing, the leader on their right side.
+        let mut m = words_box([200.0, 490.0, 296.0, 510.0]);
+        set_leader(&mut m, &[[400.0, 300.0], [296.0, 500.0]]);
+        assert!(fit_to_words(&mut m, "SEE DETAIL 4 ON S-501 FOR THE PLATE"));
+        let b = m.drawn_box().unwrap();
+        assert_eq!(b[2], 296.0, "the side the leader comes in on stays put");
+        assert!(b[0] < 200.0, "it grew to the left: {b:?}");
+        let line = leader(&m);
+        assert_eq!(line[0], [400.0, 300.0], "the tip does not move");
+        assert_eq!(line[1], [296.0, (b[1] + b[3]) * 0.5], "the leader meets the middle of its side");
+    }
+
     use super::*;
 
     fn flat() -> Frame {

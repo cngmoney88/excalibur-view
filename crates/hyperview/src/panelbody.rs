@@ -377,10 +377,35 @@ impl App {
         }
     }
 
-    /// A text box's words, typed on the sheet where they will be. Finished by
-    /// clicking anywhere else, Esc, or Ctrl+Enter.
+    /// A text box's words, typed on the sheet where they will be: in the
+    /// drawing's own size, colour and weight, wrapped where the saved drawing
+    /// will wrap them. Finished by clicking the sheet anywhere else, Esc, or
+    /// Ctrl+Enter. The toolbars stay live while typing, so the size, colour
+    /// or font can be changed on the words being typed, as in Revu.
     fn type_in_place(&mut self, ctx: &egui::Context, index: usize) {
-        let accent = self.chrome.theme.accent;
+        // The first frame of a box is the one the click that made it may
+        // still be in. A quick click lands its press and its release in the
+        // same frame, and that press is not somebody clicking away: taken as
+        // one, it closed every box the moment it opened and the words went
+        // nowhere.
+        let showing = self.doc().map(|d| d.id);
+        if let Some((doc, _)) = self.typing_opened.filter(|(_, i)| *i == index) {
+            if Some(doc) != showing {
+                // Another drawing came to the front with the words still
+                // open. They belong to the one they were typed on.
+                self.editing_text = None;
+                self.typing_fit = None;
+                self.typing_opened = None;
+                return;
+            }
+        }
+        let opening = self.typing_opened.map(|(_, i)| i) != Some(index);
+        if opening {
+            self.typing_opened = showing.map(|doc| (doc, index));
+            self.status = "Type the words. Click anywhere else on the sheet, or press Esc, when they're done.".into();
+        }
+        let fit = self.typing_fit == Some(index);
+        let canvas = self.last_canvas_whole;
         let Some(doc) = self.doc_mut() else {
             self.editing_text = None;
             return;
@@ -389,6 +414,13 @@ impl App {
             self.editing_text = None;
             return;
         };
+        let mut text = mark.markup.contents();
+        let before = text.clone();
+
+        // The box to its words before it is drawn: they may have been given
+        // a new size or font from the toolbar since the last frame.
+        size_to_words(doc, index, &text, fit);
+        let Some(mark) = doc.marks.get(index) else { return };
         let frame = doc.frame();
         let Some(b) = crate::grips::bounding(&frame.points_to_sheet(&mark.markup.points())) else {
             self.editing_text = None;
@@ -398,55 +430,206 @@ impl App {
             doc.view.to_screen([b[0] as f32, b[1] as f32]),
             doc.view.to_screen([b[2] as f32, b[3] as f32]),
         );
+        let zoom = doc.view.zoom;
         let setting = annot::text::Setting::of(&mark.markup);
-        let size = (setting.size as f32 * doc.view.zoom).clamp(6.0, 120.0);
+        let border = mark.markup.width().max(0.0) as f32 * zoom;
+        // The same room off the edges that the saved drawing leaves.
+        let pad = 2.0 * zoom + border;
+        let size = (setting.size as f32 * zoom).max(2.0);
+        let leading = setting.size as f32 * 1.18 * zoom;
         let ink = Color32::from_rgb(
             (setting.colour[0] * 255.0) as u8,
             (setting.colour[1] * 255.0) as u8,
             (setting.colour[2] * 255.0) as u8,
         );
-        let mut text = mark.markup.contents();
-        let inner = egui::vec2((rect.width() - 8.0).max(60.0), (rect.height() - 8.0).max(size + 4.0));
-        let shown = egui::Area::new(egui::Id::new(("typing-in-place", doc.id, index)))
+        let family = match (setting.family, setting.bold) {
+            (annot::text::Family::Courier, _) => egui::FontFamily::Monospace,
+            (_, true) => egui::FontFamily::Name(ui::chrome::SHEET_TEXT_BOLD.into()),
+            (_, false) => egui::FontFamily::Name(ui::chrome::SHEET_TEXT.into()),
+        };
+        let halign = match setting.across {
+            annot::text::Across::Left => egui::Align::LEFT,
+            annot::text::Across::Middle => egui::Align::Center,
+            annot::text::Across::Right => egui::Align::RIGHT,
+        };
+        let line = egui::Stroke::new((size * 0.06).max(0.6), ink);
+        let (underline, strike, italic) = (setting.underline, setting.strike, setting.italic);
+        let inner = egui::vec2((rect.width() - pad * 2.0).max(size), (rect.height() - pad * 2.0).max(leading));
+        // A box that grows does not wrap: its lines end where they are ended.
+        let wrap = if fit { f32::INFINITY } else { inner.x };
+        let mut layouter = move |ui: &egui::Ui, buffer: &dyn egui::TextBuffer, _width: f32| {
+            let mut job = egui::text::LayoutJob::single_section(
+                buffer.as_str().to_owned(),
+                egui::TextFormat {
+                    font_id: egui::FontId::new(size, family.clone()),
+                    color: ink,
+                    line_height: Some(leading),
+                    italics: italic,
+                    underline: if underline { line } else { egui::Stroke::NONE },
+                    strikethrough: if strike { line } else { egui::Stroke::NONE },
+                    ..Default::default()
+                },
+            );
+            job.wrap.max_width = wrap;
+            job.halign = halign;
+            ui.fonts(|f| f.layout_job(job))
+        };
+        let edit_id = egui::Id::new(("typing-in-place", doc.id, index));
+        let shown = egui::Area::new(egui::Id::new(("typing-area", doc.id, index)))
             .order(egui::Order::Foreground)
             .fixed_pos(rect.min)
             .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 235))
-                    .stroke(egui::Stroke::new(1.5, accent))
-                    .inner_margin(egui::Margin::same(3))
-                    .show(ui, |ui| {
-                        let typed = ui.add(
-                            egui::TextEdit::multiline(&mut text)
-                                .frame(false)
-                                .font(egui::FontId::proportional(size))
-                                .text_color(ink)
-                                .desired_width(inner.x)
-                                .min_size(inner),
-                        );
-                        typed.request_focus();
-                    });
+                let (whole, _) = ui.allocate_exact_size(rect.size(), egui::Sense::hover());
+                // The paper under the words, inside the box's own border, so
+                // the words being typed are read against white and the
+                // border still shows round them.
+                ui.painter().rect_filled(
+                    whole.shrink(border),
+                    0.0,
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 235),
+                );
+                let area = egui::Rect::from_min_size(whole.min + egui::vec2(pad, pad), inner);
+                let typed = ui.put(
+                    area,
+                    egui::TextEdit::multiline(&mut text)
+                        .id(edit_id)
+                        .frame(false)
+                        .margin(egui::Margin::ZERO)
+                        .desired_width(if fit { inner.x.max(size) } else { inner.x })
+                        .min_size(inner)
+                        .text_color(ink)
+                        .layouter(&mut layouter),
+                );
+                // The keyboard stays with the words, unless somebody has gone
+                // to type in another box, such as the toolbar's size. Asked
+                // for only when it is not already here: asking again each
+                // frame starts the focus afresh and forgets the filter below.
+                let typing_elsewhere = ctx.memory(|m| m.focused()).is_some_and(|f| {
+                    f != edit_id && egui::TextEdit::load_state(ctx, f).is_some()
+                });
+                if (opening || !typing_elsewhere) && !typed.has_focus() {
+                    typed.request_focus();
+                }
+                // Esc is for finishing, below, not for egui to take the
+                // keyboard away first: that dropped whatever was typed in the
+                // same moment as the Esc.
+                ctx.memory_mut(|m| {
+                    m.set_focus_lock_filter(
+                        edit_id,
+                        egui::EventFilter {
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            tab: false,
+                            escape: true,
+                        },
+                    )
+                });
             });
-        let area = shown.response.rect;
-        let finished = ctx.input(|i| {
-            i.key_pressed(egui::Key::Escape)
-                || (i.modifiers.command && i.key_pressed(egui::Key::Enter))
-                || (i.pointer.any_pressed()
-                    && i.pointer.interact_pos().is_some_and(|p| !area.contains(p)))
+        let area = shown.response.rect.union(rect);
+        let keys = ctx.input(|i| {
+            i.key_pressed(egui::Key::Escape) || (i.modifiers.command && i.key_pressed(egui::Key::Enter))
         });
-        if let Some(mark) = doc.marks.get_mut(index) {
-            if mark.markup.contents() != text {
-                mark.markup.set_contents(&text);
-                mark.markup.dict.remove("AP");
-                mark.changed = true;
-                doc.dirty = true;
+        // A press on the sheet itself, outside the words. Not one on a
+        // toolbar, a panel or a list that has opened over the sheet: those
+        // change the words being typed rather than end them.
+        let clicked_away = !opening
+            && ctx.input(|i| i.pointer.any_pressed())
+            && ctx.input(|i| i.pointer.interact_pos()).is_some_and(|p| {
+                !area.expand(4.0).contains(p)
+                    && canvas.contains(p)
+                    && ctx.layer_id_at(p).is_none_or(|layer| layer.order == egui::Order::Background)
+            });
+        // Letters that came in the same moment as that click. egui takes the
+        // keyboard off a box as soon as there is a press anywhere else, before
+        // the box has read them, so they are put in here rather than lost.
+        if clicked_away && text == before {
+            let late = ctx.input(|i| {
+                let mut late = String::new();
+                for event in &i.events {
+                    match event {
+                        egui::Event::PointerButton { pressed: true, .. } => break,
+                        egui::Event::Text(t) => late.push_str(t),
+                        egui::Event::Key { key: egui::Key::Enter, pressed: true, .. } => late.push('\n'),
+                        _ => {}
+                    }
+                }
+                late
+            });
+            if !late.is_empty() {
+                let at = egui::TextEdit::load_state(ctx, edit_id)
+                    .and_then(|state| state.cursor.char_range())
+                    .map(|range| range.primary.index)
+                    .unwrap_or_else(|| text.chars().count());
+                let byte = text.char_indices().nth(at).map(|(b, _)| b).unwrap_or(text.len());
+                text.insert_str(byte, &late);
             }
         }
-        if finished {
-            self.editing_text = None;
-            self.status = "Double-click a text box to change its words again.".into();
-            self.save_soon();
+        if let Some(doc) = self.doc_mut() {
+            let typed = doc.marks.get(index).is_some_and(|m| m.markup.contents() != text);
+            if typed {
+                if let Some(mark) = doc.marks.get_mut(index) {
+                    mark.markup.set_contents(&text);
+                    mark.markup.dict.remove("AP");
+                    mark.changed = true;
+                }
+                doc.dirty = true;
+                // And the box to what was just typed, drawn next frame.
+                if size_to_words(doc, index, &text, fit) {
+                    ctx.request_repaint();
+                }
+            }
         }
+        if keys || clicked_away {
+            self.finish_typing(clicked_away);
+        }
+    }
+
+    /// Ends typing on the sheet. A box left with no words and nothing
+    /// pointing out of it goes, as it does in Revu, rather than staying as an
+    /// empty rectangle. The words tools go back to picking things up, so the
+    /// box can be moved or sized straight away and the next click does not
+    /// start another one.
+    pub(crate) fn finish_typing(&mut self, clicked_away: bool) {
+        let Some(index) = self.editing_text.take() else { return };
+        self.typing_fit = None;
+        self.typing_opened = None;
+        self.finishing_click = clicked_away;
+        let mut emptied = false;
+        if let Some(doc) = self.doc_mut() {
+            let lone = doc.marks.get(index).is_some_and(|m| {
+                m.markup.subtype() == annot::Subtype::FreeText
+                    && !m.markup.dict.has("CL")
+                    && !m.markup.dict.has(crate::groups::PART_OF)
+                    && m.markup.contents().trim().is_empty()
+            });
+            if lone {
+                // Put down and left empty: the step that put it down goes too,
+                // so Undo is not spent on nothing.
+                let just_drawn = doc
+                    .undo
+                    .last()
+                    .is_some_and(|step| step.what.starts_with("Draw ") && step.marks.len() <= index);
+                if just_drawn {
+                    doc.undo.pop();
+                }
+                if let Some(mark) = doc.marks.get_mut(index) {
+                    mark.gone = true;
+                }
+                doc.choose(None);
+                doc.dirty = true;
+                emptied = true;
+            }
+        }
+        if matches!(self.tool, Tool::Text | Tool::Typewriter | Tool::Callout | Tool::CloudPlus) {
+            self.tool = Tool::Select;
+            self.chrome.tool = "Select".into();
+        }
+        self.status = if emptied {
+            "Nothing was typed, so the box was taken away.".into()
+        } else {
+            "Double-click the words to change them. Drag them to move them.".into()
+        };
+        self.save_soon();
     }
 
     pub fn text_dialog(&mut self, ctx: &egui::Context) {
@@ -2189,6 +2372,9 @@ impl App {
                 other => {
                     // Tools change what the canvas does.
                     if let Some(tool) = tool_for(other) {
+                        // Words half typed on the sheet are finished, not
+                        // left open under a tool that cannot type in them.
+                        self.finish_typing(false);
                         self.finish_draft();
                         // Putting Dynamic Fill down forgets the boundaries
                         // somebody struck for it. They belong to that fill,
@@ -2381,6 +2567,26 @@ impl App {
 /// A line of context with the matched words picked out, so somebody scanning
 /// the list can see what they actually found rather than the same word twenty
 /// times.
+/// Sizes the text box being typed into to its words. One put down with a
+/// click follows them: as wide as the longest line and as tall as the lines,
+/// held by the side its leader comes in on. One dragged out keeps its width
+/// and gets taller as its lines wrap past the bottom, rather than running
+/// out of it. Comes back true when the box changed.
+fn size_to_words(doc: &mut crate::sheet::Doc, index: usize, text: &str, fit: bool) -> bool {
+    let Some(mark) = doc.marks.get_mut(index) else { return false };
+    let changed = if fit {
+        crate::grips::fit_to_words(&mut mark.markup, text)
+    } else {
+        crate::grips::taller_for_words(&mut mark.markup, text)
+    };
+    if changed {
+        mark.markup.dict.remove("AP");
+        mark.changed = true;
+        doc.dirty = true;
+    }
+    changed
+}
+
 fn context_line(
     ui: &egui::Ui,
     hit: &crate::render::Hit,

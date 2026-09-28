@@ -341,14 +341,20 @@ impl Draft {
 
         // A callout points at what it is about. The first click is the thing,
         // the last is where the words go, and the box is only the last part.
+        //
+        // The box goes out from the second click, away from what it points
+        // at, with the leader meeting the middle of its near side. It starts
+        // one line high and grows as the words are typed.
         if self.tool == Tool::Callout && points.len() >= 2 {
+            let tip = points[0];
             let box_at = points[points.len() - 1];
-            markup.set_box([
-                box_at[0],
-                box_at[1] - 54.0,
-                box_at[0] + 200.0,
-                box_at[1],
-            ]);
+            let (w, h) = (96.0, 20.0);
+            let (x0, x1) = if box_at[0] >= tip[0] {
+                (box_at[0], box_at[0] + w)
+            } else {
+                (box_at[0] - w, box_at[0])
+            };
+            markup.set_box([x0, box_at[1] - h * 0.5, x1, box_at[1] + h * 0.5]);
             let leader: Vec<pdf::Object> = points[..points.len() - 1]
                 .iter()
                 .chain(std::iter::once(&box_at))

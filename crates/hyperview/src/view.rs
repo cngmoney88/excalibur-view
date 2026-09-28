@@ -1077,6 +1077,7 @@ impl App {
         doc.dirty = true;
         doc.choose(Some(head));
         self.editing_text = Some(typed);
+        self.typing_fit = Some(typed);
         self.status = "Type what the cloud is about. Click anywhere else when it's done.".into();
     }
 
@@ -1087,6 +1088,14 @@ impl App {
         // Words being typed into a box on the sheet have the pointer to
         // themselves; a click elsewhere finishes them and does nothing else.
         if self.typing_in_place() {
+            return;
+        }
+        // That click, still on its way up. Letting it through put a fresh
+        // empty text box wherever somebody clicked to finish the last one.
+        if self.finishing_click {
+            if !ui.input(|i| i.pointer.any_down()) {
+                self.finishing_click = false;
+            }
             return;
         }
         let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) else {
@@ -1363,6 +1372,15 @@ impl App {
                 }
                 if response.clicked() {
                     self.push_point(at);
+                    // A callout is two clicks, what it is about and where
+                    // the words go, and then the words: the way Revu's is.
+                    let two = self
+                        .doc()
+                        .and_then(|d| d.draft.as_ref())
+                        .is_some_and(|d| d.points.len() >= 2);
+                    if tool == Tool::Callout && two {
+                        self.finish_draft();
+                    }
                 }
                 return;
             }
@@ -1406,14 +1424,35 @@ impl App {
                     }
                 }
             }
+            // Dragged out, a text box is the size it was dragged and its
+            // words wrap inside it. Put down with a click, it starts small and
+            // grows with the words, the way Revu's does. Either way the words
+            // are typed straight away, on the sheet, where they will be.
             Tool::Text | Tool::Typewriter => {
-                if response.clicked() {
+                if response.drag_started() {
+                    self.dragged_box = Some(at);
                     self.start_draft();
-                    self.push_point(at);
-                    self.push_point([at[0] + 220.0, at[1] + 60.0]);
-                    self.finish_draft();
-                    let doc = self.doc_mut().unwrap();
-                    self.editing_text = doc.marks.len().checked_sub(1);
+                    self.set_points(vec![at, at]);
+                } else if response.dragged() && self.dragged_box.is_some() {
+                    if let Some(from) = self.dragged_box {
+                        self.set_points(vec![from, at]);
+                    }
+                } else if response.drag_stopped() && self.dragged_box.is_some() {
+                    let from = self.dragged_box.take().unwrap_or(at);
+                    if a_real_drag(from, at, self.zoom_now()) {
+                        self.set_points(vec![from, at]);
+                        self.finish_draft();
+                        let doc = self.doc_mut().unwrap();
+                        self.editing_text = doc.marks.len().checked_sub(1);
+                        self.typing_fit = None;
+                    } else {
+                        if let Some(doc) = self.doc_mut() {
+                            doc.draft = None;
+                        }
+                        self.put_text_box(from);
+                    }
+                } else if response.clicked() {
+                    self.put_text_box(at);
                 }
             }
             Tool::Eraser => {
@@ -1656,6 +1695,17 @@ impl App {
 
     /// The four corners of the box between two opposite ones, going round it
     /// rather than crossing over.
+    /// A text box put down with a click: small, at the click, and made to
+    /// grow with its words as they are typed.
+    fn put_text_box(&mut self, at: [f64; 2]) {
+        self.start_draft();
+        self.set_points(vec![at, [at[0] + 72.0, at[1] + 20.0]]);
+        self.finish_draft();
+        let typed = self.doc().and_then(|d| d.marks.len().checked_sub(1));
+        self.editing_text = typed;
+        self.typing_fit = typed;
+    }
+
     fn set_box(&mut self, from: [f64; 2], to: [f64; 2]) {
         self.set_points(vec![from, [to[0], from[1]], to, [from[0], to[1]]]);
     }
@@ -1764,9 +1814,11 @@ impl App {
         let at = doc.marks.len() - 1;
         doc.choose(Some(at));
 
-        // A callout is for its words: they are typed straight into its box.
+        // A callout is for its words: they are typed straight into its box,
+        // and the box grows with them.
         if tool == Tool::Callout {
             self.editing_text = Some(at);
+            self.typing_fit = Some(at);
         }
 
         // A volume is an area with a depth, and without the depth it is not a
@@ -2214,6 +2266,24 @@ impl App {
                     picture: false,
                 },
             );
+            // A callout waiting for where its words go: the leader runs from
+            // what it points at to the pointer, with the box on the end of it,
+            // out from the pointer and away from the tip, as it will be put.
+            if draft.tool == Tool::Callout && draft.points.len() == 1 {
+                if let Some(pointer) = painter.ctx().input(|i| i.pointer.hover_pos()) {
+                    let tip = doc.view.to_screen([draft.points[0][0] as f32, draft.points[0][1] as f32]);
+                    let stroke = Stroke::new(1.5, colour);
+                    painter.line_segment([tip, pointer], stroke);
+                    let (w, h) = (96.0 * doc.view.zoom, 20.0 * doc.view.zoom);
+                    let x0 = if pointer.x >= tip.x { pointer.x } else { pointer.x - w };
+                    painter.rect_stroke(
+                        Rect::from_min_size(pos2(x0, pointer.y - h * 0.5), vec2(w, h)),
+                        0.0,
+                        stroke,
+                        egui::StrokeKind::Middle,
+                    );
+                }
+            }
             // A Cloud+ waiting for where its words go: the leader and the box
             // follow the pointer until the click.
             if self.cloud_waiting && draft.points.len() == 2 {
@@ -2570,7 +2640,10 @@ fn paint_shape(painter: &egui::Painter, view: &View, sheet: &[[f64; 2]], look: &
             if let Some(fill) = interior {
                 painter.rect_filled(rect, 0.0, fill);
             }
-            if !look.picture {
+            // A text box with no border has none on the screen either: a
+            // Typewriter's words sit on the sheet with nothing round them.
+            let borderless = subtype == S::FreeText && width <= 0.0;
+            if !look.picture && !borderless {
                 painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Middle);
             }
         }

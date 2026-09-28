@@ -164,6 +164,9 @@ impl Tool {
                 | Tool::Strikethrough
                 | Tool::Squiggly
                 | Tool::Snapshot
+                // Words go where they are put, not onto the nearest line end.
+                | Tool::Text
+                | Tool::Typewriter
         )
     }
 
@@ -604,6 +607,16 @@ pub struct App {
     pub denominator: u32,
     pub calibrating: Option<Calibrating>,
     pub editing_text: Option<usize>,
+    /// The text box whose size follows its words while they are typed: one
+    /// put down with a click rather than dragged out, the way Revu's is.
+    pub typing_fit: Option<usize>,
+    /// Which drawing and box the words on the sheet were opened for. The first frame
+    /// of a box is when the click that made it may still be in the input,
+    /// and that click is not somebody clicking away.
+    pub typing_opened: Option<(u64, usize)>,
+    /// The click that finished typing on the sheet. It finishes the words and
+    /// does nothing else: it does not start another box where it landed.
+    pub finishing_click: bool,
     pub show_takeoff: bool,
     pub show_sheets: bool,
     pub last_tile_millis: u128,
@@ -888,6 +901,9 @@ impl App {
             denominator: 16,
             calibrating: None,
             editing_text: None,
+            typing_fit: None,
+            typing_opened: None,
+            finishing_click: false,
             show_takeoff: false,
             show_sheets: true,
             last_tile_millis: 0,
@@ -1916,6 +1932,11 @@ impl App {
 
     fn autosave(&mut self) {
         const QUIET: std::time::Duration = std::time::Duration::from_secs(5);
+        // Not in the middle of words being typed on the sheet. Finishing them
+        // saves straight away.
+        if self.editing_text.is_some() {
+            return;
+        }
         let Some(doc) = self.doc() else {
             self.settled = None;
             return;

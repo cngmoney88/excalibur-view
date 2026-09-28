@@ -61,4 +61,12 @@ Steel models (IFC) are read and drawn with ifc-lite, the `ifc-lite-core` and
 build gets it: https://crates.io/crates/ifc-lite-core and
 https://crates.io/crates/ifc-lite-geometry.
 
+## Fonts
+
+The program carries three small fonts, each cut down from a free font and
+renamed, as their licenses ask of a modified copy. "Excalibur Symbols" and
+"Excalibur Classic" come from DejaVu Sans, under the Bitstream Vera license.
+"Excalibur Text", used for words typed on a sheet, comes from Liberation Sans
+under the SIL Open Font License 1.1. The licenses are in `crates/ui/fonts`.
+
 Excalibur Construction Technologies · Pueblo, Colorado · hello@excaliburct.com

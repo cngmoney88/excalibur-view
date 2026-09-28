@@ -220,9 +220,34 @@ pub fn fonts(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::new("excalibur-classic-type"), false));
 }
 
+/// The type words are typed in on the sheet: Liberation Sans, cut down and
+/// renamed (see `fonts/LICENSE-text.txt`). It has Helvetica's widths, which is
+/// what a text box's words are written in, so a line typed on the sheet ends
+/// where the saved drawing will end it rather than a few letters either side.
+static TEXT: &[u8] = include_bytes!("../fonts/text.ttf");
+static TEXT_BOLD: &[u8] = include_bytes!("../fonts/text-bold.ttf");
+
+/// The font family for words being typed onto a sheet, and its bold.
+pub const SHEET_TEXT: &str = "excalibur-text";
+pub const SHEET_TEXT_BOLD: &str = "excalibur-text-bold";
+
 fn set_fonts(ctx: &egui::Context, classic: bool) {
     let mut fonts = egui::FontDefinitions::default();
     crate::classic::add_fonts(&mut fonts, classic);
+    let proportional = fonts
+        .families
+        .get(&egui::FontFamily::Proportional)
+        .cloned()
+        .unwrap_or_default();
+    for (name, data) in [(SHEET_TEXT, TEXT), (SHEET_TEXT_BOLD, TEXT_BOLD)] {
+        fonts
+            .font_data
+            .insert(name.into(), std::sync::Arc::new(egui::FontData::from_static(data)));
+        // Anything the cut-down font lacks falls back to the ordinary type.
+        let mut family = vec![name.to_string()];
+        family.extend(proportional.iter().cloned());
+        fonts.families.insert(egui::FontFamily::Name(name.into()), family);
+    }
     fonts.font_data.insert(
         "excalibur-symbols".into(),
         std::sync::Arc::new(egui::FontData::from_static(SYMBOLS)),

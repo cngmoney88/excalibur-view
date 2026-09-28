@@ -547,6 +547,20 @@ they travel with them. Undo writes the root back as it was. Everything the
 window keeps by a sheet's place in the set, from its thumbnail to its sheet
 number, is carried to the sheet's new place rather than read again.
 
+**Words are typed on the sheet, where they will be.** A text box put down with
+a click grows with its words; one dragged out keeps its width and gets taller
+as they wrap. The words are typed in "Excalibur Text", Liberation Sans cut down
+to the characters a PDF's standard fonts can show and renamed in
+`crates/ui/fonts`, because it has Helvetica's widths: a line typed on the
+screen wraps where the saved text box will wrap it. The size, colour, weight
+and alignment are the markup's own, so the toolbar changes them mid-word. The
+first frame of a box ignores the pointer, since a quick click puts its press
+and release in one frame and that press is not a click away. A click on the
+sheet outside the box finishes it and does nothing else, the words tools hand
+back to Select, and a box left empty goes. A callout is two clicks, and its
+box, like a Cloud+'s words, grows away from the side its leader meets.
+Autosave waits while words are being typed.
+
 ## 6c. The server, the API and updates
 
 Hyperview is built to be sold as well as used. A company runs one

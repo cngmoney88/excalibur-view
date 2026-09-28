@@ -1,0 +1,29 @@
+Typing on the sheet works: click and type, and the words stay where you put them.
+
+TYPING ON THE SHEET
+
+Pick Text Box and click where the words go, then type. The words go on the
+sheet as you type them, in their own size, colour and weight, and the box
+grows with them. Enter starts a new line. Drag out a box instead and the
+words wrap inside it; the box gets taller as they run past the bottom.
+
+Click anywhere else on the sheet, or press Esc, when you're done. You're
+back to picking things up, so the box can be moved or sized straight away.
+A box left with nothing typed in it goes away. Double-click the words to
+change them.
+
+The toolbar's font, size, colour, bold, italic and alignment change the
+words while you're still typing them.
+
+A callout is two clicks now, the thing it's about and where the words go,
+and then you type. Its box grows away from what it points at, and the
+leader stays on the middle of its side. The words of a Cloud+ grow the
+same way. Typewriter words have nothing drawn round them, on the screen as
+well as on paper.
+
+FIXED
+
+Words typed into a new text box could go nowhere. A quick click put the
+box down and closed it in the same moment, so the typing landed on the
+shortcuts instead. Clicking away to finish a box also put down another
+empty one where you clicked.
