@@ -49,9 +49,9 @@ use serde::{Deserialize, Serialize};
 use crate::api::{Server, Shared};
 use crate::VERSION;
 
-/// The header the Fleet signs its requests with. Named for Citadel because
-/// that is what the Fleet sends, and inventing a second name for the same
-/// header would mean per-product code in the Fleet.
+/// The header the Fleet signs its requests with. The name is the one the
+/// Fleet already sends, and inventing a second name for the same header
+/// would mean per-product code in the Fleet.
 pub const KEY_HEADER: &str = "x-av-update-key";
 
 /// Where the digest of a Fleet key an administrator turned on is kept.

@@ -274,9 +274,9 @@ into the program; nothing is sent anywhere to do it (`crates/server/src/license.
   are told 30 days before updates end, and after; nothing stops working.
 - **Founding installs:** a server that was already in use before licensing
   (people on it from before 1 October 2026 the first time a licensing version
-  starts) is Office for good — every user, every update, no file needed. A founding license
-  file
-  (`publish.py sign-license --founding`) covers a fresh install on new hardware.
+  starts) is Office for good — every user, every update, no file needed. A
+  founding license file (`publish.py sign-license --founding`) covers a fresh
+  install on new hardware.
 
 Licenses are signed on the publisher's PC with `tools/publish.py sign-license`,
 by the same key as releases; the signed text starts differently, so one can

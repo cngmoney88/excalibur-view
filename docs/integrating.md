@@ -57,8 +57,8 @@ use plugin_api::{plugin, Input, Manifest, Output, Command, Level, Finding};
 
 fn manifest() -> Manifest {
     Manifest {
-        id: "mesafab-estimating".into(),   // short, permanent, letters/digits/dashes
-        name: "Mesa Fab Estimating".into(),
+        id: "example-checks".into(),   // short, permanent, letters/digits/dashes
+        name: "Example Checks".into(),
         version: "1.0.0".into(),
         publisher: "Example Steel, Inc.".into(),
         description: "Our own checks.".into(),

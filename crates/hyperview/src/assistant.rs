@@ -54,6 +54,13 @@ pub struct Connection {
 /// The name Hyperview goes by in the assistant app's list.
 pub const SERVER_NAME: &str = "excalibur-hyperview";
 
+// Where the assistant app this connects to keeps its list of connectors, and
+// what its process is called. These are its names, not ours.
+const APP_FOLDER: &str = "Claude";
+const SETTINGS_FILE: &str = "claude_desktop_config.json";
+const STORE_PACKAGES: [&str; 2] = ["Claude_", "AnthropicClaude"];
+const PROCESS: &str = "claude";
+
 fn home_folder() -> Option<PathBuf> {
     crate::install::home().or_else(|| {
         directories::ProjectDirs::from("com", "Excalibur", "Hyperview").map(|d| d.data_local_dir().to_path_buf())
@@ -89,9 +96,9 @@ fn kept() -> Option<Connection> {
 pub fn assistant_app_settings() -> Vec<PathBuf> {
     let mut found = Vec::new();
     if let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) {
-        let folder = roaming.join("Claude");
+        let folder = roaming.join(APP_FOLDER);
         if folder.is_dir() {
-            found.push(folder.join("claude_desktop_config.json"));
+            found.push(folder.join(SETTINGS_FILE));
         }
     }
     // The Microsoft Store version keeps its own, in its package's folder.
@@ -99,10 +106,10 @@ pub fn assistant_app_settings() -> Vec<PathBuf> {
         if let Ok(entries) = std::fs::read_dir(local.join("Packages")) {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("Claude_") || name.starts_with("AnthropicClaude") {
-                    let folder = entry.path().join("LocalCache").join("Roaming").join("Claude");
+                if STORE_PACKAGES.iter().any(|p| name.starts_with(p)) {
+                    let folder = entry.path().join("LocalCache").join("Roaming").join(APP_FOLDER);
                     if folder.is_dir() {
-                        found.push(folder.join("claude_desktop_config.json"));
+                        found.push(folder.join(SETTINGS_FILE));
                     }
                 }
             }
@@ -851,11 +858,11 @@ fn assistant_app_running() -> bool {
         use std::os::windows::process::CommandExt;
         const NO_WINDOW: u32 = 0x0800_0000;
         let listed = std::process::Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq claude.exe", "/NH"])
+            .args(["/FI", &format!("IMAGENAME eq {PROCESS}.exe"), "/NH"])
             .creation_flags(NO_WINDOW)
             .output();
         if let Ok(o) = listed {
-            return String::from_utf8_lossy(&o.stdout).to_lowercase().contains("claude.exe");
+            return String::from_utf8_lossy(&o.stdout).to_lowercase().contains(&format!("{PROCESS}.exe"));
         }
         false
     }
@@ -864,7 +871,7 @@ fn assistant_app_running() -> bool {
         std::process::Command::new("ps")
             .arg("-A")
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("claude"))
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains(PROCESS))
             .unwrap_or(false)
     }
 }
@@ -882,7 +889,7 @@ mod tests {
     #[test]
     fn hyperview_is_added_and_nothing_else_is_touched() {
         let dir = scratch("add");
-        let settings = dir.join("claude_desktop_config.json");
+        let settings = dir.join(SETTINGS_FILE);
         std::fs::write(
             &settings,
             r#"{"mcpServers":{"excalibur-fleet":{"command":"C:\\Fleet\\FleetMcp.exe"}},"sidebarMode":"chat"}"#,
@@ -900,7 +907,7 @@ mod tests {
         add_to(&settings, &program).unwrap();
         let again = read_settings(&settings).unwrap();
         assert_eq!(again["mcpServers"].as_object().unwrap().len(), 2);
-        assert!(dir.join("claude_desktop_config.json.before-hyperview").exists());
+        assert!(dir.join(format!("{SETTINGS_FILE}.before-hyperview")).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -910,7 +917,7 @@ mod tests {
         // PowerShell 5 write. The old connector refused the file outright, and
         // it was the one the assistant app reads.
         let dir = scratch("bom");
-        let settings = dir.join("claude_desktop_config.json");
+        let settings = dir.join(SETTINGS_FILE);
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(br#"{"mcpServers":{"excalibur-fleet":{"command":"fleet.exe"}}}"#);
         std::fs::write(&settings, bytes).unwrap();
@@ -928,7 +935,7 @@ mod tests {
     #[test]
     fn a_settings_file_that_is_not_json_is_left_alone() {
         let dir = scratch("bad");
-        let settings = dir.join("claude_desktop_config.json");
+        let settings = dir.join(SETTINGS_FILE);
         std::fs::write(&settings, "{ this is not json").unwrap();
         assert!(add_to(&settings, Path::new("Hyperview.exe")).is_err());
         assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{ this is not json");

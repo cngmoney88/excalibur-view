@@ -23,8 +23,10 @@
 #         --key ~/private/AuthKey_XXXXXXXX.p8 \
 #         --key-id XXXXXXXX --issuer XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX
 #
-# Set these two, or pass them in the environment:
-: "${SIGN_IDENTITY:=Developer ID Application: Your Name (TEAMID)}"
+# Set these two, or pass them in the environment. SIGN_IDENTITY is the
+# certificate's full name as Keychain Access shows it,
+# "Developer ID Application: <name> (<team id>)".
+: "${SIGN_IDENTITY:?set SIGN_IDENTITY to the Developer ID Application certificate name}"
 : "${NOTARY_PROFILE:=excalibur-notary}"
 # Where the notary profile is stored. Empty means the login keychain, which is
 # right on a Mac somebody is sitting at. A build on a machine with nobody in
