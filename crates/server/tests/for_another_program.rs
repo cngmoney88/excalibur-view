@@ -46,12 +46,14 @@ fn start() -> Running {
     };
     let store = Store::open(&config.database(), &config.blobs()).expect("a store");
     let hashed = auth::hash_password("brace-gusset-purlin-shim-42").unwrap();
+    // The office's first person was added before licensing began, so it is a
+    // founding install whatever today's date is.
     store
         .with(|db| {
             db.execute(
                 "INSERT INTO people (id, name, email, password, role, created)
                  VALUES (?1, 'Sam', 'sam@example.com', ?2, 'admin', ?3)",
-                params![api::fresh_id("usr"), hashed, api::now()],
+                params![api::fresh_id("usr"), hashed, "2026-09-01T00:00:00Z"],
             )?;
             Ok(())
         })
