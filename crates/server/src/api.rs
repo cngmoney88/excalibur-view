@@ -22,6 +22,12 @@ use crate::quantities::{self, SheetScale, Stored};
 use crate::store::{is_digest, Store};
 use crate::{Config, VERSION};
 
+/// What a client sent with a request whose handler has no use for it. Reading
+/// it anyway keeps the connection open for the next request: a body left
+/// unread makes the server close the connection, and a Mac reports that to
+/// the program that asked as "Invalid argument".
+type Unused = axum::body::Bytes;
+
 pub struct Server {
     pub store: Store,
     pub config: Config,
@@ -826,6 +832,7 @@ async fn change_remote(
 async fn turn_remote_off(
     State(server): State<Shared>,
     headers: HeaderMap,
+    _sent: Unused,
 ) -> Answer<Json<hub::Remote>> {
     let who = administrator(&server, &headers)?;
     server.tunnel.stop();
@@ -1512,6 +1519,7 @@ async fn test_notice(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<serde_json::Value>> {
     administrator(&server, &headers)?;
     let tried = server.clone();
@@ -1526,6 +1534,7 @@ async fn remove_notice(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<serde_json::Value>> {
     let who = administrator(&server, &headers)?;
     let gone = server
@@ -1755,6 +1764,7 @@ async fn revoke_key(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<serde_json::Value>> {
     let who = person(&server, &headers)?;
     let gone = server
@@ -2245,6 +2255,7 @@ async fn remove_plugin(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<serde_json::Value>> {
     let who = administrator(&server, &headers)?;
     let gone = server
@@ -2625,6 +2636,7 @@ async fn remove_person(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<serde_json::Value>> {
     let who = administrator(&server, &headers)?;
     if id == who.id {
@@ -2682,7 +2694,7 @@ async fn remove_person(
 /// Before this, signing out dropped the connection in the program and left the
 /// token working for another thirty days. Anybody who had it — a shared
 /// machine, a stolen laptop — still had the shop's drawings.
-async fn sign_out(State(server): State<Shared>, headers: HeaderMap) -> Answer<Json<serde_json::Value>> {
+async fn sign_out(State(server): State<Shared>, headers: HeaderMap, _sent: Unused) -> Answer<Json<serde_json::Value>> {
     let who = caller(&server, &headers)?;
     let Some(token) = bearer(&headers) else {
         return Err(Denied::unauthorised());
@@ -3317,6 +3329,7 @@ async fn drop_invite(
     State(server): State<Shared>,
     headers: HeaderMap,
     Path(code): Path<String>,
+    _sent: Unused,
 ) -> Answer<Json<Vec<hub::Invitation>>> {
     let who = administrator(&server, &headers)?;
     server
